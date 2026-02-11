@@ -4,9 +4,8 @@ export {
   wireOk,
   wireErr,
   wireStringSize,
-  wireSize,
 } from "./wire.js";
-export type { WireOk, WireErr, WireResult, WasmWireWriterAllocator } from "./wire.js";
+export type { WireOk, WireErr, WireResult, WasmWireWriterAllocator, WireCodec } from "./wire.js";
 export {
   BoltFFIModule,
   BoltFFIExports,

@@ -395,6 +395,8 @@ export function wireStringSize(value: string): number {
   return 4 + new TextEncoder().encode(value).length;
 }
 
-export function wireSize(value: { wireEncodedSize(): number }): number {
-  return value.wireEncodedSize();
+export interface WireCodec<T> {
+  size(value: T): number;
+  encode(writer: WireWriter, value: T): void;
+  decode(reader: WireReader): T;
 }
