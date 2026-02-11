@@ -54,6 +54,15 @@ export class BoltFFIModule {
     }
   }
 
+  allocBytes(value: Uint8Array): StringAlloc {
+    const ptr = this.exports.boltffi_wasm_alloc(value.length);
+    if (ptr === 0 && value.length > 0) {
+      throw new Error("Failed to allocate memory for bytes");
+    }
+    this.getBytes().set(value, ptr);
+    return { ptr, len: value.length };
+  }
+
   allocWriter(size: number): WriterAlloc {
     const allocator: WasmWireWriterAllocator = {
       alloc: (allocationSize) => this.exports.boltffi_wasm_alloc(allocationSize),

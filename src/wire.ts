@@ -119,6 +119,37 @@ export class WireReader {
     }
     throw readErr();
   }
+
+  readDuration(): Duration {
+    const secs = this.readU64();
+    const nanos = this.readU32();
+    return { secs, nanos };
+  }
+
+  readTimestamp(): Date {
+    const secs = this.readU64();
+    const nanos = this.readU32();
+    const ms = Number(secs) * 1000 + Math.floor(nanos / 1_000_000);
+    return new Date(ms);
+  }
+
+  readUuid(): string {
+    const hi = this.readU64();
+    const lo = this.readU64();
+    const hiHex = hi.toString(16).padStart(16, "0");
+    const loHex = lo.toString(16).padStart(16, "0");
+    const hex = hiHex + loHex;
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  }
+
+  readUrl(): string {
+    return this.readString();
+  }
+}
+
+export interface Duration {
+  secs: bigint;
+  nanos: number;
 }
 
 export type WireOk<T> = { tag: "ok"; value: T };
@@ -388,6 +419,27 @@ export class WireWriter {
     }
     this.writeU8(0);
     writeOk(value as T);
+  }
+
+  writeDuration(value: Duration): void {
+    this.writeU64(value.secs);
+    this.writeU32(value.nanos);
+  }
+
+  writeTimestamp(value: Date): void {
+    const ms = value.getTime();
+    const secs = BigInt(Math.floor(ms / 1000));
+    const nanos = (ms % 1000) * 1_000_000;
+    this.writeU64(secs);
+    this.writeU32(nanos);
+  }
+
+  writeUuid(value: string): void {
+    const hex = value.replace(/-/g, "");
+    const hi = BigInt("0x" + hex.slice(0, 16));
+    const lo = BigInt("0x" + hex.slice(16, 32));
+    this.writeU64(hi);
+    this.writeU64(lo);
   }
 }
 

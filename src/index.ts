@@ -5,7 +5,7 @@ export {
   wireErr,
   wireStringSize,
 } from "./wire.js";
-export type { WireOk, WireErr, WireResult, WasmWireWriterAllocator, WireCodec } from "./wire.js";
+export type { Duration, WireOk, WireErr, WireResult, WasmWireWriterAllocator, WireCodec } from "./wire.js";
 export {
   BoltFFIModule,
   BoltFFIExports,
