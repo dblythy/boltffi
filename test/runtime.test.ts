@@ -245,23 +245,32 @@ describe("BoltFFIModule memory operations", () => {
   it("reads and frees result buffers through descriptor pointer", () => {
     const { module, freedAllocations } = createHarness();
     const payloadPointer = 1024;
+    const payloadCapacity = 32;
     const encodedPayloadWriter = new WireWriter();
     encodedPayloadWriter.writeBytes(Uint8Array.from([10, 11, 12, 13]));
     const encodedPayload = encodedPayloadWriter.getBytes();
     module.writeToMemory(payloadPointer, encodedPayload);
 
     const descriptorPointer = 2048;
-    const descriptorView = new DataView(new ArrayBuffer(8));
+    const descriptorView = new DataView(new ArrayBuffer(12));
     descriptorView.setUint32(0, payloadPointer, true);
     descriptorView.setUint32(4, encodedPayload.length, true);
+    descriptorView.setUint32(8, payloadCapacity, true);
     module.writeToMemory(descriptorPointer, new Uint8Array(descriptorView.buffer));
 
     const reader = module.readerFromBuf(descriptorPointer);
     expect(Array.from(reader.readBytes())).toEqual([10, 11, 12, 13]);
 
     module.freeBuf(descriptorPointer);
-    expect(freedAllocations).toContainEqual([payloadPointer, encodedPayload.length]);
-    expect(freedAllocations).toContainEqual([descriptorPointer, 8]);
+    expect(freedAllocations).toContainEqual([payloadPointer, payloadCapacity]);
+    expect(freedAllocations).toContainEqual([descriptorPointer, 12]);
+  });
+
+  it("freeBufDescriptor releases descriptor allocation only", () => {
+    const { module, freedAllocations } = createHarness();
+    const descriptorPointer = 4096;
+    module.freeBufDescriptor(descriptorPointer);
+    expect(freedAllocations).toContainEqual([descriptorPointer, 12]);
   });
 
   it("allocWriter reallocates when payload outgrows initial capacity", () => {

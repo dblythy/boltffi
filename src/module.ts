@@ -1,6 +1,8 @@
 import { WireReader, WireWriter } from "./wire.js";
 import type { WasmWireWriterAllocator } from "./wire.js";
 
+const FFI_BUF_DESCRIPTOR_SIZE = 12;
+
 export interface BoltFFIExports {
   memory: WebAssembly.Memory;
   boltffi_wasm_abi_version: () => number;
@@ -67,6 +69,20 @@ export class BoltFFIModule {
     writer.release();
   }
 
+  allocBufDescriptor(): number {
+    const ptr = this.exports.boltffi_wasm_alloc(FFI_BUF_DESCRIPTOR_SIZE);
+    if (ptr === 0) {
+      throw new Error("Failed to allocate memory for buffer descriptor");
+    }
+    return ptr;
+  }
+
+  freeBufDescriptor(ptr: number): void {
+    if (ptr !== 0) {
+      this.exports.boltffi_wasm_free(ptr, FFI_BUF_DESCRIPTOR_SIZE);
+    }
+  }
+
   readerFromBuf(bufPtr: number): WireReader {
     const view = this.getView();
     const ptr = view.getUint32(bufPtr, true);
@@ -78,11 +94,11 @@ export class BoltFFIModule {
   freeBuf(bufPtr: number): void {
     const view = this.getView();
     const ptr = view.getUint32(bufPtr, true);
-    const len = view.getUint32(bufPtr + 4, true);
-    if (ptr !== 0 && len !== 0) {
-      this.exports.boltffi_wasm_free(ptr, len);
+    const cap = view.getUint32(bufPtr + 8, true);
+    if (ptr !== 0 && cap !== 0) {
+      this.exports.boltffi_wasm_free(ptr, cap);
     }
-    this.exports.boltffi_wasm_free(bufPtr, 8);
+    this.exports.boltffi_wasm_free(bufPtr, FFI_BUF_DESCRIPTOR_SIZE);
   }
 
   writeToMemory(ptr: number, data: Uint8Array): void {
