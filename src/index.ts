@@ -9,6 +9,9 @@ export type { Duration, WireOk, WireErr, WireResult, WasmWireWriterAllocator, Wi
 export {
   BoltFFIModule,
   BoltFFIExports,
+  BoltFFIImports,
+  PrimitiveBufferAlloc,
+  PrimitiveBufferElementType,
   StringAlloc,
   WriterAlloc,
   instantiateBoltFFI,

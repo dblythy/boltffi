@@ -17,6 +17,27 @@ export interface StringAlloc {
   len: number;
 }
 
+export interface PrimitiveBufferAlloc {
+  ptr: number;
+  len: number;
+  allocationSize: number;
+}
+
+export type PrimitiveBufferElementType =
+  | "bool"
+  | "i8"
+  | "u8"
+  | "i16"
+  | "u16"
+  | "i32"
+  | "u32"
+  | "i64"
+  | "u64"
+  | "isize"
+  | "usize"
+  | "f32"
+  | "f64";
+
 export type WriterAlloc = WireWriter;
 
 export class BoltFFIModule {
@@ -61,6 +82,31 @@ export class BoltFFIModule {
     }
     this.getBytes().set(value, ptr);
     return { ptr, len: value.length };
+  }
+
+  allocPrimitiveBuffer(
+    value: ReadonlyArray<number | bigint | boolean>,
+    elementType: PrimitiveBufferElementType
+  ): PrimitiveBufferAlloc {
+    const bytesPerElement = this.primitiveElementSize(elementType);
+    const elementCount = value.length;
+    const allocationSize = elementCount * bytesPerElement;
+    const ptr = this.exports.boltffi_wasm_alloc(allocationSize);
+    if (ptr === 0 && allocationSize > 0) {
+      throw new Error("Failed to allocate memory for primitive buffer");
+    }
+    const view = this.getView();
+    value.forEach((entry, index) => {
+      const offset = ptr + index * bytesPerElement;
+      this.writePrimitiveElement(view, offset, entry, elementType);
+    });
+    return { ptr, len: elementCount, allocationSize };
+  }
+
+  freePrimitiveBuffer(allocation: PrimitiveBufferAlloc): void {
+    if (allocation.ptr !== 0 && allocation.allocationSize !== 0) {
+      this.exports.boltffi_wasm_free(allocation.ptr, allocation.allocationSize);
+    }
   }
 
   allocWriter(size: number): WriterAlloc {
@@ -110,6 +156,13 @@ export class BoltFFIModule {
     this.exports.boltffi_wasm_free(bufPtr, FFI_BUF_DESCRIPTOR_SIZE);
   }
 
+  writeBufDescriptor(bufPtr: number, dataPtr: number, dataLen: number, dataCap: number): void {
+    const view = this.getView();
+    view.setUint32(bufPtr, dataPtr, true);
+    view.setUint32(bufPtr + 4, dataLen, true);
+    view.setUint32(bufPtr + 8, dataCap, true);
+  }
+
   writeToMemory(ptr: number, data: Uint8Array): void {
     this.getBytes().set(data, ptr);
   }
@@ -117,11 +170,83 @@ export class BoltFFIModule {
   readFromMemory(ptr: number, len: number): Uint8Array {
     return this.getBytes().slice(ptr, ptr + len);
   }
+
+  private primitiveElementSize(elementType: PrimitiveBufferElementType): number {
+    switch (elementType) {
+      case "bool":
+      case "i8":
+      case "u8":
+        return 1;
+      case "i16":
+      case "u16":
+        return 2;
+      case "i32":
+      case "u32":
+      case "isize":
+      case "usize":
+      case "f32":
+        return 4;
+      case "i64":
+      case "u64":
+      case "f64":
+        return 8;
+    }
+  }
+
+  private writePrimitiveElement(
+    view: DataView,
+    offset: number,
+    value: number | bigint | boolean,
+    elementType: PrimitiveBufferElementType
+  ): void {
+    switch (elementType) {
+      case "bool":
+        view.setUint8(offset, value ? 1 : 0);
+        return;
+      case "i8":
+        view.setInt8(offset, Number(value));
+        return;
+      case "u8":
+        view.setUint8(offset, Number(value));
+        return;
+      case "i16":
+        view.setInt16(offset, Number(value), true);
+        return;
+      case "u16":
+        view.setUint16(offset, Number(value), true);
+        return;
+      case "i32":
+      case "isize":
+        view.setInt32(offset, Number(value), true);
+        return;
+      case "u32":
+      case "usize":
+        view.setUint32(offset, Number(value), true);
+        return;
+      case "i64":
+        view.setBigInt64(offset, BigInt(value), true);
+        return;
+      case "u64":
+        view.setBigUint64(offset, BigInt(value), true);
+        return;
+      case "f32":
+        view.setFloat32(offset, Number(value), true);
+        return;
+      case "f64":
+        view.setFloat64(offset, Number(value), true);
+        return;
+    }
+  }
+}
+
+export interface BoltFFIImports {
+  env?: Record<string, WebAssembly.ImportValue>;
 }
 
 export async function instantiateBoltFFI(
   source: BufferSource | Response,
-  expectedVersion: number
+  expectedVersion: number,
+  imports?: BoltFFIImports
 ): Promise<BoltFFIModule> {
   let wasmSource: BufferSource;
 
@@ -131,7 +256,11 @@ export async function instantiateBoltFFI(
     wasmSource = source;
   }
 
-  const { instance } = await WebAssembly.instantiate(wasmSource);
+  const importObject: WebAssembly.Imports = {};
+  if (imports?.env) {
+    importObject.env = imports.env;
+  }
+  const { instance } = await WebAssembly.instantiate(wasmSource, importObject);
   const module = new BoltFFIModule(instance);
 
   const actualVersion = module.exports.boltffi_wasm_abi_version();

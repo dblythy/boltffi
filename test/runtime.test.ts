@@ -295,6 +295,24 @@ describe("BoltFFIModule memory operations", () => {
     expect(freedAllocations).toContainEqual([pointer, capacity]);
   });
 
+  it("allocPrimitiveBuffer writes i32 elements and frees by byte size", () => {
+    const { module, freedAllocations } = createHarness();
+    const allocation = module.allocPrimitiveBuffer([1, -2, 3, -4], "i32");
+
+    expect(allocation.len).toBe(4);
+    expect(allocation.allocationSize).toBe(16);
+
+    const raw = module.readFromMemory(allocation.ptr, allocation.allocationSize);
+    const view = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+    expect(view.getInt32(0, true)).toBe(1);
+    expect(view.getInt32(4, true)).toBe(-2);
+    expect(view.getInt32(8, true)).toBe(3);
+    expect(view.getInt32(12, true)).toBe(-4);
+
+    module.freePrimitiveBuffer(allocation);
+    expect(freedAllocations).toContainEqual([allocation.ptr, allocation.allocationSize]);
+  });
+
   it("throws on use after freeWriter release", () => {
     const { module } = createHarness();
     const writer = module.allocWriter(8);
