@@ -3,6 +3,113 @@ import type { WasmWireWriterAllocator } from "./wire.js";
 
 const FFI_BUF_DESCRIPTOR_SIZE = 12;
 
+export const enum WasmPollStatus {
+  Pending = 0,
+  Ready = 1,
+  Cancelled = -1,
+  Panicked = -2,
+}
+
+export class BoltFFIPanicError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BoltFFIPanicError";
+  }
+}
+
+export class BoltFFICancelledError extends Error {
+  constructor() {
+    super("Future was cancelled");
+    this.name = "BoltFFICancelledError";
+  }
+}
+
+interface PendingFuture {
+  resolve: (handle: number) => void;
+  reject: (error: Error) => void;
+  pollSync: (handle: number) => number;
+  panicMessage: (handle: number) => number;
+  free: (handle: number) => void;
+}
+
+export class AsyncFutureManager {
+  private pendingFutures = new Map<number, PendingFuture>();
+  private wokenHandles = new Set<number>();
+  private drainScheduled = false;
+  private _module: BoltFFIModule | null = null;
+
+  setModule(module: BoltFFIModule): void {
+    this._module = module;
+  }
+
+  wake(handle: number): void {
+    this.wokenHandles.add(handle);
+    if (!this.drainScheduled) {
+      this.drainScheduled = true;
+      queueMicrotask(() => this.drainWakes());
+    }
+  }
+
+  private drainWakes(): void {
+    this.drainScheduled = false;
+    const batch = [...this.wokenHandles];
+    this.wokenHandles.clear();
+    for (const handle of batch) {
+      this.repollHandle(handle);
+    }
+  }
+
+  private repollHandle(handle: number): void {
+    const entry = this.pendingFutures.get(handle);
+    if (!entry) return;
+
+    const status = entry.pollSync(handle);
+    if (status === WasmPollStatus.Ready) {
+      this.pendingFutures.delete(handle);
+      entry.resolve(handle);
+    } else if (status < 0) {
+      this.pendingFutures.delete(handle);
+      entry.reject(this.extractAsyncError(handle, status, entry));
+    }
+  }
+
+  private extractAsyncError(handle: number, status: number, entry: PendingFuture): Error {
+    if (status === WasmPollStatus.Panicked && this._module) {
+      const bufPtr = entry.panicMessage(handle);
+      const reader = this._module.readerFromBuf(bufPtr);
+      const message = reader.readString();
+      this._module.freeBuf(bufPtr);
+      entry.free(handle);
+      return new BoltFFIPanicError(message);
+    }
+    entry.free(handle);
+    if (status === WasmPollStatus.Cancelled) {
+      return new BoltFFICancelledError();
+    }
+    return new Error(`Unknown poll status: ${status}`);
+  }
+
+  pollAsync(
+    handle: number,
+    pollSync: (handle: number) => number,
+    panicMessage: (handle: number) => number,
+    free: (handle: number) => void
+  ): Promise<number> {
+    return new Promise((resolve, reject) => {
+      this.pendingFutures.set(handle, { resolve, reject, pollSync, panicMessage, free });
+
+      const status = pollSync(handle);
+      if (status === WasmPollStatus.Ready) {
+        this.pendingFutures.delete(handle);
+        resolve(handle);
+      } else if (status < 0) {
+        this.pendingFutures.delete(handle);
+        reject(this.extractAsyncError(handle, status, { resolve, reject, pollSync, panicMessage, free }));
+      }
+    });
+  }
+}
+
 export interface BoltFFIExports {
   memory: WebAssembly.Memory;
   boltffi_wasm_abi_version: () => number;
@@ -42,13 +149,16 @@ export type WriterAlloc = WireWriter;
 
 export class BoltFFIModule {
   readonly exports: BoltFFIExports;
+  readonly asyncManager: AsyncFutureManager;
   private _memory: WebAssembly.Memory;
   private _encoder: TextEncoder;
 
-  constructor(instance: WebAssembly.Instance) {
+  constructor(instance: WebAssembly.Instance, asyncManager: AsyncFutureManager) {
     this.exports = instance.exports as BoltFFIExports;
     this._memory = this.exports.memory;
     this._encoder = new TextEncoder();
+    this.asyncManager = asyncManager;
+    asyncManager.setModule(this);
   }
 
   private getView(): DataView {
@@ -256,12 +366,17 @@ export async function instantiateBoltFFI(
     wasmSource = source;
   }
 
-  const importObject: WebAssembly.Imports = {};
-  if (imports?.env) {
-    importObject.env = imports.env;
-  }
+  const asyncManager = new AsyncFutureManager();
+
+  const importObject: WebAssembly.Imports = {
+    env: {
+      __boltffi_wake: (handle: number) => asyncManager.wake(handle),
+      ...(imports?.env ?? {}),
+    },
+  };
+
   const { instance } = await WebAssembly.instantiate(wasmSource, importObject);
-  const module = new BoltFFIModule(instance);
+  const module = new BoltFFIModule(instance, asyncManager);
 
   const actualVersion = module.exports.boltffi_wasm_abi_version();
   if (actualVersion !== expectedVersion) {

@@ -15,4 +15,8 @@ export {
   StringAlloc,
   WriterAlloc,
   instantiateBoltFFI,
+  AsyncFutureManager,
+  BoltFFIPanicError,
+  BoltFFICancelledError,
+  WasmPollStatus,
 } from "./module.js";
