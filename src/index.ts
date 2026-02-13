@@ -15,6 +15,7 @@ export {
   StringAlloc,
   WriterAlloc,
   instantiateBoltFFI,
+  instantiateBoltFFISync,
   AsyncFutureManager,
   BoltFFIPanicError,
   BoltFFICancelledError,

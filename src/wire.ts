@@ -1,3 +1,6 @@
+const UTF8_DECODER = new TextDecoder("utf-8");
+const UTF8_ENCODER = new TextEncoder();
+
 export class WireReader {
   private view: DataView;
   private offset: number;
@@ -11,6 +14,10 @@ export class WireReader {
     const value = this.view.getUint8(this.offset);
     this.offset += 1;
     return value !== 0;
+  }
+
+  skip(n: number): void {
+    this.offset += n;
   }
 
   readI8(): number {
@@ -85,7 +92,7 @@ export class WireReader {
     const len = this.readU32();
     const bytes = new Uint8Array(this.view.buffer, this.offset, len);
     this.offset += len;
-    return new TextDecoder().decode(bytes);
+    return UTF8_DECODER.decode(bytes);
   }
 
   readBytes(): Uint8Array {
@@ -281,6 +288,16 @@ export class WireWriter {
     this.offset += 1;
   }
 
+  skip(n: number): void {
+    this.ensureCapacity(n);
+    const view = this.currentView();
+    const pos = this.writePosition();
+    for (let i = 0; i < n; i++) {
+      view.setUint8(pos + i, 0);
+    }
+    this.offset += n;
+  }
+
   writeI8(value: number): void {
     this.ensureCapacity(1);
     this.currentView().setInt8(this.writePosition(), value);
@@ -350,7 +367,7 @@ export class WireWriter {
   }
 
   writeString(value: string): void {
-    const encoded = new TextEncoder().encode(value);
+    const encoded = UTF8_ENCODER.encode(value);
     this.writeU32(encoded.length);
     this.ensureCapacity(encoded.length);
     new Uint8Array(this.currentBuffer()).set(encoded, this.writePosition());
@@ -444,7 +461,7 @@ export class WireWriter {
 }
 
 export function wireStringSize(value: string): number {
-  return 4 + new TextEncoder().encode(value).length;
+  return 4 + UTF8_ENCODER.encode(value).length;
 }
 
 export interface WireCodec<T> {

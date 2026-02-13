@@ -116,6 +116,7 @@ export interface BoltFFIExports {
   boltffi_wasm_alloc: (size: number) => number;
   boltffi_wasm_free: (ptr: number, size: number) => void;
   boltffi_wasm_realloc: (ptr: number, oldSize: number, newSize: number) => number;
+  boltffi_wasm_free_string_return: (ptr: number, len: number) => void;
   [key: string]: WebAssembly.ExportValue;
 }
 
@@ -152,11 +153,13 @@ export class BoltFFIModule {
   readonly asyncManager: AsyncFutureManager;
   private _memory: WebAssembly.Memory;
   private _encoder: TextEncoder;
+  private _decoder: TextDecoder;
 
   constructor(instance: WebAssembly.Instance, asyncManager: AsyncFutureManager) {
     this.exports = instance.exports as BoltFFIExports;
     this._memory = this.exports.memory;
     this._encoder = new TextEncoder();
+    this._decoder = new TextDecoder("utf-8");
     this.asyncManager = asyncManager;
     asyncManager.setModule(this);
   }
@@ -251,9 +254,7 @@ export class BoltFFIModule {
   readerFromBuf(bufPtr: number): WireReader {
     const view = this.getView();
     const ptr = view.getUint32(bufPtr, true);
-    const len = view.getUint32(bufPtr + 4, true);
-    const bytes = this.getBytes().slice(ptr, ptr + len);
-    return new WireReader(bytes.buffer);
+    return new WireReader(this._memory.buffer, ptr);
   }
 
   freeBuf(bufPtr: number): void {
@@ -279,6 +280,20 @@ export class BoltFFIModule {
 
   readFromMemory(ptr: number, len: number): Uint8Array {
     return this.getBytes().slice(ptr, ptr + len);
+  }
+
+  takePackedUtf8String(packed: bigint): string {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const length = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || length === 0) {
+      return "";
+    }
+    const bytes = new Uint8Array(this._memory.buffer, pointer, length);
+    try {
+      return this._decoder.decode(bytes);
+    } finally {
+      this.exports.boltffi_wasm_free_string_return(pointer, length);
+    }
   }
 
   private primitiveElementSize(elementType: PrimitiveBufferElementType): number {
@@ -376,6 +391,34 @@ export async function instantiateBoltFFI(
   };
 
   const { instance } = await WebAssembly.instantiate(wasmSource, importObject);
+  const module = new BoltFFIModule(instance, asyncManager);
+
+  const actualVersion = module.exports.boltffi_wasm_abi_version();
+  if (actualVersion !== expectedVersion) {
+    throw new Error(
+      `BoltFFI ABI version mismatch: expected ${expectedVersion}, got ${actualVersion}`
+    );
+  }
+
+  return module;
+}
+
+export function instantiateBoltFFISync(
+  source: BufferSource,
+  expectedVersion: number,
+  imports?: BoltFFIImports
+): BoltFFIModule {
+  const asyncManager = new AsyncFutureManager();
+
+  const importObject: WebAssembly.Imports = {
+    env: {
+      __boltffi_wake: (handle: number) => asyncManager.wake(handle),
+      ...(imports?.env ?? {}),
+    },
+  };
+
+  const wasmModule = new WebAssembly.Module(source);
+  const instance = new WebAssembly.Instance(wasmModule, importObject);
   const module = new BoltFFIModule(instance, asyncManager);
 
   const actualVersion = module.exports.boltffi_wasm_abi_version();
