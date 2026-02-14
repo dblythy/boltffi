@@ -291,6 +291,13 @@ export class WireWriter {
     }
   }
 
+  reset(): void {
+    if (this.allocationSize === 0) {
+      throw new Error("Cannot reset a released WireWriter");
+    }
+    this.offset = 0;
+  }
+
   get capacity(): number {
     return this.allocationSize;
   }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BoltFFIModule } from "../src/module.js";
+import { AsyncFutureManager, BoltFFIModule } from "../src/module.js";
 import { WireReader, WireWriter, wireErr, wireOk } from "../src/wire.js";
 
 type ExportFunction = (...args: number[]) => number | void;
@@ -60,7 +60,8 @@ function createHarness(): RuntimeHarness {
   };
 
   const instance = { exports } as unknown as WebAssembly.Instance;
-  return { module: new BoltFFIModule(instance), freedAllocations };
+  const asyncManager = new AsyncFutureManager();
+  return { module: new BoltFFIModule(instance, asyncManager), freedAllocations };
 }
 
 describe("WireReader and WireWriter", () => {
@@ -292,7 +293,7 @@ describe("BoltFFIModule memory operations", () => {
     const pointer = writer.ptr;
     const capacity = writer.capacity;
     module.freeWriter(writer);
-    expect(freedAllocations).toContainEqual([pointer, capacity]);
+    expect(freedAllocations).not.toContainEqual([pointer, capacity]);
   });
 
   it("allocPrimitiveBuffer writes i32 elements and frees by byte size", () => {
@@ -313,10 +314,15 @@ describe("BoltFFIModule memory operations", () => {
     expect(freedAllocations).toContainEqual([allocation.ptr, allocation.allocationSize]);
   });
 
-  it("throws on use after freeWriter release", () => {
+  it("reuses pooled writers when capacity matches", () => {
     const { module } = createHarness();
     const writer = module.allocWriter(8);
+    const pointer = writer.ptr;
+    writer.writeU32(42);
     module.freeWriter(writer);
-    expect(() => writer.writeU8(1)).toThrow("released WireWriter");
+
+    const reusedWriter = module.allocWriter(8);
+    expect(reusedWriter.ptr).toBe(pointer);
+    expect(reusedWriter.len).toBe(0);
   });
 });

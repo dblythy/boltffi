@@ -2,6 +2,8 @@ import { WireReader, WireWriter } from "./wire.js";
 import type { WasmWireWriterAllocator } from "./wire.js";
 
 const FFI_BUF_DESCRIPTOR_SIZE = 12;
+const MIN_WRITER_CAPACITY = 64;
+const MAX_WRITERS_PER_CAPACITY = 32;
 
 export const enum WasmPollStatus {
   Pending = 0,
@@ -154,12 +156,14 @@ export class BoltFFIModule {
   private _memory: WebAssembly.Memory;
   private _encoder: TextEncoder;
   private _decoder: TextDecoder;
+  private _writerPool: Map<number, WriterAlloc[]>;
 
   constructor(instance: WebAssembly.Instance, asyncManager: AsyncFutureManager) {
     this.exports = instance.exports as BoltFFIExports;
     this._memory = this.exports.memory;
     this._encoder = new TextEncoder();
     this._decoder = new TextDecoder("utf-8");
+    this._writerPool = new Map();
     this.asyncManager = asyncManager;
     asyncManager.setModule(this);
   }
@@ -313,6 +317,16 @@ export class BoltFFIModule {
   }
 
   allocWriter(size: number): WriterAlloc {
+    const requestedCapacity = Math.max(size, MIN_WRITER_CAPACITY);
+    const pooled = this._writerPool.get(requestedCapacity);
+    if (pooled !== undefined) {
+      const writer = pooled.pop();
+      if (writer !== undefined) {
+        writer.reset();
+        return writer;
+      }
+    }
+
     const allocator: WasmWireWriterAllocator = {
       alloc: (allocationSize) => this.exports.boltffi_wasm_alloc(allocationSize),
       realloc: (ptr, oldSize, newSize) =>
@@ -320,10 +334,18 @@ export class BoltFFIModule {
       free: (ptr, allocationSize) => this.exports.boltffi_wasm_free(ptr, allocationSize),
       buffer: () => this._memory.buffer,
     };
-    return WireWriter.withWasmAllocation(Math.max(size, 64), allocator);
+    return WireWriter.withWasmAllocation(requestedCapacity, allocator);
   }
 
   freeWriter(writer: WriterAlloc): void {
+    const capacity = writer.capacity;
+    writer.reset();
+    const bucket = this._writerPool.get(capacity) ?? [];
+    if (bucket.length < MAX_WRITERS_PER_CAPACITY) {
+      bucket.push(writer);
+      this._writerPool.set(capacity, bucket);
+      return;
+    }
     writer.release();
   }
 
@@ -372,9 +394,89 @@ export class BoltFFIModule {
     return this.getBytes().slice(ptr, ptr + len);
   }
 
+  private unpackPacked(packed: bigint): { pointer: number; length: number } {
+    return {
+      pointer: Number(packed & 0xffff_ffffn),
+      length: Number((packed >> 32n) & 0xffff_ffffn),
+    };
+  }
+
+  private freePacked(pointer: number, length: number): void {
+    if (pointer !== 0 && length !== 0) {
+      this.exports.boltffi_wasm_free_string_return(pointer, length);
+    }
+  }
+
+  private takePackedOptionalPrimitive<T>(
+    packed: bigint,
+    encodedSize: number,
+    readValue: (view: DataView, valueOffset: number) => T
+  ): T | null {
+    const { pointer, length } = this.unpackPacked(packed);
+    if (pointer === 0 || length === 0) {
+      return null;
+    }
+    const view = this.getView();
+    const tag = view.getUint8(pointer);
+    if (tag === 0) {
+      this.freePacked(pointer, length);
+      return null;
+    }
+    if (length < 1 + encodedSize) {
+      this.freePacked(pointer, length);
+      throw new Error("Invalid packed optional payload");
+    }
+    const value = readValue(view, pointer + 1);
+    this.freePacked(pointer, length);
+    return value;
+  }
+
+  takePackedOptionalBool(packed: bigint): boolean | null {
+    return this.takePackedOptionalPrimitive(packed, 1, (view, offset) => view.getUint8(offset) !== 0);
+  }
+
+  takePackedOptionalI8(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 1, (view, offset) => view.getInt8(offset));
+  }
+
+  takePackedOptionalU8(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 1, (view, offset) => view.getUint8(offset));
+  }
+
+  takePackedOptionalI16(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 2, (view, offset) => view.getInt16(offset, true));
+  }
+
+  takePackedOptionalU16(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 2, (view, offset) => view.getUint16(offset, true));
+  }
+
+  takePackedOptionalI32(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 4, (view, offset) => view.getInt32(offset, true));
+  }
+
+  takePackedOptionalU32(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 4, (view, offset) => view.getUint32(offset, true));
+  }
+
+  takePackedOptionalI64(packed: bigint): bigint | null {
+    return this.takePackedOptionalPrimitive(packed, 8, (view, offset) => view.getBigInt64(offset, true));
+  }
+
+  takePackedOptionalU64(packed: bigint): bigint | null {
+    return this.takePackedOptionalPrimitive(packed, 8, (view, offset) => view.getBigUint64(offset, true));
+  }
+
+  takePackedOptionalF32(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 4, (view, offset) => view.getFloat32(offset, true));
+  }
+
+  takePackedOptionalF64(packed: bigint): number | null {
+    return this.takePackedOptionalPrimitive(packed, 8, (view, offset) => view.getFloat64(offset, true));
+  }
+
   takePackedUtf8String(packed: bigint): string {
-    const pointer = Number(packed & 0xffff_ffffn);
-    const length = Number((packed >> 32n) & 0xffff_ffffn);
+    const { pointer, length } = this.unpackPacked(packed);
     if (pointer === 0 || length === 0) {
       return "";
     }
@@ -382,21 +484,20 @@ export class BoltFFIModule {
     try {
       return this._decoder.decode(bytes);
     } finally {
-      this.exports.boltffi_wasm_free_string_return(pointer, length);
+      this.freePacked(pointer, length);
     }
   }
 
 
 
   takePackedBuffer(packed: bigint): WireReader {
-    const pointer = Number(packed & 0xffff_ffffn);
-    const length = Number((packed >> 32n) & 0xffff_ffffn);
+    const { pointer, length } = this.unpackPacked(packed);
     if (pointer === 0 || length === 0) {
       return new WireReader(new ArrayBuffer(0), 0);
     }
     const bytes = new Uint8Array(this._memory.buffer, pointer, length);
     const copy = bytes.slice();
-    this.exports.boltffi_wasm_free_string_return(pointer, length);
+    this.freePacked(pointer, length);
     return new WireReader(copy.buffer, 0);
   }
 
