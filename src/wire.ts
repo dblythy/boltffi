@@ -102,6 +102,76 @@ export class WireReader {
     return bytes.slice();
   }
 
+  readI8Array(): Int8Array {
+    const len = this.readU32();
+    const result = new Int8Array(this.view.buffer, this.offset, len);
+    this.offset += len;
+    return result;
+  }
+
+  readU8Array(): Uint8Array {
+    const len = this.readU32();
+    const result = new Uint8Array(this.view.buffer, this.offset, len);
+    this.offset += len;
+    return result;
+  }
+
+  readI16Array(): Int16Array {
+    const len = this.readU32();
+    const result = new Int16Array(this.view.buffer, this.offset, len);
+    this.offset += len * 2;
+    return result;
+  }
+
+  readU16Array(): Uint16Array {
+    const len = this.readU32();
+    const result = new Uint16Array(this.view.buffer, this.offset, len);
+    this.offset += len * 2;
+    return result;
+  }
+
+  readI32Array(): Int32Array {
+    const len = this.readU32();
+    const result = new Int32Array(this.view.buffer, this.offset, len);
+    this.offset += len * 4;
+    return result;
+  }
+
+  readU32Array(): Uint32Array {
+    const len = this.readU32();
+    const result = new Uint32Array(this.view.buffer, this.offset, len);
+    this.offset += len * 4;
+    return result;
+  }
+
+  readI64Array(): BigInt64Array {
+    const len = this.readU32();
+    const result = new BigInt64Array(this.view.buffer, this.offset, len);
+    this.offset += len * 8;
+    return result;
+  }
+
+  readU64Array(): BigUint64Array {
+    const len = this.readU32();
+    const result = new BigUint64Array(this.view.buffer, this.offset, len);
+    this.offset += len * 8;
+    return result;
+  }
+
+  readF32Array(): Float32Array {
+    const len = this.readU32();
+    const result = new Float32Array(this.view.buffer, this.offset, len);
+    this.offset += len * 4;
+    return result;
+  }
+
+  readF64Array(): Float64Array {
+    const len = this.readU32();
+    const result = new Float64Array(this.view.buffer, this.offset, len);
+    this.offset += len * 8;
+    return result;
+  }
+
   readOptional<T>(readValue: () => T): T | null {
     const tag = this.readU8();
     if (tag === 0) {
