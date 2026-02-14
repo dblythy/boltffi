@@ -296,6 +296,110 @@ export class BoltFFIModule {
     }
   }
 
+
+
+  takePackedBuffer(packed: bigint): WireReader {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const length = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || length === 0) {
+      return new WireReader(new ArrayBuffer(0), 0);
+    }
+    const bytes = new Uint8Array(this._memory.buffer, pointer, length);
+    const copy = bytes.slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, length);
+    return new WireReader(copy.buffer, 0);
+  }
+
+  takePackedI8Array(packed: bigint): Int8Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Int8Array(0);
+    const result = new Int8Array(this._memory.buffer, pointer, byteLen).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedU8Array(packed: bigint): Uint8Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Uint8Array(0);
+    const result = new Uint8Array(this._memory.buffer, pointer, byteLen).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedI16Array(packed: bigint): Int16Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Int16Array(0);
+    const result = new Int16Array(this._memory.buffer, pointer, byteLen / 2).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedU16Array(packed: bigint): Uint16Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Uint16Array(0);
+    const result = new Uint16Array(this._memory.buffer, pointer, byteLen / 2).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedI32Array(packed: bigint): Int32Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Int32Array(0);
+    const result = new Int32Array(this._memory.buffer, pointer, byteLen / 4).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedU32Array(packed: bigint): Uint32Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Uint32Array(0);
+    const result = new Uint32Array(this._memory.buffer, pointer, byteLen / 4).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedI64Array(packed: bigint): BigInt64Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new BigInt64Array(0);
+    const result = new BigInt64Array(this._memory.buffer, pointer, byteLen / 8).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedU64Array(packed: bigint): BigUint64Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new BigUint64Array(0);
+    const result = new BigUint64Array(this._memory.buffer, pointer, byteLen / 8).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedF32Array(packed: bigint): Float32Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Float32Array(0);
+    const result = new Float32Array(this._memory.buffer, pointer, byteLen / 4).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takePackedF64Array(packed: bigint): Float64Array {
+    const pointer = Number(packed & 0xffff_ffffn);
+    const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
+    if (pointer === 0 || byteLen === 0) return new Float64Array(0);
+    const result = new Float64Array(this._memory.buffer, pointer, byteLen / 8).slice();
+    this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
   private primitiveElementSize(elementType: PrimitiveBufferElementType): number {
     switch (elementType) {
       case "bool":
