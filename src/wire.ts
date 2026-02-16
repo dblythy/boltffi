@@ -255,6 +255,8 @@ export class WireWriter {
   private wasmPtr: number;
   private allocationSize: number;
   private offset: number;
+  private cachedWasmView: DataView | null;
+  private cachedWasmBuffer: ArrayBuffer | null;
 
   constructor(initialSize = 256) {
     const normalizedSize = Math.max(initialSize, 1);
@@ -264,6 +266,8 @@ export class WireWriter {
     this.wasmPtr = 0;
     this.allocationSize = normalizedSize;
     this.offset = 0;
+    this.cachedWasmView = null;
+    this.cachedWasmBuffer = null;
   }
 
   static withWasmAllocation(
@@ -311,7 +315,15 @@ export class WireWriter {
   }
 
   private currentView(): DataView {
-    return this.inWasmMemory() ? new DataView(this.wasmAllocator!.buffer()) : this.localView;
+    if (!this.inWasmMemory()) {
+      return this.localView;
+    }
+    const buffer = this.wasmAllocator!.buffer();
+    if (this.cachedWasmBuffer !== buffer) {
+      this.cachedWasmBuffer = buffer;
+      this.cachedWasmView = new DataView(buffer);
+    }
+    return this.cachedWasmView!;
   }
 
   private writePosition(): number {

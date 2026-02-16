@@ -119,6 +119,7 @@ export interface BoltFFIExports {
   boltffi_wasm_free: (ptr: number, size: number) => void;
   boltffi_wasm_realloc: (ptr: number, oldSize: number, newSize: number) => number;
   boltffi_wasm_free_string_return: (ptr: number, len: number) => void;
+  boltffi_wasm_return_slot_addr: () => number;
   [key: string]: WebAssembly.ExportValue;
 }
 
@@ -157,6 +158,18 @@ export class BoltFFIModule {
   private _encoder: TextEncoder;
   private _decoder: TextDecoder;
   private _writerPool: Map<number, WriterAlloc[]>;
+  private _cachedU8: Uint8Array | null = null;
+  private _cachedI8: Int8Array | null = null;
+  private _cachedI16: Int16Array | null = null;
+  private _cachedU16: Uint16Array | null = null;
+  private _cachedI32: Int32Array | null = null;
+  private _cachedU32: Uint32Array | null = null;
+  private _cachedI64: BigInt64Array | null = null;
+  private _cachedU64: BigUint64Array | null = null;
+  private _cachedF32: Float32Array | null = null;
+  private _cachedF64: Float64Array | null = null;
+  private _cachedView: DataView | null = null;
+  private _returnSlotAddr: number = 0;
 
   constructor(instance: WebAssembly.Instance, asyncManager: AsyncFutureManager) {
     this.exports = instance.exports as BoltFFIExports;
@@ -166,14 +179,90 @@ export class BoltFFIModule {
     this._writerPool = new Map();
     this.asyncManager = asyncManager;
     asyncManager.setModule(this);
+    this._returnSlotAddr = this.exports.boltffi_wasm_return_slot_addr();
+  }
+
+  readReturnSlot(): { ptr: number; len: number } {
+    const view = this.getU32();
+    const idx = this._returnSlotAddr >>> 2;
+    return { ptr: view[idx], len: view[idx + 1] };
   }
 
   private getView(): DataView {
-    return new DataView(this._memory.buffer);
+    if (this._cachedView === null || this._cachedView.buffer !== this._memory.buffer) {
+      this._cachedView = new DataView(this._memory.buffer);
+    }
+    return this._cachedView;
   }
 
   private getBytes(): Uint8Array {
-    return new Uint8Array(this._memory.buffer);
+    if (this._cachedU8 === null || this._cachedU8.buffer !== this._memory.buffer) {
+      this._cachedU8 = new Uint8Array(this._memory.buffer);
+    }
+    return this._cachedU8;
+  }
+
+  private getI8(): Int8Array {
+    if (this._cachedI8 === null || this._cachedI8.buffer !== this._memory.buffer) {
+      this._cachedI8 = new Int8Array(this._memory.buffer);
+    }
+    return this._cachedI8;
+  }
+
+  private getI16(): Int16Array {
+    if (this._cachedI16 === null || this._cachedI16.buffer !== this._memory.buffer) {
+      this._cachedI16 = new Int16Array(this._memory.buffer);
+    }
+    return this._cachedI16;
+  }
+
+  private getU16(): Uint16Array {
+    if (this._cachedU16 === null || this._cachedU16.buffer !== this._memory.buffer) {
+      this._cachedU16 = new Uint16Array(this._memory.buffer);
+    }
+    return this._cachedU16;
+  }
+
+  private getI32(): Int32Array {
+    if (this._cachedI32 === null || this._cachedI32.buffer !== this._memory.buffer) {
+      this._cachedI32 = new Int32Array(this._memory.buffer);
+    }
+    return this._cachedI32;
+  }
+
+  private getU32(): Uint32Array {
+    if (this._cachedU32 === null || this._cachedU32.buffer !== this._memory.buffer) {
+      this._cachedU32 = new Uint32Array(this._memory.buffer);
+    }
+    return this._cachedU32;
+  }
+
+  private getI64(): BigInt64Array {
+    if (this._cachedI64 === null || this._cachedI64.buffer !== this._memory.buffer) {
+      this._cachedI64 = new BigInt64Array(this._memory.buffer);
+    }
+    return this._cachedI64;
+  }
+
+  private getU64(): BigUint64Array {
+    if (this._cachedU64 === null || this._cachedU64.buffer !== this._memory.buffer) {
+      this._cachedU64 = new BigUint64Array(this._memory.buffer);
+    }
+    return this._cachedU64;
+  }
+
+  private getF32(): Float32Array {
+    if (this._cachedF32 === null || this._cachedF32.buffer !== this._memory.buffer) {
+      this._cachedF32 = new Float32Array(this._memory.buffer);
+    }
+    return this._cachedF32;
+  }
+
+  private getF64(): Float64Array {
+    if (this._cachedF64 === null || this._cachedF64.buffer !== this._memory.buffer) {
+      this._cachedF64 = new Float64Array(this._memory.buffer);
+    }
+    return this._cachedF64;
   }
 
   allocString(value: string): StringAlloc {
@@ -211,73 +300,72 @@ export class BoltFFIModule {
 
   allocU8Array(value: Uint8Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len;
-    const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Uint8Array(this._memory.buffer, ptr, len).set(value);
-    return { ptr, len, allocationSize: byteLen };
+    const ptr = this.exports.boltffi_wasm_alloc(len);
+    this.getBytes().set(value, ptr);
+    return { ptr, len, allocationSize: len };
   }
 
   allocI16Array(value: Int16Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 2;
+    const byteLen = len << 1;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Int16Array(this._memory.buffer, ptr, len).set(value);
+    this.getI16().set(value, ptr >>> 1);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocU16Array(value: Uint16Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 2;
+    const byteLen = len << 1;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Uint16Array(this._memory.buffer, ptr, len).set(value);
+    this.getU16().set(value, ptr >>> 1);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocI32Array(value: Int32Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 4;
+    const byteLen = len << 2;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Int32Array(this._memory.buffer, ptr, len).set(value);
+    this.getI32().set(value, ptr >>> 2);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocU32Array(value: Uint32Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 4;
+    const byteLen = len << 2;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Uint32Array(this._memory.buffer, ptr, len).set(value);
+    this.getU32().set(value, ptr >>> 2);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocI64Array(value: BigInt64Array | readonly bigint[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 8;
+    const byteLen = len << 3;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new BigInt64Array(this._memory.buffer, ptr, len).set(value);
+    this.getI64().set(value, ptr >>> 3);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocU64Array(value: BigUint64Array | readonly bigint[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 8;
+    const byteLen = len << 3;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new BigUint64Array(this._memory.buffer, ptr, len).set(value);
+    this.getU64().set(value, ptr >>> 3);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocF32Array(value: Float32Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 4;
+    const byteLen = len << 2;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Float32Array(this._memory.buffer, ptr, len).set(value);
+    this.getF32().set(value, ptr >>> 2);
     return { ptr, len, allocationSize: byteLen };
   }
 
   allocF64Array(value: Float64Array | readonly number[]): PrimitiveBufferAlloc {
     const len = value.length;
-    const byteLen = len * 8;
+    const byteLen = len << 3;
     const ptr = this.exports.boltffi_wasm_alloc(byteLen);
-    new Float64Array(this._memory.buffer, ptr, len).set(value);
+    this.getF64().set(value, ptr >>> 3);
     return { ptr, len, allocationSize: byteLen };
   }
 
@@ -475,6 +563,46 @@ export class BoltFFIModule {
     return this.takePackedOptionalPrimitive(packed, 8, (view, offset) => view.getFloat64(offset, true));
   }
 
+  unpackOptionBool(packed: number): boolean | null {
+    if (Number.isNaN(packed)) return null;
+    return packed !== 0;
+  }
+
+  unpackOptionI8(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed | 0;
+  }
+
+  unpackOptionU8(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed >>> 0;
+  }
+
+  unpackOptionI16(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed | 0;
+  }
+
+  unpackOptionU16(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed >>> 0;
+  }
+
+  unpackOptionI32(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed | 0;
+  }
+
+  unpackOptionU32(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed >>> 0;
+  }
+
+  unpackOptionF32(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed;
+  }
+
   takePackedUtf8String(packed: bigint): string {
     const { pointer, length } = this.unpackPacked(packed);
     if (pointer === 0 || length === 0) {
@@ -505,7 +633,7 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Int8Array(0);
-    const result = new Int8Array(this._memory.buffer, pointer, byteLen).slice();
+    const result = this.getI8().subarray(pointer, pointer + byteLen).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
@@ -514,8 +642,78 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Uint8Array(0);
-    const result = new Uint8Array(this._memory.buffer, pointer, byteLen).slice();
+    const result = this.getBytes().subarray(pointer, pointer + byteLen).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
+    return result;
+  }
+
+  takeSlotU8Array(): Uint8Array {
+    const slotView = this.getU32();
+    const slotIdx = this._returnSlotAddr >>> 2;
+    const ptr = slotView[slotIdx];
+    const len = slotView[slotIdx + 1];
+    if (ptr === 0 || len === 0) return new Uint8Array(0);
+    const result = this.getBytes().subarray(ptr, ptr + len).slice();
+    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    return result;
+  }
+
+  takeSlotI8Array(): Int8Array {
+    const slotView = this.getU32();
+    const slotIdx = this._returnSlotAddr >>> 2;
+    const ptr = slotView[slotIdx];
+    const len = slotView[slotIdx + 1];
+    if (ptr === 0 || len === 0) return new Int8Array(0);
+    const result = this.getI8().subarray(ptr, ptr + len).slice();
+    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    return result;
+  }
+
+  takeSlotI32Array(): Int32Array {
+    const slotView = this.getU32();
+    const slotIdx = this._returnSlotAddr >>> 2;
+    const ptr = slotView[slotIdx];
+    const len = slotView[slotIdx + 1];
+    if (ptr === 0 || len === 0) return new Int32Array(0);
+    const elemCount = len >>> 2;
+    const result = this.getI32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
+    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    return result;
+  }
+
+  takeSlotU32Array(): Uint32Array {
+    const slotView = this.getU32();
+    const slotIdx = this._returnSlotAddr >>> 2;
+    const ptr = slotView[slotIdx];
+    const len = slotView[slotIdx + 1];
+    if (ptr === 0 || len === 0) return new Uint32Array(0);
+    const elemCount = len >>> 2;
+    const result = this.getU32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
+    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    return result;
+  }
+
+  takeSlotF32Array(): Float32Array {
+    const slotView = this.getU32();
+    const slotIdx = this._returnSlotAddr >>> 2;
+    const ptr = slotView[slotIdx];
+    const len = slotView[slotIdx + 1];
+    if (ptr === 0 || len === 0) return new Float32Array(0);
+    const elemCount = len >>> 2;
+    const result = this.getF32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
+    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    return result;
+  }
+
+  takeSlotF64Array(): Float64Array {
+    const slotView = this.getU32();
+    const slotIdx = this._returnSlotAddr >>> 2;
+    const ptr = slotView[slotIdx];
+    const len = slotView[slotIdx + 1];
+    if (ptr === 0 || len === 0) return new Float64Array(0);
+    const elemCount = len >>> 3;
+    const result = this.getF64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
+    this.exports.boltffi_wasm_free_string_return(ptr, len);
     return result;
   }
 
@@ -523,7 +721,8 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Int16Array(0);
-    const result = new Int16Array(this._memory.buffer, pointer, byteLen / 2).slice();
+    const elemCount = byteLen / 2;
+    const result = new Int16Array(this._memory.buffer, pointer, elemCount).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
@@ -532,7 +731,8 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Uint16Array(0);
-    const result = new Uint16Array(this._memory.buffer, pointer, byteLen / 2).slice();
+    const elemCount = byteLen / 2;
+    const result = new Uint16Array(this._memory.buffer, pointer, elemCount).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
@@ -541,7 +741,8 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Int32Array(0);
-    const result = new Int32Array(this._memory.buffer, pointer, byteLen / 4).slice();
+    const elemCount = byteLen / 4;
+    const result = this.getI32().subarray(pointer / 4, pointer / 4 + elemCount).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
@@ -550,7 +751,8 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Uint32Array(0);
-    const result = new Uint32Array(this._memory.buffer, pointer, byteLen / 4).slice();
+    const elemCount = byteLen / 4;
+    const result = this.getU32().subarray(pointer / 4, pointer / 4 + elemCount).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
@@ -577,7 +779,8 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Float32Array(0);
-    const result = new Float32Array(this._memory.buffer, pointer, byteLen / 4).slice();
+    const elemCount = byteLen / 4;
+    const result = this.getF32().subarray(pointer / 4, pointer / 4 + elemCount).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
@@ -586,7 +789,8 @@ export class BoltFFIModule {
     const pointer = Number(packed & 0xffff_ffffn);
     const byteLen = Number((packed >> 32n) & 0xffff_ffffn);
     if (pointer === 0 || byteLen === 0) return new Float64Array(0);
-    const result = new Float64Array(this._memory.buffer, pointer, byteLen / 8).slice();
+    const elemCount = byteLen / 8;
+    const result = this.getF64().subarray(pointer / 8, pointer / 8 + elemCount).slice();
     this.exports.boltffi_wasm_free_string_return(pointer, byteLen);
     return result;
   }
