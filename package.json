@@ -1,7 +1,14 @@
 {
   "name": "@boltffi/runtime",
-  "version": "0.1.0",
-  "description": "BoltFFI WASM runtime for TypeScript",
+  "version": "0.1.0-rc.2",
+  "description": "WASM runtime for BoltFFI generated TypeScript bindings",
+  "author": "Ali A. Hilal <me@alihilal.com>",
+  "homepage": "https://boltffi.dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/boltffi/boltffi",
+    "directory": "runtime/typescript"
+  },
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -27,7 +34,9 @@
     "ffi",
     "wasm",
     "webassembly",
-    "boltffi"
+    "boltffi",
+    "rust",
+    "wasm-bindgen"
   ],
   "license": "MIT"
 }
