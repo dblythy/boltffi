@@ -13,6 +13,7 @@ function createHarness(): RuntimeHarness {
   const wasmMemory = new WebAssembly.Memory({ initial: 1 });
   const freedAllocations: Array<[number, number]> = [];
   const allocations = new Map<number, number>();
+  const returnSlotAddress = 16;
   let nextPointer = 256;
 
   const exports: Record<string, ExportFunction | WebAssembly.Memory> = {
@@ -28,6 +29,13 @@ function createHarness(): RuntimeHarness {
       return pointer;
     },
     boltffi_wasm_free: (ptr: number, size: number) => {
+      if (ptr === 0 || size === 0) {
+        return;
+      }
+      freedAllocations.push([ptr, size]);
+      allocations.delete(ptr);
+    },
+    boltffi_wasm_free_buf: (ptr: number, size: number) => {
       if (ptr === 0 || size === 0) {
         return;
       }
@@ -57,6 +65,14 @@ function createHarness(): RuntimeHarness {
       allocations.set(pointer, newSize);
       return pointer;
     },
+    boltffi_wasm_free_string_return: (ptr: number, len: number) => {
+      if (ptr === 0 || len === 0) {
+        return;
+      }
+      freedAllocations.push([ptr, len]);
+      allocations.delete(ptr);
+    },
+    boltffi_wasm_return_slot_addr: () => returnSlotAddress,
   };
 
   const instance = { exports } as unknown as WebAssembly.Instance;
@@ -253,10 +269,11 @@ describe("BoltFFIModule memory operations", () => {
     module.writeToMemory(payloadPointer, encodedPayload);
 
     const descriptorPointer = 2048;
-    const descriptorView = new DataView(new ArrayBuffer(12));
+    const descriptorView = new DataView(new ArrayBuffer(16));
     descriptorView.setUint32(0, payloadPointer, true);
     descriptorView.setUint32(4, encodedPayload.length, true);
     descriptorView.setUint32(8, payloadCapacity, true);
+    descriptorView.setUint32(12, 1, true);
     module.writeToMemory(descriptorPointer, new Uint8Array(descriptorView.buffer));
 
     const reader = module.readerFromBuf(descriptorPointer);
@@ -264,14 +281,14 @@ describe("BoltFFIModule memory operations", () => {
 
     module.freeBuf(descriptorPointer);
     expect(freedAllocations).toContainEqual([payloadPointer, payloadCapacity]);
-    expect(freedAllocations).toContainEqual([descriptorPointer, 12]);
+    expect(freedAllocations).toContainEqual([descriptorPointer, 16]);
   });
 
   it("freeBufDescriptor releases descriptor allocation only", () => {
     const { module, freedAllocations } = createHarness();
     const descriptorPointer = 4096;
     module.freeBufDescriptor(descriptorPointer);
-    expect(freedAllocations).toContainEqual([descriptorPointer, 12]);
+    expect(freedAllocations).toContainEqual([descriptorPointer, 16]);
   });
 
   it("allocWriter reallocates when payload outgrows initial capacity", () => {
