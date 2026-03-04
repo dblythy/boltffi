@@ -1,7 +1,7 @@
 import { WireReader, WireWriter } from "./wire.js";
 import type { WasmWireWriterAllocator } from "./wire.js";
 
-const FFI_BUF_DESCRIPTOR_SIZE = 12;
+const FFI_BUF_DESCRIPTOR_SIZE = 16;
 const MIN_WRITER_CAPACITY = 64;
 const MAX_WRITERS_PER_CAPACITY = 32;
 
@@ -117,6 +117,7 @@ export interface BoltFFIExports {
   boltffi_wasm_abi_version: () => number;
   boltffi_wasm_alloc: (size: number) => number;
   boltffi_wasm_free: (ptr: number, size: number) => void;
+  boltffi_wasm_free_buf: (ptr: number, size: number, align: number) => void;
   boltffi_wasm_realloc: (ptr: number, oldSize: number, newSize: number) => number;
   boltffi_wasm_free_string_return: (ptr: number, len: number) => void;
   boltffi_wasm_return_slot_addr: () => number;
@@ -182,10 +183,10 @@ export class BoltFFIModule {
     this._returnSlotAddr = this.exports.boltffi_wasm_return_slot_addr();
   }
 
-  readReturnSlot(): { ptr: number; len: number } {
+  readReturnSlot(): { ptr: number; len: number; cap: number; align: number } {
     const view = this.getU32();
     const idx = this._returnSlotAddr >>> 2;
-    return { ptr: view[idx], len: view[idx + 1] };
+    return { ptr: view[idx], len: view[idx + 1], cap: view[idx + 2], align: view[idx + 3] };
   }
 
   private getView(): DataView {
@@ -458,20 +459,113 @@ export class BoltFFIModule {
   }
 
   freeBuf(bufPtr: number): void {
-    const view = this.getView();
-    const ptr = view.getUint32(bufPtr, true);
-    const cap = view.getUint32(bufPtr + 8, true);
+    const { ptr, cap, align } = this.readBufDescriptor(bufPtr);
     if (ptr !== 0 && cap !== 0) {
-      this.exports.boltffi_wasm_free(ptr, cap);
+      this.exports.boltffi_wasm_free_buf(ptr, cap, align);
     }
     this.exports.boltffi_wasm_free(bufPtr, FFI_BUF_DESCRIPTOR_SIZE);
   }
 
-  writeBufDescriptor(bufPtr: number, dataPtr: number, dataLen: number, dataCap: number): void {
+  writeBufDescriptor(bufPtr: number, dataPtr: number, dataLen: number, dataCap: number, dataAlign: number = 1): void {
     const view = this.getView();
     view.setUint32(bufPtr, dataPtr, true);
     view.setUint32(bufPtr + 4, dataLen, true);
     view.setUint32(bufPtr + 8, dataCap, true);
+    view.setUint32(bufPtr + 12, dataAlign, true);
+  }
+
+  private readBufDescriptor(bufPtr: number): { ptr: number; len: number; cap: number; align: number } {
+    const view = this.getView();
+    return {
+      ptr: view.getUint32(bufPtr, true),
+      len: view.getUint32(bufPtr + 4, true),
+      cap: view.getUint32(bufPtr + 8, true),
+      align: view.getUint32(bufPtr + 12, true) || 1,
+    };
+  }
+
+  takeBufU8Array(bufPtr: number): Uint8Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Uint8Array(0);
+    return this.getBytes().subarray(ptr, ptr + len).slice();
+  }
+
+  takeBufI8Array(bufPtr: number): Int8Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Int8Array(0);
+    return this.getI8().subarray(ptr, ptr + len).slice();
+  }
+
+  takeBufI16Array(bufPtr: number): Int16Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Int16Array(0);
+    const elemCount = len >>> 1;
+    return this.getI16().subarray(ptr >>> 1, (ptr >>> 1) + elemCount).slice();
+  }
+
+  takeBufU16Array(bufPtr: number): Uint16Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Uint16Array(0);
+    const elemCount = len >>> 1;
+    return this.getU16().subarray(ptr >>> 1, (ptr >>> 1) + elemCount).slice();
+  }
+
+  takeBufI32Array(bufPtr: number): Int32Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Int32Array(0);
+    const elemCount = len >>> 2;
+    return this.getI32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
+  }
+
+  takeBufU32Array(bufPtr: number): Uint32Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Uint32Array(0);
+    const elemCount = len >>> 2;
+    return this.getU32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
+  }
+
+  takeBufI64Array(bufPtr: number): BigInt64Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new BigInt64Array(0);
+    const elemCount = len >>> 3;
+    return this.getI64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
+  }
+
+  takeBufU64Array(bufPtr: number): BigUint64Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new BigUint64Array(0);
+    const elemCount = len >>> 3;
+    return this.getU64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
+  }
+
+  takeBufF32Array(bufPtr: number): Float32Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Float32Array(0);
+    const elemCount = len >>> 2;
+    return this.getF32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
+  }
+
+  takeBufF64Array(bufPtr: number): Float64Array {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return new Float64Array(0);
+    const elemCount = len >>> 3;
+    return this.getF64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
+  }
+
+  takeBufBoolArray(bufPtr: number): boolean[] {
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return [];
+    const bytes = this.getBytes().subarray(ptr, ptr + len);
+    return Array.from(bytes, (value) => value !== 0);
+  }
+
+  takeBufStructArray<T>(bufPtr: number, stride: number, decode: (view: DataView, offset: number) => T): T[] {
+    const { ptr, len: byteLen } = this.readBufDescriptor(bufPtr);
+    if (ptr === 0) return [];
+    const copy = new Uint8Array(this._memory.buffer, ptr, byteLen).slice();
+    const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength);
+    const count = (byteLen / stride) | 0;
+    return Array.from({ length: count }, (_, index) => decode(view, index * stride));
   }
 
   writeToMemory(ptr: number, data: Uint8Array): void {
@@ -647,73 +741,129 @@ export class BoltFFIModule {
     return result;
   }
 
-  takeSlotU8Array(): Uint8Array {
+  private readSlot(): { ptr: number; len: number; cap: number; align: number } {
     const slotView = this.getU32();
     const slotIdx = this._returnSlotAddr >>> 2;
-    const ptr = slotView[slotIdx];
-    const len = slotView[slotIdx + 1];
-    if (ptr === 0 || len === 0) return new Uint8Array(0);
+    return {
+      ptr: slotView[slotIdx],
+      len: slotView[slotIdx + 1],
+      cap: slotView[slotIdx + 2],
+      align: slotView[slotIdx + 3] || 1,
+    };
+  }
+
+  private freeSlotBuf(ptr: number, cap: number, align: number): void {
+    this.exports.boltffi_wasm_free_buf(ptr, cap, align);
+  }
+
+  takeSlotU8Array(): Uint8Array {
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Uint8Array(0);
     const result = this.getBytes().subarray(ptr, ptr + len).slice();
-    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    this.freeSlotBuf(ptr, cap, align);
     return result;
   }
 
   takeSlotI8Array(): Int8Array {
-    const slotView = this.getU32();
-    const slotIdx = this._returnSlotAddr >>> 2;
-    const ptr = slotView[slotIdx];
-    const len = slotView[slotIdx + 1];
-    if (ptr === 0 || len === 0) return new Int8Array(0);
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Int8Array(0);
     const result = this.getI8().subarray(ptr, ptr + len).slice();
-    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    this.freeSlotBuf(ptr, cap, align);
     return result;
   }
 
   takeSlotI32Array(): Int32Array {
-    const slotView = this.getU32();
-    const slotIdx = this._returnSlotAddr >>> 2;
-    const ptr = slotView[slotIdx];
-    const len = slotView[slotIdx + 1];
-    if (ptr === 0 || len === 0) return new Int32Array(0);
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Int32Array(0);
     const elemCount = len >>> 2;
     const result = this.getI32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
-    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    this.freeSlotBuf(ptr, cap, align);
     return result;
   }
 
   takeSlotU32Array(): Uint32Array {
-    const slotView = this.getU32();
-    const slotIdx = this._returnSlotAddr >>> 2;
-    const ptr = slotView[slotIdx];
-    const len = slotView[slotIdx + 1];
-    if (ptr === 0 || len === 0) return new Uint32Array(0);
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Uint32Array(0);
     const elemCount = len >>> 2;
     const result = this.getU32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
-    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    this.freeSlotBuf(ptr, cap, align);
     return result;
   }
 
   takeSlotF32Array(): Float32Array {
-    const slotView = this.getU32();
-    const slotIdx = this._returnSlotAddr >>> 2;
-    const ptr = slotView[slotIdx];
-    const len = slotView[slotIdx + 1];
-    if (ptr === 0 || len === 0) return new Float32Array(0);
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Float32Array(0);
     const elemCount = len >>> 2;
     const result = this.getF32().subarray(ptr >>> 2, (ptr >>> 2) + elemCount).slice();
-    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    this.freeSlotBuf(ptr, cap, align);
     return result;
   }
 
   takeSlotF64Array(): Float64Array {
-    const slotView = this.getU32();
-    const slotIdx = this._returnSlotAddr >>> 2;
-    const ptr = slotView[slotIdx];
-    const len = slotView[slotIdx + 1];
-    if (ptr === 0 || len === 0) return new Float64Array(0);
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Float64Array(0);
     const elemCount = len >>> 3;
     const result = this.getF64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
-    this.exports.boltffi_wasm_free_string_return(ptr, len);
+    this.freeSlotBuf(ptr, cap, align);
+    return result;
+  }
+
+  takeSlotI16Array(): Int16Array {
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Int16Array(0);
+    const elemCount = len >>> 1;
+    const result = this.getI16().subarray(ptr >>> 1, (ptr >>> 1) + elemCount).slice();
+    this.freeSlotBuf(ptr, cap, align);
+    return result;
+  }
+
+  takeSlotU16Array(): Uint16Array {
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new Uint16Array(0);
+    const elemCount = len >>> 1;
+    const result = this.getU16().subarray(ptr >>> 1, (ptr >>> 1) + elemCount).slice();
+    this.freeSlotBuf(ptr, cap, align);
+    return result;
+  }
+
+  takeSlotI64Array(): BigInt64Array {
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new BigInt64Array(0);
+    const elemCount = len >>> 3;
+    const result = this.getI64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
+    this.freeSlotBuf(ptr, cap, align);
+    return result;
+  }
+
+  takeSlotU64Array(): BigUint64Array {
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return new BigUint64Array(0);
+    const elemCount = len >>> 3;
+    const result = this.getU64().subarray(ptr >>> 3, (ptr >>> 3) + elemCount).slice();
+    this.freeSlotBuf(ptr, cap, align);
+    return result;
+  }
+
+  takeSlotBoolArray(): boolean[] {
+    const { ptr, len, cap, align } = this.readSlot();
+    if (ptr === 0) return [];
+    const bytes = this.getBytes().subarray(ptr, ptr + len);
+    const result = Array.from(bytes, (b) => b !== 0);
+    this.freeSlotBuf(ptr, cap, align);
+    return result;
+  }
+
+  takeSlotStructArray<T>(stride: number, decode: (view: DataView, offset: number) => T): T[] {
+    const { ptr, len: byteLen, cap, align } = this.readSlot();
+    if (ptr === 0) return [];
+    const count = (byteLen / stride) | 0;
+    const copy = new Uint8Array(this._memory.buffer, ptr, byteLen).slice();
+    this.freeSlotBuf(ptr, cap, align);
+    const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength);
+    const result: T[] = new Array(count);
+    for (let i = 0; i < count; i++) {
+      result[i] = decode(view, i * stride);
+    }
     return result;
   }
 
