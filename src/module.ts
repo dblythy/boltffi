@@ -399,6 +399,16 @@ export class BoltFFIModule {
     return { ptr, len: elementCount, allocationSize };
   }
 
+  allocCompositeBuffer<T>(
+    value: readonly T[],
+    elementSize: number,
+    writeElement: (writer: WriterAlloc, value: T) => void
+  ): WriterAlloc {
+    const writer = this.allocWriter(value.length * elementSize);
+    value.forEach((entry) => writeElement(writer, entry));
+    return writer;
+  }
+
   freePrimitiveBuffer(allocation: PrimitiveBufferAlloc): void {
     if (allocation.ptr !== 0 && allocation.allocationSize !== 0) {
       this.exports.boltffi_wasm_free(allocation.ptr, allocation.allocationSize);
@@ -693,6 +703,11 @@ export class BoltFFIModule {
   }
 
   unpackOptionF32(packed: number): number | null {
+    if (Number.isNaN(packed)) return null;
+    return packed;
+  }
+
+  unpackOptionF64(packed: number): number | null {
     if (Number.isNaN(packed)) return null;
     return packed;
   }
@@ -1017,6 +1032,22 @@ export interface BoltFFIImports {
   env?: Record<string, WebAssembly.ImportValue>;
 }
 
+function createUnimplementedImport(importName: string): (...args: unknown[]) => never {
+  return () => {
+    throw new Error(`Unimplemented wasm import: ${importName}`);
+  };
+}
+
+function createImportModuleProxy(moduleName: string): Record<string, WebAssembly.ImportValue> {
+  return new Proxy(
+    {},
+    {
+      get: (_target, propertyName) =>
+        createUnimplementedImport(`${moduleName}.${String(propertyName)}`),
+    }
+  );
+}
+
 export async function instantiateBoltFFI(
   source: BufferSource | Response,
   expectedVersion: number,
@@ -1037,6 +1068,8 @@ export async function instantiateBoltFFI(
       __boltffi_wake: (handle: number) => asyncManager.wake(handle),
       ...(imports?.env ?? {}),
     },
+    __wbindgen_placeholder__: createImportModuleProxy("__wbindgen_placeholder__"),
+    __wbindgen_externref_xform__: createImportModuleProxy("__wbindgen_externref_xform__"),
   };
 
   const { instance } = await WebAssembly.instantiate(wasmSource, importObject);
@@ -1064,6 +1097,8 @@ export function instantiateBoltFFISync(
       __boltffi_wake: (handle: number) => asyncManager.wake(handle),
       ...(imports?.env ?? {}),
     },
+    __wbindgen_placeholder__: createImportModuleProxy("__wbindgen_placeholder__"),
+    __wbindgen_externref_xform__: createImportModuleProxy("__wbindgen_externref_xform__"),
   };
 
   const wasmModule = new WebAssembly.Module(source);

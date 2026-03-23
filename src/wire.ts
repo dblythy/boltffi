@@ -1,6 +1,12 @@
 const UTF8_DECODER = new TextDecoder("utf-8");
 const UTF8_ENCODER = new TextEncoder();
 
+type TypedArrayConstructor<T extends ArrayBufferView> = {
+  new (buffer: ArrayBufferLike, byteOffset: number, length: number): T;
+  new (buffer: ArrayBufferLike): T;
+  readonly BYTES_PER_ELEMENT: number;
+};
+
 export class WireReader {
   private view: DataView;
   private offset: number;
@@ -116,60 +122,58 @@ export class WireReader {
     return result;
   }
 
+  private readTypedArray<T extends ArrayBufferView>(
+    typedArray: TypedArrayConstructor<T>,
+    len: number
+  ): T {
+    const byteOffset = this.offset;
+    const byteLength = len * typedArray.BYTES_PER_ELEMENT;
+    this.offset += byteLength;
+    if (byteOffset % typedArray.BYTES_PER_ELEMENT === 0) {
+      return new typedArray(this.view.buffer, byteOffset, len);
+    }
+    const copy = new Uint8Array(this.view.buffer, byteOffset, byteLength).slice().buffer;
+    return new typedArray(copy);
+  }
+
   readI16Array(): Int16Array {
     const len = this.readU32();
-    const result = new Int16Array(this.view.buffer, this.offset, len);
-    this.offset += len * 2;
-    return result;
+    return this.readTypedArray(Int16Array, len);
   }
 
   readU16Array(): Uint16Array {
     const len = this.readU32();
-    const result = new Uint16Array(this.view.buffer, this.offset, len);
-    this.offset += len * 2;
-    return result;
+    return this.readTypedArray(Uint16Array, len);
   }
 
   readI32Array(): Int32Array {
     const len = this.readU32();
-    const result = new Int32Array(this.view.buffer, this.offset, len);
-    this.offset += len * 4;
-    return result;
+    return this.readTypedArray(Int32Array, len);
   }
 
   readU32Array(): Uint32Array {
     const len = this.readU32();
-    const result = new Uint32Array(this.view.buffer, this.offset, len);
-    this.offset += len * 4;
-    return result;
+    return this.readTypedArray(Uint32Array, len);
   }
 
   readI64Array(): BigInt64Array {
     const len = this.readU32();
-    const result = new BigInt64Array(this.view.buffer, this.offset, len);
-    this.offset += len * 8;
-    return result;
+    return this.readTypedArray(BigInt64Array, len);
   }
 
   readU64Array(): BigUint64Array {
     const len = this.readU32();
-    const result = new BigUint64Array(this.view.buffer, this.offset, len);
-    this.offset += len * 8;
-    return result;
+    return this.readTypedArray(BigUint64Array, len);
   }
 
   readF32Array(): Float32Array {
     const len = this.readU32();
-    const result = new Float32Array(this.view.buffer, this.offset, len);
-    this.offset += len * 4;
-    return result;
+    return this.readTypedArray(Float32Array, len);
   }
 
   readF64Array(): Float64Array {
     const len = this.readU32();
-    const result = new Float64Array(this.view.buffer, this.offset, len);
-    this.offset += len * 8;
-    return result;
+    return this.readTypedArray(Float64Array, len);
   }
 
   readOptional<T>(readValue: () => T): T | null {
