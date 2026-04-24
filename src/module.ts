@@ -2,6 +2,7 @@ import { WireReader, WireWriter } from "./wire.js";
 import type { WasmWireWriterAllocator } from "./wire.js";
 
 const FFI_BUF_DESCRIPTOR_SIZE = 16;
+const FFI_STATUS_SIZE = 4;
 const MIN_WRITER_CAPACITY = 64;
 const MAX_WRITERS_PER_CAPACITY = 32;
 
@@ -187,6 +188,49 @@ export class BoltFFIModule {
     const view = this.getU32();
     const idx = this._returnSlotAddr >>> 2;
     return { ptr: view[idx], len: view[idx + 1], cap: view[idx + 2], align: view[idx + 3] };
+  }
+
+  completeAsync<T>(complete: (statusPtr: number) => T): T {
+    const statusPtr = this.allocStatus();
+    try {
+      const result = complete(statusPtr);
+      this.checkStatus(this.readStatus(statusPtr));
+      return result;
+    } finally {
+      this.freeStatus(statusPtr);
+    }
+  }
+
+  private allocStatus(): number {
+    const ptr = this.exports.boltffi_wasm_alloc(FFI_STATUS_SIZE);
+    if (ptr === 0) {
+      throw new Error("Failed to allocate memory for status");
+    }
+    this.getView().setInt32(ptr, 0, true);
+    return ptr;
+  }
+
+  private readStatus(ptr: number): number {
+    return this.getView().getInt32(ptr, true);
+  }
+
+  private freeStatus(ptr: number): void {
+    if (ptr !== 0) {
+      this.exports.boltffi_wasm_free(ptr, FFI_STATUS_SIZE);
+    }
+  }
+
+  private checkStatus(status: number): void {
+    if (status === 0) {
+      return;
+    }
+    if (status === 3) {
+      throw new Error("invalid argument");
+    }
+    if (status === 4) {
+      throw new BoltFFICancelledError();
+    }
+    throw new Error(`FFI failed in async completion with code ${status}`);
   }
 
   private getView(): DataView {

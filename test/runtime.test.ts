@@ -343,3 +343,20 @@ describe("BoltFFIModule memory operations", () => {
     expect(reusedWriter.len).toBe(0);
   });
 });
+
+describe("BoltFFIModule async completion", () => {
+  it("throws invalid argument from completion status", () => {
+    const { module, freedAllocations } = createHarness();
+
+    expect(() =>
+      module.completeAsync((statusPtr) => {
+        const status = new DataView(new ArrayBuffer(4));
+        status.setInt32(0, 3, true);
+        module.writeToMemory(statusPtr, new Uint8Array(status.buffer));
+        return 0;
+      })
+    ).toThrow("invalid argument");
+
+    expect(freedAllocations).toContainEqual([256, 4]);
+  });
+});
