@@ -746,6 +746,16 @@ export class BoltFFIModule {
     return packed >>> 0;
   }
 
+  unpackOptionI64(packed: number): bigint | null {
+    if (Number.isNaN(packed)) return null;
+    return BigInt(Math.trunc(packed));
+  }
+
+  unpackOptionU64(packed: number): bigint | null {
+    if (Number.isNaN(packed)) return null;
+    return BigInt(Math.trunc(packed));
+  }
+
   unpackOptionF32(packed: number): number | null {
     if (Number.isNaN(packed)) return null;
     return packed;

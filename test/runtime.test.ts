@@ -237,6 +237,15 @@ describe("WireWriter result encoding", () => {
 });
 
 describe("BoltFFIModule memory operations", () => {
+  it("decodes NaN-boxed optional i64 and u64 values", () => {
+    const { module } = createHarness();
+
+    expect(module.unpackOptionI64(Number.NaN)).toBeNull();
+    expect(module.unpackOptionU64(Number.NaN)).toBeNull();
+    expect(module.unpackOptionI64(-9_000_000_000)).toBe(-9_000_000_000n);
+    expect(module.unpackOptionU64(18_000_000_000)).toBe(18_000_000_000n);
+  });
+
   it("allocString writes UTF-8 bytes and freeAlloc releases them", () => {
     const { module, freedAllocations } = createHarness();
     const allocation = module.allocString("hello");
