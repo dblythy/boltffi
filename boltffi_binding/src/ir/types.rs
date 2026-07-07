@@ -78,6 +78,25 @@ impl TypeRef {
             _ => false,
         }
     }
+
+    /// Returns whether this type tree contains an [`InternedString`](TypeRef::InternedString).
+    ///
+    /// Used by the capability gate to detect bindings that require the
+    /// `InternedString` host capability.
+    pub fn contains_interned_string(&self) -> bool {
+        match self {
+            Self::InternedString { .. } => true,
+            Self::Optional(inner) | Self::Sequence(inner) => inner.contains_interned_string(),
+            Self::Tuple(elements) => elements.iter().any(TypeRef::contains_interned_string),
+            Self::Result { ok, err } => {
+                ok.contains_interned_string() || err.contains_interned_string()
+            }
+            Self::Map { key, value } => {
+                key.contains_interned_string() || value.contains_interned_string()
+            }
+            _ => false,
+        }
+    }
 }
 
 /// A primitive that can cross through direct-vector transport.

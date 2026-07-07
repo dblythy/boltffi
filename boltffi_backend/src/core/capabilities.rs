@@ -25,6 +25,16 @@ pub enum BindingCapability {
     Constants,
     /// Custom type declarations.
     CustomTypes,
+    /// Any declaration that references a tagged [`InternedString`] type.
+    ///
+    /// `InternedString` crosses the wire in a TAGGED format (byte 0 = tag;
+    /// tag 0 = u32 static-pool id; tag 1 = length-prefixed UTF-8 bytes).
+    /// Hosts that do not explicitly advertise this capability would silently
+    /// misparse the tagged bytes as a plain string. The gate ensures they
+    /// receive a clear generation-time error instead.
+    ///
+    /// [`InternedString`]: boltffi_binding::TypeRef::InternedString
+    InternedString,
 }
 
 /// A bridge feature a host renderer may require from its bridge stack.
@@ -147,12 +157,23 @@ where
 
 impl CapabilityRequirements<BindingCapability> {
     /// Builds binding requirements from the declarations in a contract.
+    ///
+    /// In addition to the per-declaration-kind capability (e.g. `Records`,
+    /// `Functions`), this also requires [`BindingCapability::InternedString`]
+    /// when any declaration references a `TypeRef::InternedString` anywhere in
+    /// its type tree (fields, parameters, return types, stream items, constant
+    /// values, or custom-type representations).
     pub fn from_bindings<S: Surface>(bindings: &Bindings<S>) -> Self {
         bindings
             .decls()
             .iter()
             .fold(Self::new(), |requirements, decl| {
-                requirements.require(BindingCapability::from_decl(decl))
+                let requirements = requirements.require(BindingCapability::from_decl(decl));
+                if DeclarationRef::from(decl).contains_interned_string() {
+                    requirements.require(BindingCapability::InternedString)
+                } else {
+                    requirements
+                }
             })
     }
 }
@@ -269,5 +290,110 @@ impl BindingCapability {
             DeclarationRef::Constant(_) => Self::Constants,
             DeclarationRef::CustomType(_) => Self::CustomTypes,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host that does NOT advertise `InternedString` (the default state for
+    /// every existing target on this branch).
+    fn capabilities_without_interned_string() -> HostCapabilities {
+        CapabilitySet::new()
+            .stable(BindingCapability::Records)
+            .stable(BindingCapability::Functions)
+    }
+
+    /// A host that explicitly advertises `InternedString` support (only the
+    /// Ruby target added in the stacked PR will do this).
+    fn capabilities_with_interned_string() -> HostCapabilities {
+        capabilities_without_interned_string().stable(BindingCapability::InternedString)
+    }
+
+    #[test]
+    fn interned_string_gate_rejects_host_without_capability() {
+        let required = CapabilityRequirements::new().require(BindingCapability::InternedString);
+        let result =
+            capabilities_without_interned_string().require_binding("test-target", &required);
+        assert!(
+            matches!(
+                result,
+                Err(Error::BindingCapability {
+                    target: "test-target",
+                    capability: BindingCapability::InternedString,
+                    ..
+                })
+            ),
+            "expected BindingCapability error for InternedString, got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn interned_string_gate_accepts_host_with_capability() {
+        let required = CapabilityRequirements::new().require(BindingCapability::InternedString);
+        let result = capabilities_with_interned_string().require_binding("test-target", &required);
+        assert!(
+            result.is_ok(),
+            "expected Ok when InternedString is advertised, got: {result:?}",
+        );
+    }
+
+    #[test]
+    fn unadvertised_interned_string_status_is_unsupported() {
+        let status =
+            capabilities_without_interned_string().status(BindingCapability::InternedString);
+        assert!(
+            !status.is_stable(),
+            "InternedString should not be stable when not advertised",
+        );
+        assert!(
+            matches!(status, CapabilityStatus::Unsupported { .. }),
+            "expected Unsupported, got: {status:?}",
+        );
+    }
+
+    #[test]
+    fn type_ref_detects_interned_string_in_nested_positions() {
+        use boltffi_binding::TypeRef;
+
+        // Direct match.
+        assert!(
+            TypeRef::InternedString {
+                static_values: vec![]
+            }
+            .contains_interned_string()
+        );
+
+        // Wrapped in Optional.
+        assert!(
+            TypeRef::Optional(Box::new(TypeRef::InternedString {
+                static_values: vec![]
+            }))
+            .contains_interned_string()
+        );
+
+        // Wrapped in Sequence.
+        assert!(
+            TypeRef::Sequence(Box::new(TypeRef::InternedString {
+                static_values: vec![]
+            }))
+            .contains_interned_string()
+        );
+
+        // Result ok-arm.
+        assert!(
+            TypeRef::Result {
+                ok: Box::new(TypeRef::InternedString {
+                    static_values: vec![]
+                }),
+                err: Box::new(TypeRef::String),
+            }
+            .contains_interned_string()
+        );
+
+        // Plain String does NOT trigger the gate.
+        assert!(!TypeRef::String.contains_interned_string());
+        assert!(!TypeRef::Optional(Box::new(TypeRef::String)).contains_interned_string());
     }
 }

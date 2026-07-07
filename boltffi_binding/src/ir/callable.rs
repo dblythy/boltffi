@@ -163,6 +163,15 @@ where
             || self.error.uses_builtin_codec(kind)
     }
 
+    /// Returns whether any value crossing in this callable references an interned string.
+    pub(crate) fn contains_interned_string(&self) -> bool {
+        self.params
+            .iter()
+            .any(|param| param.contains_interned_string())
+            || self.returns.contains_interned_string()
+            || self.error.contains_interned_string()
+    }
+
     /// Returns whether any value crossing in this callable uses a direct record vector.
     pub fn uses_direct_record_vector(&self) -> bool {
         self.params.iter().any(ParamDecl::uses_direct_record_vector)
@@ -207,6 +216,9 @@ pub trait ParamDirection<S: Surface>: Direction {
 
     /// Returns whether the payload carries a direct record vector.
     fn uses_direct_record_vector(payload: &Self::Payload) -> bool;
+
+    /// Returns whether the payload references an interned string.
+    fn contains_interned_string(payload: &Self::Payload) -> bool;
 }
 
 /// One incoming parameter crossing.
@@ -321,6 +333,13 @@ impl<S: Surface> ParamDirection<S> for IntoRust {
             IncomingParam::Closure(closure) => closure.uses_direct_record_vector(),
         }
     }
+
+    fn contains_interned_string(payload: &Self::Payload) -> bool {
+        match payload {
+            IncomingParam::Value(plan) => plan.contains_interned_string(),
+            IncomingParam::Closure(closure) => closure.contains_interned_string(),
+        }
+    }
 }
 
 impl<S: Surface> ParamDirection<S> for OutOfRust {
@@ -362,6 +381,13 @@ impl<S: Surface> ParamDirection<S> for OutOfRust {
         match payload {
             OutgoingParam::Value(plan) => plan.uses_direct_record_vector(),
             OutgoingParam::Closure(closure) => closure.uses_direct_record_vector(),
+        }
+    }
+
+    fn contains_interned_string(payload: &Self::Payload) -> bool {
+        match payload {
+            OutgoingParam::Value(plan) => plan.contains_interned_string(),
+            OutgoingParam::Closure(closure) => closure.contains_interned_string(),
         }
     }
 }
@@ -420,6 +446,10 @@ impl<S: Surface, D: ParamDirection<S>> ParamDecl<S, D> {
 
     fn uses_direct_record_vector(&self) -> bool {
         D::uses_direct_record_vector(&self.payload)
+    }
+
+    fn contains_interned_string(&self) -> bool {
+        D::contains_interned_string(&self.payload)
     }
 }
 
@@ -536,6 +566,10 @@ where
     fn uses_direct_record_vector(&self) -> bool {
         self.crossing.uses_direct_record_vector()
     }
+
+    fn contains_interned_string(&self) -> bool {
+        self.crossing.contains_interned_string()
+    }
 }
 
 /// Closure payload at a return slot.
@@ -606,6 +640,10 @@ where
 
     fn uses_direct_record_vector(&self) -> bool {
         self.crossing.uses_direct_record_vector()
+    }
+
+    fn contains_interned_string(&self) -> bool {
+        self.crossing.contains_interned_string()
     }
 }
 
@@ -683,6 +721,10 @@ where
 
     fn uses_direct_record_vector(&self) -> bool {
         self.invoke.uses_direct_record_vector()
+    }
+
+    fn contains_interned_string(&self) -> bool {
+        self.invoke.contains_interned_string()
     }
 }
 
@@ -863,6 +905,13 @@ impl<S: Surface, D: Direction> ParamPlan<S, D> {
             }
         )
     }
+
+    fn contains_interned_string(&self) -> bool {
+        match self {
+            Self::Encoded { ty, .. } => ty.contains_interned_string(),
+            _ => false,
+        }
+    }
 }
 
 /// Target-language rendering for parameter plans.
@@ -954,6 +1003,10 @@ where
 
     fn uses_direct_record_vector(&self) -> bool {
         self.plan.uses_direct_record_vector()
+    }
+
+    fn contains_interned_string(&self) -> bool {
+        self.plan.contains_interned_string()
     }
 }
 
@@ -1205,6 +1258,16 @@ where
         }
     }
 
+    fn contains_interned_string(&self) -> bool {
+        match self {
+            Self::EncodedViaReturnSlot { ty, .. } | Self::EncodedViaOutPointer { ty, .. } => {
+                ty.contains_interned_string()
+            }
+            Self::ClosureViaOutPointer(closure) => closure.contains_interned_string(),
+            _ => false,
+        }
+    }
+
     /// Switches a `*ViaReturnSlot` variant to its `*ViaOutPointer`
     /// counterpart. Called when the matching error channel takes the
     /// return slot.
@@ -1368,6 +1431,15 @@ impl<S: Surface, D: Direction> ErrorDecl<S, D> {
         match self {
             Self::EncodedViaReturnSlot { codec, .. } | Self::EncodedViaOutPointer { codec, .. } => {
                 D::codec_uses_builtin(codec, kind)
+            }
+            _ => false,
+        }
+    }
+
+    fn contains_interned_string(&self) -> bool {
+        match self {
+            Self::EncodedViaReturnSlot { ty, .. } | Self::EncodedViaOutPointer { ty, .. } => {
+                ty.contains_interned_string()
             }
             _ => false,
         }
