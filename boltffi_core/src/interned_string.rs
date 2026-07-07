@@ -130,7 +130,7 @@ impl<P: InternedStringPool> WireDecode for InternedString<P> {
             }
             1 => {
                 let (value, used) = String::decode_from(&buf[1..])?;
-                Ok((Self::dynamic(value), 1 + used))
+                Ok((Self::from_str(&value), 1 + used))
             }
             _ => Err(DecodeError::InvalidValue(
                 InvalidWireValue::InternedStringTag,

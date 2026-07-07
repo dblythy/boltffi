@@ -408,14 +408,16 @@ impl<'a> Scanner<'a> {
         {
             return Err(ScanError::unsupported_type(source));
         }
-        let static_values = self
+        let (pool_canonical_path, static_values) = self
             .declared_types
-            .resolve_interned_string_pool(self.scope, &pool_path.path)?
-            .ok_or_else(|| ScanError::unsupported_type(source))?
-            .to_vec();
+            .resolve_interned_string_pool_entry(self.scope, &pool_path.path)?
+            .ok_or_else(|| ScanError::unsupported_type(source))?;
         Ok(TypeExpr::interned_string(
-            interned_string_source_path(&type_path.path, &pool_path.path),
-            static_values,
+            interned_string_source_path(
+                &type_path.path,
+                &interned_string_pool_source_path(self.scope, pool_canonical_path),
+            ),
+            static_values.to_vec(),
         ))
     }
 
@@ -500,17 +502,49 @@ fn ast_path_without_arguments(path: &syn::Path) -> Path {
     )
 }
 
-fn interned_string_source_path(type_path: &syn::Path, pool_path: &syn::Path) -> Path {
+fn interned_string_source_path(type_path: &syn::Path, pool_path: &Path) -> Path {
     let mut segments = path_segments_without_arguments(type_path).collect::<Vec<_>>();
     if let Some(last) = segments.last_mut() {
         *last = PathSegment::with_arguments(
             last.name.clone(),
-            vec![GenericArgument::Const(ConstExpr::Raw(
-                pool_path.to_token_stream().to_string().replace(' ', ""),
-            ))],
+            vec![GenericArgument::Const(ConstExpr::Raw(path_spelling(
+                pool_path,
+            )))],
         );
     }
     Path::new(path_root(type_path), segments)
+}
+
+fn interned_string_pool_source_path(scope: &ModuleScope, canonical_path: &str) -> Path {
+    let root = scope.path().segments().first();
+    let segments = canonical_path
+        .split("::")
+        .skip_while(|segment| root.is_some_and(|root| *segment == root))
+        .map(PathSegment::new)
+        .collect();
+    Path::new(PathRoot::Crate, segments)
+}
+
+fn path_spelling(path: &Path) -> String {
+    let prefix = match path.root {
+        PathRoot::Relative => String::new(),
+        PathRoot::Crate => "crate::".to_owned(),
+        PathRoot::Self_ => "self::".to_owned(),
+        PathRoot::Super(count) => {
+            std::iter::repeat_n("super", count.get())
+                .collect::<Vec<_>>()
+                .join("::")
+                + "::"
+        }
+        PathRoot::Absolute => "::".to_owned(),
+    };
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.name.as_str())
+        .collect::<Vec<_>>()
+        .join("::");
+    format!("{prefix}{segments}")
 }
 
 fn path_root(path: &syn::Path) -> PathRoot {

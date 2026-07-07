@@ -1,6 +1,8 @@
 use std::fmt;
 
-use boltffi_ast::{FnSig, Primitive as AstPrimitive, ReturnDef, TypeExpr};
+use boltffi_ast::{
+    ConstExpr, FnSig, GenericArgument, Path, Primitive as AstPrimitive, ReturnDef, TypeExpr,
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
@@ -118,7 +120,9 @@ impl fmt::Display for TypeSignature<'_> {
             TypeExpr::Enum { id, .. } => formatter.write_str(&source_type_signature(id.as_str())),
             TypeExpr::Class { id, .. } => formatter.write_str(&source_type_signature(id.as_str())),
             TypeExpr::Custom { id, .. } => formatter.write_str(&source_type_signature(id.as_str())),
-            TypeExpr::InternedString { .. } => formatter.write_str("InternedString"),
+            TypeExpr::InternedString { path, .. } => {
+                write!(formatter, "InternedString{}", path_signature(path))
+            }
             TypeExpr::ImplTrait(bounds) | TypeExpr::Dyn(bounds) => match &bounds.base {
                 boltffi_ast::BaseTrait::Named { id, .. } => {
                     formatter.write_str(&source_type_signature(id.as_str()))
@@ -168,6 +172,41 @@ fn source_type_signature(source_id: &str) -> String {
         .collect()
 }
 
+fn path_signature(path: &Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| {
+            let mut signature = capitalize(segment.name.as_str());
+            segment
+                .arguments
+                .iter()
+                .for_each(|argument| signature.push_str(&generic_argument_signature(argument)));
+            signature
+        })
+        .collect()
+}
+
+fn generic_argument_signature(argument: &GenericArgument) -> String {
+    match argument {
+        GenericArgument::Type(type_expr) => TypeSignature(type_expr).to_string(),
+        GenericArgument::Const(expr) => const_expr_signature(expr),
+        GenericArgument::AssociatedType { name, type_expr } => {
+            format!("{}{}", capitalize(name.as_str()), TypeSignature(type_expr))
+        }
+    }
+}
+
+fn const_expr_signature(expr: &ConstExpr) -> String {
+    match expr {
+        ConstExpr::Literal(literal) => source_type_signature(&format!("{:?}", literal)),
+        ConstExpr::Path(path) => path_signature(path),
+        ConstExpr::Array(elements) | ConstExpr::Tuple(elements) => {
+            elements.iter().map(const_expr_signature).collect()
+        }
+        ConstExpr::Raw(text) => source_type_signature(text),
+    }
+}
+
 fn primitive_signature(primitive: AstPrimitive) -> String {
     let rust_name = primitive.rust_name();
     rust_name
@@ -205,7 +244,7 @@ fn symbol_case(name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use boltffi_ast::{Path, Primitive, RecordId};
+    use boltffi_ast::{ConstExpr, GenericArgument, Path, PathSegment, Primitive, RecordId};
 
     use super::*;
 
@@ -215,6 +254,19 @@ mod tests {
 
     fn record(id: &str, path: &str) -> TypeExpr {
         TypeExpr::record(RecordId::new(id), Path::single(path))
+    }
+
+    fn interned_string(pool: &str) -> TypeExpr {
+        TypeExpr::interned_string(
+            Path::new(
+                boltffi_ast::PathRoot::Relative,
+                vec![PathSegment::with_arguments(
+                    "InternedString",
+                    vec![GenericArgument::Const(ConstExpr::Raw(pool.to_owned()))],
+                )],
+            ),
+            vec!["Chrome".to_owned()],
+        )
     }
 
     #[test]
@@ -245,6 +297,17 @@ mod tests {
         assert_eq!(
             ClosureSignature::from_fn_signature(&second).symbol_part(),
             "___closure__b_point"
+        );
+    }
+
+    #[test]
+    fn signature_includes_interned_string_pool() {
+        let first = closure(vec![interned_string("BrowserName")], ReturnDef::Void);
+        let second = closure(vec![interned_string("EngineName")], ReturnDef::Void);
+
+        assert_ne!(
+            ClosureSignature::from_fn_signature(&first).symbol_part(),
+            ClosureSignature::from_fn_signature(&second).symbol_part()
         );
     }
 

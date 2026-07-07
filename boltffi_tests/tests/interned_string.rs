@@ -62,3 +62,17 @@ fn interned_string_wire_decode_round_trips_static_and_dynamic_values() {
     assert_eq!(used, dynamic.len());
     assert!(matches!(dynamic_value.repr(), InternedStringRepr::Dynamic(text) if text == "Unknown"));
 }
+
+#[test]
+fn interned_string_wire_decode_canonicalizes_known_dynamic_payloads() {
+    let mut dynamic = vec![1];
+    dynamic.extend_from_slice(&("Chrome".len() as u32).to_le_bytes());
+    dynamic.extend_from_slice(b"Chrome");
+
+    let (value, used) = InternedString::<BrowserName>::decode_from(&dynamic)
+        .expect("dynamic interned string decodes");
+
+    assert_eq!(used, dynamic.len());
+    assert_eq!(value, BrowserName::CHROME);
+    assert!(matches!(value.repr(), InternedStringRepr::Interned(0)));
+}

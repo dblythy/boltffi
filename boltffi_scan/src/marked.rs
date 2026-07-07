@@ -286,7 +286,10 @@ fn interned_string_pool_path(path: &syn::Path) -> bool {
         .collect::<Vec<_>>();
     match segments.as_slice() {
         [name] => path.leading_colon.is_none() && name == "interned_string_pool",
-        [namespace, name] => namespace == "boltffi" && name == "interned_string_pool",
+        [namespace, name] => {
+            matches!(namespace.as_str(), "boltffi" | "boltffi_core")
+                && name == "interned_string_pool"
+        }
         _ => false,
     }
 }
@@ -465,5 +468,20 @@ mod tests {
         let marked = MarkedItems::collect(&tree).expect("marked items");
 
         assert_eq!(marked.customs().len(), 0);
+    }
+
+    #[test]
+    fn collects_core_qualified_interned_string_pool_macro() {
+        let tree = tree(
+            r#"boltffi_core::interned_string_pool! {
+                pub struct BrowserName {
+                    CHROME = "Chrome",
+                }
+            }"#,
+        );
+
+        let marked = MarkedItems::collect(&tree).expect("marked items");
+
+        assert_eq!(marked.interned_string_pools().len(), 1);
     }
 }
