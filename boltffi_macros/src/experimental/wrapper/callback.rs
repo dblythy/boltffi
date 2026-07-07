@@ -837,6 +837,7 @@ impl<'lowered, S: RenderSurface, TargetName> CallbackMethods<'lowered, S, Target
             | TypeExpr::Unit
             | TypeExpr::String
             | TypeExpr::Str
+            | TypeExpr::InternedString { .. }
             | TypeExpr::Builtin(_)
             | TypeExpr::Record { .. }
             | TypeExpr::Enum { .. }
