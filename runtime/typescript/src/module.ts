@@ -1093,18 +1093,10 @@ function createImportModuleProxy(moduleName: string): Record<string, WebAssembly
 }
 
 export async function instantiateBoltFFI(
-  source: BufferSource | Response,
+  source: BufferSource | Response | WebAssembly.Module,
   expectedVersion: number,
   imports?: BoltFFIImports
 ): Promise<BoltFFIModule> {
-  let wasmSource: BufferSource;
-
-  if (source instanceof Response) {
-    wasmSource = await source.arrayBuffer();
-  } else {
-    wasmSource = source;
-  }
-
   const asyncManager = new AsyncFutureManager();
 
   const importObject: WebAssembly.Imports = {
@@ -1116,7 +1108,20 @@ export async function instantiateBoltFFI(
     __wbindgen_externref_xform__: createImportModuleProxy("__wbindgen_externref_xform__"),
   };
 
-  const { instance } = await WebAssembly.instantiate(wasmSource, importObject);
+  // `WebAssembly.instantiate` has two unrelated overloads: given a
+  // BufferSource/Response-derived ArrayBuffer it resolves `{module, instance}`,
+  // but given an already-compiled `WebAssembly.Module` (the only form bundlers'
+  // ES-module `.wasm` imports hand you — e.g. Cloudflare Workers, which has no
+  // filesystem and thus no raw bytes to re-fetch) it resolves the `Instance`
+  // directly. Branch on the input rather than always destructuring `{instance}`,
+  // which silently produced `undefined` for the Module case.
+  let instance: WebAssembly.Instance;
+  if (source instanceof WebAssembly.Module) {
+    instance = await WebAssembly.instantiate(source, importObject);
+  } else {
+    const wasmSource = source instanceof Response ? await source.arrayBuffer() : source;
+    ({ instance } = await WebAssembly.instantiate(wasmSource, importObject));
+  }
   const module = new BoltFFIModule(instance, asyncManager);
 
   const actualVersion = module.exports.boltffi_wasm_abi_version();
