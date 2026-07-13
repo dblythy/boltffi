@@ -91,6 +91,16 @@ fn jni_bridge_renders_async_complete_return_shapes() {
 }
 
 #[test]
+fn jni_bridge_renders_async_fallible_void_complete_as_a_void_function() {
+    insta::assert_snapshot!(rendered_fixture("exports/async_fallible_void_returns"));
+}
+
+#[test]
+fn jni_bridge_renders_async_fallible_scalar_complete_returning_the_payload() {
+    insta::assert_snapshot!(rendered_fixture("exports/async_fallible_scalar_returns"));
+}
+
+#[test]
 fn jni_bridge_renders_closure_parameters_from_contract_group() {
     insta::assert_snapshot!(rendered_fixture("exports/closure_parameter"));
 }

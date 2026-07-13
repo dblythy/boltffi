@@ -1,0 +1,124 @@
+---
+source: boltffi_backend/tests/jni/native_methods.rs
+assertion_line: 95
+expression: "rendered_fixture(\"exports/async_fallible_void_returns\")"
+---
+===== jni/demo.h =====
+<c abi support declarations>
+typedef int32_t ___MathError;
+#define MATH_ERROR_INVALID_INPUT ((___MathError)0)
+RustFutureHandle boltffi_function_demo_clear_all(bool should_fail);
+void boltffi_async_function_demo_clear_all_poll(RustFutureHandle handle, uint64_t callback_data, void (*callback)(uint64_t, int8_t));
+FfiBuf_u8 boltffi_async_function_demo_clear_all_complete(RustFutureHandle handle, FfiStatus *out_status);
+FfiBuf_u8 boltffi_async_function_demo_clear_all_panic_message(RustFutureHandle handle);
+void boltffi_async_function_demo_clear_all_cancel(RustFutureHandle handle);
+void boltffi_async_function_demo_clear_all_free(RustFutureHandle handle);
+
+===== jni/jni_glue.c =====
+<jni source includes>
+<jni thread runtime>
+<jni continuation helper>
+<jni exception helpers>
+<jni status helper>
+<jni error-buffer helper>
+<jni byte-array helpers>
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) != JNI_OK) {
+        return JNI_ERR;
+    }
+    jclass local_class = (*env)->FindClass(env, "com/boltffi/demo/Native");
+    if (local_class == NULL) {
+        return JNI_ERR;
+    }
+    boltffi_jni_native_class = (*env)->NewGlobalRef(env, local_class);
+    (*env)->DeleteLocalRef(env, local_class);
+    if (boltffi_jni_native_class == NULL) {
+        return JNI_ERR;
+    }
+    if (!boltffi_jni_continuation_load(env)) {
+        (*env)->DeleteGlobalRef(env, boltffi_jni_native_class);
+        boltffi_jni_native_class = NULL;
+        return JNI_ERR;
+    }
+    boltffi_jni_vm = vm;
+    return JNI_VERSION_1_6;
+}
+
+JNIEXPORT void JNICALL JNI_OnUnload(JavaVM *vm, void *reserved) {
+    (void)reserved;
+    JNIEnv *env = NULL;
+    if ((*vm)->GetEnv(vm, (void **)&env, JNI_VERSION_1_6) == JNI_OK) {
+        boltffi_jni_continuation_unload(env);
+        if (boltffi_jni_native_class != NULL) {
+            (*env)->DeleteGlobalRef(env, boltffi_jni_native_class);
+        }
+    }
+    boltffi_jni_vm = NULL;
+    boltffi_jni_native_class = NULL;
+}
+
+JNIEXPORT jlong JNICALL Java_com_boltffi_demo_Native_boltffi_1function_1demo_1clear_1all(JNIEnv *env, jclass cls, jboolean should_fail) {
+    (void)cls;
+
+    (void)env;
+    RustFutureHandle __boltffi_result = boltffi_function_demo_clear_all(should_fail);
+
+    return (jlong)__boltffi_result;
+}
+
+JNIEXPORT void JNICALL Java_com_boltffi_demo_Native_boltffi_1async_1function_1demo_1clear_1all_1poll(JNIEnv *env, jclass cls, jlong handle, jlong callback_data) {
+    (void)cls;
+
+    (void)env;
+    boltffi_async_function_demo_clear_all_poll((RustFutureHandle)handle, callback_data, boltffi_jni_continuation_callback);
+
+    return;
+}
+
+JNIEXPORT void JNICALL Java_com_boltffi_demo_Native_boltffi_1async_1function_1demo_1clear_1all_1complete(JNIEnv *env, jclass cls, jlong handle) {
+    (void)cls;
+
+    FfiStatus __boltffi_status = (FfiStatus){0};
+
+    FfiBuf_u8 __boltffi_result = boltffi_async_function_demo_clear_all_complete((RustFutureHandle)handle, &__boltffi_status);
+
+    if (__boltffi_result.ptr != NULL || __boltffi_result.len != 0) {
+        boltffi_jni_throw_error_buffer(env, __boltffi_result);
+        return;
+    }
+    if (__boltffi_status.code != 0) {
+        boltffi_jni_throw_status(env, __boltffi_status);
+        return;
+    }
+
+    return;
+}
+
+JNIEXPORT jbyteArray JNICALL Java_com_boltffi_demo_Native_boltffi_1async_1function_1demo_1clear_1all_1panic_1message(JNIEnv *env, jclass cls, jlong handle) {
+    (void)cls;
+
+    (void)env;
+    FfiBuf_u8 __boltffi_result = boltffi_async_function_demo_clear_all_panic_message((RustFutureHandle)handle);
+
+    return boltffi_jni_buffer_to_byte_array(env, __boltffi_result);
+}
+
+JNIEXPORT void JNICALL Java_com_boltffi_demo_Native_boltffi_1async_1function_1demo_1clear_1all_1cancel(JNIEnv *env, jclass cls, jlong handle) {
+    (void)cls;
+
+    (void)env;
+    boltffi_async_function_demo_clear_all_cancel((RustFutureHandle)handle);
+
+    return;
+}
+
+JNIEXPORT void JNICALL Java_com_boltffi_demo_Native_boltffi_1async_1function_1demo_1clear_1all_1free(JNIEnv *env, jclass cls, jlong handle) {
+    (void)cls;
+
+    (void)env;
+    boltffi_async_function_demo_clear_all_free((RustFutureHandle)handle);
+
+    return;
+}
