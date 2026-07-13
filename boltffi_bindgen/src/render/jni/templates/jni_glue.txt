@@ -1444,7 +1444,7 @@ JNIEXPORT void JNICALL {{ method.jni_name }}(JNIEnv *env, jclass cls, jlong hand
         goto boltffi_input_cleanup;
     }
     vtable->{{ method.vtable_field }}(
-        callback->handle{% if method.params.len() > 0 %}, {% endif %}{% for param in method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}{% if method.params.len() > 0 %}, {% endif %}{{ cb.trait_name }}_{{ method.vtable_field }}_proxy_callback,
+        callback->handle{% if method.params.len() > 0 %}, {% endif %}{% for param in method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, {{ cb.trait_name }}_{{ method.vtable_field }}_proxy_callback,
         (uint64_t)callbackData
     );
 boltffi_input_cleanup:
