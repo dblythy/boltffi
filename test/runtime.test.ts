@@ -1,6 +1,22 @@
 import { describe, expect, it } from "vitest";
-import { AsyncFutureManager, BoltFFIModule } from "../src/module.js";
+import { AsyncFutureManager, BoltFFIModule, instantiateBoltFFI } from "../src/module.js";
 import { WireReader, WireWriter, wireErr, wireOk } from "../src/wire.js";
+
+// A hand-assembled minimal valid WASM module (no toolchain dependency) exporting
+// just enough for `instantiateBoltFFI` to succeed: a 1-page memory,
+// `boltffi_wasm_abi_version() -> i32` (returns 7), and
+// `boltffi_wasm_return_slot_addr() -> i32` (returns 0). Built once and reused —
+// see the byte-by-byte derivation this was generated from in the boltffi-fork
+// track notes if it ever needs regenerating.
+const MINIMAL_BOLTFFI_WASM = new Uint8Array([
+  0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+  0x03, 0x02, 0x00, 0x00, 0x05, 0x03, 0x01, 0x00, 0x01, 0x07, 0x45, 0x03, 0x06, 0x6d, 0x65, 0x6d,
+  0x6f, 0x72, 0x79, 0x02, 0x00, 0x18, 0x62, 0x6f, 0x6c, 0x74, 0x66, 0x66, 0x69, 0x5f, 0x77, 0x61,
+  0x73, 0x6d, 0x5f, 0x61, 0x62, 0x69, 0x5f, 0x76, 0x65, 0x72, 0x73, 0x69, 0x6f, 0x6e, 0x00, 0x00,
+  0x1d, 0x62, 0x6f, 0x6c, 0x74, 0x66, 0x66, 0x69, 0x5f, 0x77, 0x61, 0x73, 0x6d, 0x5f, 0x72, 0x65,
+  0x74, 0x75, 0x72, 0x6e, 0x5f, 0x73, 0x6c, 0x6f, 0x74, 0x5f, 0x61, 0x64, 0x64, 0x72, 0x00, 0x01,
+  0x0a, 0x0b, 0x02, 0x04, 0x00, 0x41, 0x07, 0x0b, 0x04, 0x00, 0x41, 0x00, 0x0b,
+]);
 
 type ExportFunction = (...args: number[]) => number | void;
 
@@ -358,5 +374,40 @@ describe("BoltFFIModule async completion", () => {
     ).toThrow("invalid argument");
 
     expect(freedAllocations).toContainEqual([256, 4]);
+  });
+});
+
+describe("instantiateBoltFFI", () => {
+  it("accepts an ArrayBuffer source", async () => {
+    const mod = await instantiateBoltFFI(MINIMAL_BOLTFFI_WASM.buffer, 7);
+    expect(mod.exports.boltffi_wasm_abi_version()).toBe(7);
+  });
+
+  it("accepts a Response source", async () => {
+    const response = new Response(MINIMAL_BOLTFFI_WASM);
+    const mod = await instantiateBoltFFI(response, 7);
+    expect(mod.exports.boltffi_wasm_abi_version()).toBe(7);
+  });
+
+  /// Regression test for a bug found in the Cloudflare Workers harness:
+  /// bundlers' ES-module `.wasm` import (`import wasmModule from "./foo.wasm"`)
+  /// hands the caller an already-compiled `WebAssembly.Module`, not raw bytes —
+  /// Workers has no filesystem and no other sanctioned way to get a `.wasm`
+  /// asset's bytes. `WebAssembly.instantiate(module, importObject)` resolves
+  /// straight to an `Instance` per spec (only the BufferSource/Response overload
+  /// resolves `{module, instance}`), so the old code's unconditional
+  /// `const { instance } = await WebAssembly.instantiate(source, ...)` destructured
+  /// `undefined` out of the resolved `Instance` and `new BoltFFIModule(undefined, ...)`
+  /// threw reading `.exports`.
+  it("accepts an already-compiled WebAssembly.Module source", async () => {
+    const precompiled = await WebAssembly.compile(MINIMAL_BOLTFFI_WASM);
+    const mod = await instantiateBoltFFI(precompiled, 7);
+    expect(mod.exports.boltffi_wasm_abi_version()).toBe(7);
+  });
+
+  it("throws a clear ABI mismatch error rather than silently continuing", async () => {
+    await expect(instantiateBoltFFI(MINIMAL_BOLTFFI_WASM.buffer, 99)).rejects.toThrow(
+      "BoltFFI ABI version mismatch: expected 99, got 7"
+    );
   });
 });
