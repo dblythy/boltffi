@@ -166,8 +166,13 @@ impl<'a> CSharpLowerer<'a> {
             CallMode::Sync => call.returns.decode_ops.as_ref(),
             CallMode::Async(async_call) => async_call.result.decode_ops.as_ref(),
         };
-        let return_kind =
-            self.return_kind(&method_def.returns, &return_type, complete_decode_ops, None);
+        let shadowed = self.self_name_shadow(method_def.id.as_str());
+        let return_kind = self.return_kind(
+            &method_def.returns,
+            &return_type,
+            complete_decode_ops,
+            shadowed.as_ref(),
+        );
 
         // Instance methods carry a synthetic `self` at the head of the
         // ABI param list. Skip it when building wire writers and when

@@ -591,6 +591,18 @@ impl<'c> Lowerer<'c> {
 
     pub(super) fn codec_from_transport(&self, value: &Transport) -> CodecPlan {
         match value {
+            // A blittable C-style enum's `ScalarOrigin` remembers its
+            // `enum_id` precisely so this path (reached when a scalar-shaped
+            // value still needs a wire codec, e.g. as the `Ok` side of a
+            // `Result` return) can route through the real `Enum` codec
+            // instead of collapsing to its bare backing primitive. Losing
+            // the enum identity here previously produced a decode
+            // expression indistinguishable from a plain `i32` (no `<Type>`
+            // cast, no `<Type>Wire.Decode` dispatch) even though the
+            // declared return type was the enum.
+            Transport::Scalar(ScalarOrigin::CStyleEnum { enum_id, .. }) => {
+                self.build_codec(&TypeExpr::Enum(enum_id.clone()))
+            }
             Transport::Scalar(origin) => CodecPlan::Primitive(origin.primitive()),
             Transport::Composite(layout) => {
                 self.build_codec(&TypeExpr::Record(layout.record_id.clone()))

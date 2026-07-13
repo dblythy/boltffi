@@ -32,8 +32,13 @@ impl<'a> CSharpLowerer<'a> {
             CallMode::Sync => call.returns.decode_ops.as_ref(),
             CallMode::Async(async_call) => async_call.result.decode_ops.as_ref(),
         };
-        let return_kind =
-            self.return_kind(&function.returns, &return_type, complete_decode_ops, None);
+        let shadowed = self.self_name_shadow(function.id.as_str());
+        let return_kind = self.return_kind(
+            &function.returns,
+            &return_type,
+            complete_decode_ops,
+            shadowed.as_ref(),
+        );
 
         let wire_writers = self.wire_writers_for_params(function)?;
 

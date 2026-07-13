@@ -295,11 +295,12 @@ impl<'a> CSharpLowerer<'a> {
         let name = CSharpMethodName::from_source(raw_name);
         let return_def = constructor_return_def(ctor, TypeExpr::Enum(enum_id.clone()));
         let return_type = self.lower_return(&return_def)?;
+        let shadowed = self.self_name_shadow(raw_name);
         let return_kind = self.return_kind(
             &return_def,
             &return_type,
             call.returns.decode_ops.as_ref(),
-            None,
+            shadowed.as_ref(),
         );
         let mut ctor_size_locals = size::SizeLocalCounters::default();
         let mut ctor_encode_locals = encode::EncodeLocalCounters::default();

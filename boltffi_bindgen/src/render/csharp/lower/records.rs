@@ -138,11 +138,12 @@ impl<'a> CSharpLowerer<'a> {
         // already picks the blittable fast path for plain `Value(Record)`.
         let return_def = constructor_return_def(ctor, TypeExpr::Record(record_id.clone()));
         let return_type = self.lower_return(&return_def)?;
+        let shadowed = self.self_name_shadow(raw_name);
         let return_kind = self.return_kind(
             &return_def,
             &return_type,
             call.returns.decode_ops.as_ref(),
-            None,
+            shadowed.as_ref(),
         );
         let mut ctor_size_locals = size::SizeLocalCounters::default();
         let mut ctor_encode_locals = encode::EncodeLocalCounters::default();
@@ -199,11 +200,12 @@ impl<'a> CSharpLowerer<'a> {
             method_def.returns.clone()
         };
         let return_type = self.lower_return(&lifted_returns)?;
+        let shadowed = self.self_name_shadow(method_def.id.as_str());
         let return_kind = self.return_kind(
             &lifted_returns,
             &return_type,
             call.returns.decode_ops.as_ref(),
-            None,
+            shadowed.as_ref(),
         );
 
         let receiver = match method_def.receiver {

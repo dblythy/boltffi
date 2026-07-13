@@ -680,6 +680,188 @@ mod tests {
         );
     }
 
+    /// Writes `output`'s files into a throwaway console-app project and runs
+    /// `dotnet build`, panicking with the compiler's own diagnostics on
+    /// failure. Shared by the regression smokes below — each pins one
+    /// mechanical codegen bug found generating real bindings for a class
+    /// with a `Result<T, String>`-returning method, the shape every
+    /// fallible FFI method actually uses (parse-core-sdks' `ParseClient`,
+    /// not a synthetic one-off).
+    fn assert_dotnet_build_succeeds(target_framework: &str, output: CSharpOutput, label: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time before epoch")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("boltffi-csharp-{label}-{now}"));
+        std::fs::create_dir_all(&dir).expect("create smoke test directory");
+
+        let csproj = format!(
+            r#"<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>{target_framework}</TargetFramework>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+</Project>
+"#
+        );
+        std::fs::write(dir.join("Smoke.csproj"), csproj).expect("write smoke csproj");
+        std::fs::write(
+            dir.join("Program.cs"),
+            "namespace DemoLib;\ninternal static class Program { private static void Main() { } }\n",
+        )
+        .expect("write smoke program");
+        for file in output.files {
+            std::fs::write(dir.join(file.file_name), file.source).expect("write generated C#");
+        }
+
+        let build = std::process::Command::new("dotnet")
+            .arg("build")
+            .arg(&dir)
+            .arg("--nologo")
+            .output()
+            .expect("dotnet build should execute");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            build.status.success(),
+            "generated C# ({label}) should compile with dotnet\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&build.stdout),
+            String::from_utf8_lossy(&build.stderr)
+        );
+    }
+
+    /// Regression test for a bug found generating real bindings for
+    /// `parse-core-sdks`' `ParseClient::network_state(&self) -> Result<NetworkState,
+    /// String>` (a plain C-style enum behind a fallible return, the normal
+    /// shape for any FFI method that can fail): `codec_from_transport`
+    /// collapsed `Transport::Scalar(ScalarOrigin::CStyleEnum { .. })` to its
+    /// bare backing `CodecPlan::Primitive`, losing the enum identity, so the
+    /// decode expression became `reader.ReadI32()` — a bare `int` — assigned
+    /// to a method whose declared return type is the enum, `CS0266: cannot
+    /// implicitly convert type 'int' to 'NetworkState'`. Exercises both the
+    /// sync and async-completer decode paths, which shared the same bug.
+    #[test]
+    fn emit_class_method_returning_result_of_c_style_enum_decodes_through_enum_not_raw_int() {
+        let mut worker = empty_class("network_monitor");
+        worker.methods.push(MethodDef {
+            id: MethodId::new("state"),
+            receiver: Receiver::RefSelf,
+            params: vec![],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::Enum(EnumId::new("network_state")),
+                err: TypeExpr::String,
+            },
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+        worker.methods.push(MethodDef {
+            id: MethodId::new("probe"),
+            receiver: Receiver::RefSelf,
+            params: vec![],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::Enum(EnumId::new("network_state")),
+                err: TypeExpr::String,
+            },
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+
+        let mut contract = empty_contract();
+        contract.catalog.insert_enum(c_style_enum(
+            "network_state",
+            vec!["Unknown", "Online", "Offline"],
+        ));
+        contract.catalog.insert_class(worker);
+
+        let output = emit_contract(&contract);
+        let src = output.combined_source();
+
+        assert_source_contains(
+            &src,
+            "NetworkStateWire.Decode(reader)",
+            "a Result<CStyleEnum, _> return (sync and async) to decode through the enum's \
+             Wire helper, matching the plain (non-Result) enum-return path",
+        );
+        // `NetworkStateWire.Decode`'s own body legitimately calls
+        // `reader.ReadI32()` internally — the bug was a *method* whose
+        // return-decode expression was a bare `reader.ReadI32()` standing
+        // in for the enum decode, so check the precise `return` shape
+        // rather than the substring anywhere in the file.
+        assert_source_lacks(
+            &src,
+            "return reader.ReadI32();",
+            "no method body decoding its Result<CStyleEnum, _> Ok payload as an un-cast raw int",
+        );
+
+        let Some(target_framework) = dotnet_target_framework() else {
+            return;
+        };
+        assert_dotnet_build_succeeds(&target_framework, output, "result-c-style-enum-return");
+    }
+
+    /// Regression test for a bug found generating real bindings for
+    /// `parse-core-sdks`' `ParseClient::server_info(&self) -> Result<ServerInfo,
+    /// String>`: a class method named identically to the record it returns.
+    /// C# member lookup resolves a member of the *enclosing class* (the
+    /// sibling method `ServerInfo`) before an outer-scope type of the same
+    /// simple name, so the unqualified `ServerInfo.Decode(reader)` call
+    /// inside the method's own body resolved to the method group, not the
+    /// type: `CS0119: 'ParseClient.ServerInfo(...)' is a method, which is
+    /// not valid in the given context`. `return_kind` was called with a
+    /// hardcoded `shadowed: None` for class methods (and free functions,
+    /// record methods/constructors, and enum constructors), even though the
+    /// qualify-if-shadowed machinery already existed and was wired up for
+    /// data-enum methods.
+    #[test]
+    fn emit_class_method_named_after_its_return_record_qualifies_the_decode_call() {
+        let mut worker = empty_class("parse_client");
+        worker.methods.push(MethodDef {
+            id: MethodId::new("server_info"),
+            receiver: Receiver::RefSelf,
+            params: vec![],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::Record(RecordId::new("server_info")),
+                err: TypeExpr::String,
+            },
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+
+        let mut contract = empty_contract();
+        contract.catalog.insert_record(record_with_fields(
+            "server_info",
+            false,
+            vec![("version", TypeExpr::String)],
+        ));
+        contract.catalog.insert_class(worker);
+
+        let output = emit_contract(&contract);
+        let src = output.combined_source();
+
+        assert_source_contains(
+            &src,
+            "global::DemoLib.ServerInfo.Decode(reader)",
+            "the method-vs-type name collision to be resolved by fully qualifying the \
+             record's Decode call",
+        );
+        assert_source_lacks(
+            &src,
+            "return ServerInfo.Decode(reader);",
+            "no unqualified Decode call left for the compiler to misresolve as the method group",
+        );
+
+        let Some(target_framework) = dotnet_target_framework() else {
+            return;
+        };
+        assert_dotnet_build_succeeds(&target_framework, output, "self-shadowing-return-record");
+    }
+
     /// The C ABI for a `String` parameter is `(const uint8_t* ptr, uintptr_t len)`,
     /// which on the C# side becomes a `byte[]` + `UIntPtr` pair. The wrapper
     /// exposes a plain `string` and UTF-8 encodes it just before the native call.

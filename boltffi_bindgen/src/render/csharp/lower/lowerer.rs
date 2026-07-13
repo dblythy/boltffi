@@ -49,6 +49,36 @@ impl<'a> CSharpLowerer<'a> {
         }
     }
 
+    /// Every record/data-enum class name this pack renders a static
+    /// `Decode(reader)` for.
+    fn decodable_class_names(&self) -> HashSet<CSharpClassName> {
+        self.supported_records
+            .iter()
+            .map(CSharpClassName::from)
+            .chain(self.supported_enums.iter().map(CSharpClassName::from))
+            .collect()
+    }
+
+    /// If `raw_name` (a method/function/constructor's own snake_case
+    /// source name) renders to the same PascalCase identifier as a
+    /// record or data-enum this pack decodes, returns a one-element
+    /// shadow set containing it — otherwise `None`.
+    ///
+    /// C# member lookup resolves a member of the *enclosing*
+    /// class/module before an outer-scope type of the same simple name,
+    /// so an unqualified `<Type>.Decode(reader)` call inside e.g. a
+    /// `ServerInfo()` method that decodes a `ServerInfo` record resolves
+    /// to the method group, not the type (CS0119). Scoping the shadow
+    /// set to just the colliding name (rather than qualifying every
+    /// decodable type unconditionally) keeps non-colliding decode
+    /// expressions in their plain, unqualified form.
+    pub(super) fn self_name_shadow(&self, raw_name: &str) -> Option<HashSet<CSharpClassName>> {
+        let candidate = CSharpClassName::from_source(raw_name);
+        self.decodable_class_names()
+            .contains(&candidate)
+            .then(|| HashSet::from([candidate]))
+    }
+
     /// Walks the contracts and produces a C# module plan.
     pub fn lower(&self) -> CSharpModulePlan {
         let lib_name = self
