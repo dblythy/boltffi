@@ -372,7 +372,7 @@ impl Generation {
                 self.render_native_bindings(target, &bindings)
             }
             Target::Swift => self.render_swift(),
-            Target::Java | Target::TypeScript | Target::Header | Target::Dart => {
+            Target::TypeScript | Target::Header | Target::Dart => {
                 Err(GenerationError::UnsupportedTarget { target })
             }
         }
@@ -408,7 +408,7 @@ impl Generation {
             Target::Kotlin => self.render_kotlin_bindings(bindings),
             Target::KotlinMultiplatform => self.render_kmp_bindings(bindings),
             Target::CSharp => self.render_csharp_bindings(bindings),
-            Target::Swift | Target::Java | Target::TypeScript | Target::Header | Target::Dart => {
+            Target::Swift | Target::TypeScript | Target::Header | Target::Dart => {
                 Err(GenerationError::UnsupportedTarget { target })
             }
         }

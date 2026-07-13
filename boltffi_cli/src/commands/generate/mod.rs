@@ -12,7 +12,7 @@ use boltffi_bindgen::CHeaderLowerer;
 use generator::ScanPointerWidth;
 use generator::{GenerateRequest, run_generator};
 use header::HeaderGenerator;
-use languages::{DartGenerator, JavaGenerator, TypeScriptGenerator};
+use languages::{DartGenerator, TypeScriptGenerator};
 
 use boltffi_bindgen::target::Target;
 
