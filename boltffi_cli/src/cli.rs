@@ -20,13 +20,18 @@ use crate::pack::PackError;
 use crate::reporter;
 use crate::toolchain::AndroidToolchainError;
 
+// This fork (github.com/dblythy/boltffi, branch `parse-core-sdks-fixes`) carries fixes not yet
+// upstream; the suffix lets a version-preflight check (parse-core-sdks' scripts/_common.sh)
+// assert it's talking to this build rather than a stock 0.27.2 install.
+const VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "-parse-core-sdks-fixes");
+
 #[derive(Parser)]
 #[command(name = "boltffi")]
 #[command(about = "BoltFFI - Rust FFI toolchain (Apple + Android + WASM)")]
 #[command(
     after_help = "Examples:\n  boltffi init\n  boltffi check --apple\n  boltffi generate swift\n  boltffi generate kmp --experimental\n  boltffi build apple --release\n  boltffi build wasm --release\n  boltffi pack apple --layout bundled\n  boltffi pack wasm --release\n  boltffi pack csharp\n  boltffi --overlay boltffi.ci.toml pack android\n\nConfig:\n  boltffi reads ./boltffi.toml\n  Use --overlay PATH to load a merged overlay config on top of it\n  Settings live under [targets.apple.*], [targets.android.*], [targets.kotlin_multiplatform.*], [targets.wasm.*], [targets.java.*], [targets.dart.*], [targets.python.*], and [targets.csharp.*]\n"
 )]
-#[command(version)]
+#[command(version = VERSION)]
 pub struct Cli {
     #[arg(short, long, action = clap::ArgAction::Count, global = true, help = "Increase verbosity (-v, -vv)")]
     pub verbose: u8,
