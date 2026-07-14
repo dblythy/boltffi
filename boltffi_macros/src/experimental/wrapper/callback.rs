@@ -2571,7 +2571,22 @@ where
                     .expect("async callback mutex poisoned");
                 if state.completed {
                     if state.status.is_err() {
-                        panic!("async callback failed");
+                        // This trait method's Rust signature is infallible (no `Result`), so a
+                        // host binding that completes with a failure status here is violating
+                        // the callback contract, not reporting a normal runtime error -- there
+                        // is no channel to carry that error through. The success payload here
+                        // is `()`, always valid regardless of status, so swallowing and
+                        // proceeding is safe (unlike the wasm value-returning callback, whose
+                        // payload must be wire-decoded and isn't guaranteed present on failure).
+                        // Never panic across this boundary: CLAUDE.md's "no panic reachable from
+                        // an FFI entry point" applies just as much to this generated glue as to
+                        // any other code that can unwind across a JNI/wasm-import boundary.
+                        eprintln!(
+                            "boltffi: an infallible async callback completed with a failure \
+                             status; the trait method has no Result to report it through, so \
+                             this is a host language binding bug, not a normal error -- \
+                             continuing as if it completed successfully"
+                        );
                     }
                     std::task::Poll::Ready(())
                 } else {
@@ -2643,7 +2658,16 @@ where
                     .expect("async callback mutex poisoned");
                 if let Some(__boltffi_result) = state.result.take() {
                     if state.status.is_err() {
-                        panic!("async callback failed");
+                        // See native_async_void_body's comment for the full rationale: no
+                        // Result channel exists on an infallible trait method, and the native
+                        // completion ABI always passes a real, already-typed `#result_type`
+                        // value regardless of status, so swallowing and using it is safe.
+                        eprintln!(
+                            "boltffi: an infallible async callback completed with a failure \
+                             status; the trait method has no Result to report it through, so \
+                             this is a host language binding bug, not a normal error -- \
+                             continuing with the completion value anyway"
+                        );
                     }
                     std::task::Poll::Ready(#value)
                 } else {
@@ -2711,7 +2735,25 @@ where
                     .expect("async callback mutex poisoned");
                 if let Some(__boltffi_result) = state.result.take() {
                     if state.status.is_err() {
-                        panic!("async callback failed");
+                        // Unlike native_async_value_body, `#value` here always wire-decodes
+                        // `__boltffi_result` (every InfallibleMethodReturn shape reaching this
+                        // body -- Encoded/ScalarOption/DirectVec -- routes through
+                        // native_async_encoded_value/scalar_option::Incoming/direct_vec::Incoming,
+                        // each of which panics on its own if the bytes don't decode). A failure
+                        // completion has no contract for what those bytes even are, so
+                        // evaluating `#value` here would not swallow the panic, only trade this
+                        // clear message for a decode-error panic somewhere else. With no Result
+                        // channel to report failure through and no safely-decodable value to
+                        // substitute, this can't be fully eliminated without widening the trait
+                        // method's signature (a breaking API change, out of scope) -- so this
+                        // stays a panic, but a specific, diagnosable one instead of the prior
+                        // generic string, naming the actual contract violation.
+                        panic!(
+                            "boltffi: an infallible async callback completed with a failure \
+                             status; the trait method has no Result to report it through and \
+                             its payload requires wire-decoding, which has no defined shape on \
+                             failure -- this is a host language binding bug, not a normal error"
+                        );
                     }
                     std::task::Poll::Ready(#value)
                 } else {
@@ -2885,7 +2927,15 @@ where
                 match __boltffi_registry.take_completion(__boltffi_request) {
                     Some(__boltffi_completion) => {
                         if !__boltffi_completion.code.is_success() {
-                            panic!("async callback failed");
+                            // See native_async_void_body's comment: no Result channel exists on
+                            // an infallible trait method, and the success payload here is `()`,
+                            // always valid regardless of status, so swallowing is safe.
+                            eprintln!(
+                                "boltffi: an infallible async callback completed with a failure \
+                                 status; the trait method has no Result to report it through, \
+                                 so this is a host language binding bug, not a normal error -- \
+                                 continuing as if it completed successfully"
+                            );
                         }
                         drop(__boltffi_guard);
                         std::task::Poll::Ready(())
@@ -2942,7 +2992,24 @@ where
                 match __boltffi_registry.take_completion(__boltffi_request) {
                     Some(__boltffi_completion) => {
                         if !__boltffi_completion.code.is_success() {
-                            panic!("async callback failed");
+                            // See native_async_bytes_body's comment for the full rationale:
+                            // `#value` here always wire-decodes `__boltffi_completion.data`
+                            // (wasm_completion_value / the Encoded/Handle/ScalarOption/DirectVec
+                            // renderers all panic on their own if the bytes don't decode), and a
+                            // failure completion has no defined shape for that data -- so
+                            // evaluating `#value` would not swallow the panic, only trade this
+                            // clear message for a decode-error panic somewhere else. Stays a
+                            // panic (no Result channel exists and no safely-decodable value can
+                            // be substituted without widening the trait method's signature, a
+                            // breaking change out of scope here), but a specific, diagnosable
+                            // one instead of the prior generic string.
+                            panic!(
+                                "boltffi: an infallible async callback completed with a failure \
+                                 status; the trait method has no Result to report it through \
+                                 and its payload requires wire-decoding, which has no defined \
+                                 shape on failure -- this is a host language binding bug, not a \
+                                 normal error"
+                            );
                         }
                         drop(__boltffi_guard);
                         std::task::Poll::Ready(#value)
