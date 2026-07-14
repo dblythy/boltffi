@@ -243,6 +243,7 @@ impl Function {
         _owner: ClassId,
         owner_name: &Identifier,
         carrier: native::HandleCarrier,
+        type_namespace: Option<&Namespace>,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<(Self, bool)> {
@@ -266,7 +267,7 @@ impl Function {
                 name: owner_name.clone(),
                 carrier,
             },
-            None,
+            type_namespace,
             None,
             bridge,
             context,
@@ -282,6 +283,7 @@ impl Function {
         _owner: ClassId,
         owner_name: &Identifier,
         carrier: native::HandleCarrier,
+        type_namespace: Option<&Namespace>,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -296,7 +298,7 @@ impl Function {
                 name: owner_name.clone(),
                 carrier,
             },
-            None,
+            type_namespace,
             None,
             bridge,
             context,
