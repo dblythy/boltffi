@@ -137,6 +137,7 @@ impl Enumeration {
                     owner.clone(),
                     &name,
                     true,
+                    Some(&namespace),
                     bridge,
                     context,
                 ),
@@ -148,7 +149,15 @@ impl Enumeration {
                 &mut diagnostics,
                 "method",
                 method.name(),
-                Function::from_method(method, owner.clone(), &name, true, bridge, context),
+                Function::from_method(
+                    method,
+                    owner.clone(),
+                    &name,
+                    true,
+                    Some(&namespace),
+                    bridge,
+                    context,
+                ),
             )?;
         }
         Ok(Self {

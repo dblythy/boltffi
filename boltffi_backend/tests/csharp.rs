@@ -101,6 +101,65 @@ fn csharp_target_qualifies_a_class_method_named_after_its_return_record() {
 }
 
 #[test]
+fn csharp_target_qualifies_a_free_function_named_after_its_return_record() {
+    // Adversarial review (fable model) of the class-only fix found this exact shape breaks for
+    // a free function and a record method too — reproduced with a real `dotnet build` CS0119.
+    // The qualification mechanism (direct_type_with/render_type_ref) has no per-collision
+    // detection, so closing this means qualifying every direct record/enum reference reachable
+    // from a free function or record/enum method, not just the colliding one — the same
+    // trade-off `Enumeration::from_data` already accepts for data-enum methods.
+    let bindings = bindings(
+        r#"
+        #[data]
+        pub struct ServerInfo {
+            pub version: String,
+        }
+
+        #[export]
+        pub fn server_info() -> Result<ServerInfo, String> {
+            Ok(ServerInfo { version: "1".to_string() })
+        }
+
+        #[export]
+        pub fn apply_server_info(
+            f: impl Fn(ServerInfo) -> ServerInfo,
+            value: ServerInfo,
+        ) -> ServerInfo {
+            f(value)
+        }
+        "#,
+    );
+    let output = target(
+        CSharpHost::new()
+            .namespace("Company.Bindings")
+            .expect("valid namespace")
+            .native_library("demo_native"),
+    )
+    .render(&bindings)
+    .expect("a free function named after its return record should still render");
+
+    assert!(
+        output.diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        output.diagnostics()
+    );
+
+    let module = output
+        .files()
+        .iter()
+        .find(|file| file.path().as_path() == Path::new("Demo.cs"))
+        .map(|file| file.contents())
+        .expect("generated Demo.cs");
+
+    assert!(
+        module.contains("return global::Company.Bindings.ServerInfo.Decode(resultReader);"),
+        "expected the self-named ServerInfo() free function to qualify its own Decode call:\n{module}"
+    );
+
+    compile_csharp_with_dotnet_when_available(&output, "csharp-free-function-shadow-smoke");
+}
+
+#[test]
 fn csharp_target_does_not_collide_with_a_class_exporting_its_own_release_method() {
     let bindings = bindings(
         r#"

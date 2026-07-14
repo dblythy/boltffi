@@ -198,6 +198,7 @@ impl Function {
 
     pub(super) fn from_declaration(
         declaration: &FunctionDecl<Native>,
+        type_namespace: Option<&Namespace>,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -209,7 +210,7 @@ impl Function {
             declaration.symbol(),
             declaration.callable(),
             CallSite::Free,
-            None,
+            type_namespace,
             None,
             bridge,
             context,
@@ -221,6 +222,7 @@ impl Function {
         owner: DirectValueType,
         owner_name: &Identifier,
         extension: bool,
+        type_namespace: Option<&Namespace>,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -231,7 +233,7 @@ impl Function {
             owner,
             owner_name,
             extension,
-            None,
+            type_namespace,
             None,
             bridge,
             context,
@@ -332,6 +334,7 @@ impl Function {
         owner: DirectValueType,
         owner_name: &Identifier,
         extension: bool,
+        type_namespace: Option<&Namespace>,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -342,7 +345,7 @@ impl Function {
             owner,
             owner_name,
             extension,
-            None,
+            type_namespace,
             None,
             bridge,
             context,

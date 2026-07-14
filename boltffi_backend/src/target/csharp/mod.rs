@@ -158,7 +158,8 @@ impl host::HostBackend for CSharpHost {
         bridge: &Self::Bridge,
         context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        render::Function::from_declaration(decl, bridge, context)?.render()
+        let namespace = self.namespace_for(context.bindings())?;
+        render::Function::from_declaration(decl, Some(&namespace), bridge, context)?.render()
     }
 
     fn class(
@@ -692,11 +693,13 @@ mod tests {
             "[MarshalAs(UnmanagedType.LPArray, ArraySubType = UnmanagedType.U1)] [In] bool[] values"
         ));
         assert!(source.contains("return resultReader.ReadRawBoolArray();"));
-        assert!(source.contains("public static Point[] EchoPoints(Point[] values)"));
         assert!(source.contains(
-            "NativeEchoPoints(values, (nuint)(values.Length * Marshal.SizeOf<Point>()))"
+            "public static global::Demo.Point[] EchoPoints(global::Demo.Point[] values)"
         ));
-        assert!(source.contains("return resultReader.ReadRawArray<Point>();"));
+        assert!(source.contains(
+            "NativeEchoPoints(values, (nuint)(values.Length * Marshal.SizeOf<global::Demo.Point>()))"
+        ));
+        assert!(source.contains("return resultReader.ReadRawArray<global::Demo.Point>();"));
         assert!(output.diagnostics().is_empty());
     }
 
@@ -967,9 +970,9 @@ mod tests {
         assert!(source.contains("return boltffiResult;"));
         assert!(source.contains("public static string LoadName(bool valid)"));
         assert!(source.contains("out FfiBuf boltffiResultBuffer"));
-        assert!(
-            source.contains("throw new AppErrorException(AppError.Decode(boltffiErrorReader));")
-        );
+        assert!(source.contains(
+            "throw new global::Demo.AppErrorException(global::Demo.AppError.Decode(boltffiErrorReader));"
+        ));
         assert!(source.contains("return resultReader.ReadString();"));
         assert!(source.contains("public static void Validate(bool valid)"));
         assert!(source.contains("[MarshalAs(UnmanagedType.I1)] out bool boltffiResult"));
@@ -1108,9 +1111,9 @@ mod tests {
         assert!(profile.contains("if (this.Outcome.IsOk)"));
         assert!(profile.contains("public nuint AliasCount()"));
         assert!(profile.contains("this.Encode(boltffiReceiverWriter);"));
-        assert!(profile.contains("public Profile ClearAliases()"));
+        assert!(profile.contains("public global::Demo.Profile ClearAliases()"));
         assert!(profile.contains("out FfiBuf boltffiReceiverOut"));
-        assert!(profile.contains("return Profile.Decode(boltffiReceiverReader);"));
+        assert!(profile.contains("return global::Demo.Profile.Decode(boltffiReceiverReader);"));
 
         let point = file(&output, "Point.cs");
         assert!(point.contains("[StructLayout(LayoutKind.Sequential)]"));
@@ -1118,9 +1121,11 @@ mod tests {
         assert!(point.contains("writer.WriteI32(this.X);"));
 
         let module = file(&output, "Demo.cs");
-        assert!(module.contains("public static Profile EchoProfile(Profile profile)"));
+        assert!(module.contains(
+            "public static global::Demo.Profile EchoProfile(global::Demo.Profile profile)"
+        ));
         assert!(module.contains("profile.Encode(profileWriter);"));
-        assert!(module.contains("return Profile.Decode(resultReader);"));
+        assert!(module.contains("return global::Demo.Profile.Decode(resultReader);"));
         assert!(output.diagnostics().is_empty());
     }
 
@@ -1165,9 +1170,11 @@ mod tests {
         assert!(shape.contains("return global::Demo.Shape.Decode(boltffiReceiverReader);"));
 
         let module = file(&output, "Demo.cs");
-        assert!(module.contains("public static Shape EchoShape(Shape shape)"));
+        assert!(module.contains(
+            "public static global::Demo.Shape EchoShape(global::Demo.Shape shape)"
+        ));
         assert!(module.contains("shape.Encode(shapeWriter);"));
-        assert!(module.contains("return Shape.Decode(resultReader);"));
+        assert!(module.contains("return global::Demo.Shape.Decode(resultReader);"));
         assert!(output.diagnostics().is_empty());
     }
 
@@ -1301,10 +1308,18 @@ mod tests {
         }
         "###);
         let module = file(&output, "Demo.cs");
-        assert!(module.contains("public static Point EchoPoint(Point point)"));
-        assert!(module.contains("internal static extern Point NativeEchoPoint(Point point);"));
-        assert!(module.contains("public static Mode EchoMode(Mode mode)"));
-        assert!(module.contains("internal static extern Mode NativeEchoMode(Mode mode);"));
+        assert!(module.contains(
+            "public static global::Demo.Point EchoPoint(global::Demo.Point point)"
+        ));
+        assert!(module.contains(
+            "internal static extern global::Demo.Point NativeEchoPoint(global::Demo.Point point);"
+        ));
+        assert!(module.contains(
+            "public static global::Demo.Mode EchoMode(global::Demo.Mode mode)"
+        ));
+        assert!(module.contains(
+            "internal static extern global::Demo.Mode NativeEchoMode(global::Demo.Mode mode);"
+        ));
     }
 
     #[test]
@@ -1350,21 +1365,21 @@ mod tests {
             .expect("direct value methods should render");
 
         let point = file(&output, "Point.cs");
-        assert!(point.contains("public static Point New(double x, double y)"));
-        assert!(point.contains("public static Point Origin()"));
+        assert!(point.contains("public static global::Demo.Point New(double x, double y)"));
+        assert!(point.contains("public static global::Demo.Point Origin()"));
         assert!(point.contains("public double Distance()"));
-        assert!(point.contains("public Point Scale(double factor)"));
+        assert!(point.contains("public global::Demo.Point Scale(double factor)"));
         assert!(point.contains("out Point receiverOut"));
         assert!(point.contains("return receiverOut;"));
-        assert!(point.contains("public Point Add(Point other)"));
-        assert!(point.contains("public Point CopyFrom(Point other)"));
+        assert!(point.contains("public global::Demo.Point Add(global::Demo.Point other)"));
+        assert!(point.contains("public global::Demo.Point CopyFrom(global::Demo.Point other)"));
         assert!(point.contains("public static uint Dimensions()"));
 
         let mode = file(&output, "Mode.cs");
         assert!(mode.contains("public static class ModeMethods"));
-        assert!(mode.contains("public static Mode New(byte raw)"));
+        assert!(mode.contains("public static global::Demo.Mode New(byte raw)"));
         assert!(mode.contains("public static uint Count()"));
-        assert!(mode.contains("public static Mode Opposite(this Mode self)"));
+        assert!(mode.contains("public static global::Demo.Mode Opposite(this Mode self)"));
         assert!(mode.contains("public static bool IsFast(this Mode self)"));
 
         let module = file(&output, "Demo.cs");
@@ -1373,7 +1388,7 @@ mod tests {
             module
                 .contains("NativePointScale(Point receiver, out Point receiverOut, double factor)")
         );
-        assert!(module.contains("NativePointCopyFrom(Point receiver, in Point other)"));
+        assert!(module.contains("NativePointCopyFrom(Point receiver, in global::Demo.Point other)"));
         assert!(module.contains("NativeModeOpposite(Mode receiver)"));
         assert!(output.diagnostics().is_empty());
     }
