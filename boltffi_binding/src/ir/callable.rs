@@ -798,14 +798,16 @@ pub enum ParamPlan<S: Surface, D: Direction> {
         /// Inner primitive.
         primitive: Primitive,
     },
-    /// `Vec<T>` for primitive or direct-record `T` through the
+    /// An owned vector or borrowed primitive slice through the
     /// surface's direct-vector path.
     ///
-    /// Native uses `VecTransport::pack_vec` / `unpack_vec`. Wasm32 uses
-    /// a `(ptr, len, cap, align)` quadruple.
+    /// Native uses pointer-plus-length transport. Wasm32 uses a
+    /// `(ptr, len, cap, align)` quadruple for owned vectors.
     DirectVec {
         /// Element type.
         element: DirectVectorElementType,
+        /// Rust-side receive mode.
+        receive: D::Receive,
     },
 }
 
@@ -830,7 +832,7 @@ impl<S: Surface, D: Direction> ParamPlan<S, D> {
                 receive,
             } => renderer.handle(target, *carrier, *presence, *receive),
             Self::ScalarOption { primitive } => renderer.scalar_option(*primitive),
-            Self::DirectVec { element } => renderer.direct_vector(element),
+            Self::DirectVec { element, receive } => renderer.direct_vector(element, *receive),
         }
     }
 
@@ -859,7 +861,8 @@ impl<S: Surface, D: Direction> ParamPlan<S, D> {
         matches!(
             self,
             Self::DirectVec {
-                element: DirectVectorElementType::Record(_)
+                element: DirectVectorElementType::Record(_),
+                ..
             }
         )
     }
@@ -900,7 +903,11 @@ pub trait ParamPlanRender<'plan, S: Surface, D: Direction> {
     fn scalar_option(&mut self, primitive: Primitive) -> Self::Output;
 
     /// Renders a direct-vector parameter.
-    fn direct_vector(&mut self, element: &'plan DirectVectorElementType) -> Self::Output;
+    fn direct_vector(
+        &mut self,
+        element: &'plan DirectVectorElementType,
+        receive: D::Receive,
+    ) -> Self::Output;
 }
 
 /// A callable's return slot.

@@ -1,13 +1,11 @@
 use boltffi_binding::{
     BuiltinType, CallbackId, ClassId, CustomTypeId, DirectValueType, DirectVectorElementType,
     Direction, EnumId, HandlePresence, HandleTarget, IntoRust, Native, ParamPlanRender, Primitive,
-    RecordId, Surface, TypeRef, TypeRefRender,
+    Receive, RecordId, Surface, TypeRef, TypeRefRender,
 };
 
 use crate::{
-    bridge::jni::{
-        CallbackHandleMethod, DirectVectorParameter, JniType, NativeParameterKind, NativeReturn,
-    },
+    bridge::jni::{CallbackHandleMethod, JniType, NativeReturn},
     core::{RenderContext, Result},
     target::kotlin::{
         KotlinHost,
@@ -62,19 +60,6 @@ impl KotlinType {
         }
     }
 
-    pub fn native_parameter(kind: &NativeParameterKind) -> Result<TypeName> {
-        match kind {
-            NativeParameterKind::Scalar(parameter) => Self::jni(parameter.ty()),
-            NativeParameterKind::Bytes(_) | NativeParameterKind::Record(_) => {
-                Ok(TypeName::byte_array(false))
-            }
-            NativeParameterKind::DirectVector(parameter) => Self::direct_vector(parameter),
-            NativeParameterKind::Callback(_)
-            | NativeParameterKind::Closure(_)
-            | NativeParameterKind::Continuation(_) => Ok(TypeName::long()),
-        }
-    }
-
     pub fn native_return(return_value: &NativeReturn) -> Result<TypeName> {
         match return_value {
             NativeReturn::Void | NativeReturn::Status | NativeReturn::EncodedError => {
@@ -110,10 +95,6 @@ impl KotlinType {
     ) -> Result<TypeName> {
         ty.render_with(&mut KotlinTypeRef::new(context).package(package))
             .map(ApiType::into_type)
-    }
-
-    fn direct_vector(parameter: &DirectVectorParameter) -> Result<TypeName> {
-        Self::jni_array(parameter.jni_type())
     }
 
     pub fn direct_vector_element(
@@ -329,7 +310,11 @@ impl<'plan> ParamPlanRender<'plan, Native, IntoRust> for ParameterType<'_> {
         ScalarOption::new(primitive).ty()
     }
 
-    fn direct_vector(&mut self, element: &'plan DirectVectorElementType) -> Self::Output {
+    fn direct_vector(
+        &mut self,
+        element: &'plan DirectVectorElementType,
+        _: Receive,
+    ) -> Self::Output {
         KotlinType::direct_vector_element(element, self.context)
     }
 }

@@ -366,7 +366,7 @@ impl<'collector, 'binding> ParamPlanRender<'binding, Native, IntoRust>
 
     fn scalar_option(&mut self, _: Primitive) {}
 
-    fn direct_vector(&mut self, _: &'binding DirectVectorElementType) {}
+    fn direct_vector(&mut self, _: &'binding DirectVectorElementType, _: Receive) {}
 }
 
 struct OutgoingParamAdapters<'collector, 'binding> {
@@ -401,7 +401,7 @@ impl<'collector, 'binding> ParamPlanRender<'binding, Native, OutOfRust>
 
     fn scalar_option(&mut self, _: Primitive) {}
 
-    fn direct_vector(&mut self, _: &'binding DirectVectorElementType) {}
+    fn direct_vector(&mut self, _: &'binding DirectVectorElementType, _: ()) {}
 }
 
 struct OutOfRustReturnAdapters<'collector, 'binding> {

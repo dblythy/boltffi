@@ -1,6 +1,5 @@
 mod expansion;
 
-use std::ffi::OsString;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
@@ -131,10 +130,28 @@ fn is_toolchain_selector(argument: &str) -> bool {
 #[derive(Default)]
 pub struct BuildOptions {
     pub release: bool,
-    pub package: Option<String>,
-    pub cargo_args: Vec<String>,
-    pub env: Vec<(OsString, OsString)>,
+    pub selection: BuildSelection,
     pub on_output: Option<OutputCallback>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BuildSelection {
+    Default {
+        cargo_args: Vec<String>,
+    },
+    Package {
+        package: String,
+        cargo_args: Vec<String>,
+    },
+    Expanded(BindingExpansion),
+}
+
+impl Default for BuildSelection {
+    fn default() -> Self {
+        Self::Default {
+            cargo_args: Vec::new(),
+        }
+    }
 }
 
 pub struct Builder<'a> {
@@ -181,8 +198,8 @@ impl<'a> Builder<'a> {
         command.arg("--target").arg(triple);
 
         self.apply_common_build_args(&mut command);
-        self.apply_env(&mut command);
         command.args(&command_args.command_args);
+        self.apply_expansion(&mut command)?;
 
         let success = run_command_streaming(&mut command, self.options.on_output.as_ref());
 
@@ -203,8 +220,8 @@ impl<'a> Builder<'a> {
         cmd.arg("--target").arg(target.triple());
 
         self.apply_common_build_args(&mut cmd);
-        self.apply_env(&mut cmd);
         cmd.args(&command_args.command_args);
+        self.apply_expansion(&mut cmd)?;
 
         if target.platform() == Platform::Android {
             android_toolchain
@@ -220,11 +237,12 @@ impl<'a> Builder<'a> {
         })
     }
 
-    fn package_name(&self) -> &str {
-        self.options
-            .package
-            .as_deref()
-            .unwrap_or(self.config.library_name())
+    fn package_spec(&self) -> &str {
+        match &self.options.selection {
+            BuildSelection::Default { .. } => self.config.library_name(),
+            BuildSelection::Package { package, .. } => package,
+            BuildSelection::Expanded(expansion) => expansion.package_id(),
+        }
     }
 
     fn apply_common_build_args(&self, command: &mut Command) {
@@ -232,17 +250,35 @@ impl<'a> Builder<'a> {
             command.arg("--release");
         }
 
-        command.arg("-p").arg(self.package_name());
+        if let BuildSelection::Expanded(expansion) = &self.options.selection {
+            command
+                .arg("--manifest-path")
+                .arg(expansion.cargo_manifest_path());
+        }
+
+        command.arg("-p").arg(self.package_spec());
     }
 
-    fn apply_env(&self, command: &mut Command) {
-        self.options.env.iter().for_each(|(key, value)| {
-            command.env(key, value);
-        });
+    fn apply_expansion(&self, command: &mut Command) -> Result<()> {
+        match &self.options.selection {
+            BuildSelection::Expanded(expansion) => {
+                command.arg("--lib");
+                expansion.configure_rustc(command)
+            }
+            BuildSelection::Default { .. } | BuildSelection::Package { .. } => Ok(()),
+        }
     }
 
     fn cargo_build_command_args(&self) -> CargoBuildCommandArgs {
-        CargoBuildCommandArgs::from_passthrough_args(&self.options.cargo_args)
+        match &self.options.selection {
+            BuildSelection::Default { cargo_args } | BuildSelection::Package { cargo_args, .. } => {
+                CargoBuildCommandArgs::from_passthrough_args(cargo_args)
+            }
+            BuildSelection::Expanded(expansion) => CargoBuildCommandArgs {
+                toolchain_selector: expansion.toolchain_selector().map(str::to_owned),
+                command_args: expansion.cargo_args().as_slice().to_vec(),
+            },
+        }
     }
 
     fn apply_cargo_build_prefix(
@@ -254,7 +290,13 @@ impl<'a> Builder<'a> {
             command.arg(toolchain_selector);
         }
 
-        command.arg("build");
+        command.arg(
+            if matches!(&self.options.selection, BuildSelection::Expanded(_)) {
+                "rustc"
+            } else {
+                "build"
+            },
+        );
     }
 }
 
@@ -331,8 +373,10 @@ pub fn failed_targets(results: &[BuildResult]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CargoBuildCommandArgs, CargoBuildProfile, resolve_build_profile, run_command_streaming,
+        BindingExpansion, BuildOptions, BuildSelection, Builder, CargoBuildCommandArgs,
+        CargoBuildProfile, resolve_build_profile, run_command_streaming,
     };
+    use crate::config::Config;
     use std::process::Command;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -389,6 +433,55 @@ mod tests {
                 "--features".to_string(),
                 "mobile".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn expanded_build_uses_only_the_selected_library_invocation() {
+        let config: Config = toml::from_str(
+            r#"
+[package]
+name = "demo"
+"#,
+        )
+        .unwrap();
+        let expansion = BindingExpansion::fixture(
+            "/external/workspace/Cargo.toml",
+            "/external/workspace/demo/Cargo.toml",
+            ["--features".to_string(), "ffi".to_string()],
+        );
+        let builder = Builder::new(
+            &config,
+            BuildOptions {
+                release: false,
+                selection: BuildSelection::Expanded(expansion),
+                on_output: None,
+            },
+        );
+        let command_args = builder.cargo_build_command_args();
+        let mut command = Command::new("cargo");
+        builder.apply_cargo_build_prefix(&mut command, &command_args);
+        builder.apply_common_build_args(&mut command);
+        command.args(&command_args.command_args);
+        builder.apply_expansion(&mut command).unwrap();
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arguments.first().map(String::as_str), Some("+nightly"));
+        assert_eq!(arguments.get(1).map(String::as_str), Some("rustc"));
+        assert!(arguments.windows(2).any(|arguments| {
+            arguments == ["--manifest-path", "/external/workspace/Cargo.toml"]
+        }));
+        assert!(
+            arguments
+                .windows(2)
+                .any(|arguments| arguments == ["--features", "ffi"])
+        );
+        assert_eq!(
+            &arguments[arguments.len() - 4..],
+            ["--lib", "--", "--cfg", "boltffi_binding_expansion"]
         );
     }
 

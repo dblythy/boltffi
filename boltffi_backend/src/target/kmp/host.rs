@@ -4,26 +4,39 @@ use boltffi_binding::{
 };
 
 use crate::core::{
-    BindingCapability, BridgeCapability, CapabilityRequirements, DeclarationLabel, Diagnostic,
-    Emitted, GeneratedOutput, HostCapabilities, RenderContext, RenderedDeclaration, Result, Target,
-    contract::sealed, host,
+    BindingCapability, BridgeCapability, CapabilityRequirements, CoverageMode, CoverageReport,
+    DeclarationLabel, Diagnostic, Emitted, GeneratedOutput, HostCapabilities, RenderContext,
+    RenderedDeclaration, Result, Target, UnsupportedDeclaration, contract::sealed, host,
 };
 
 use super::{
-    KmpBridge, KmpBridgeContract, KmpPlatform, KmpSupportMode, Syntax,
-    lower::{KmpLowerer, KmpLoweringOptions, admission::KmpAdmission},
+    KmpBridge, KmpBridgeContract, KmpEmissionOptions, KmpEmitter, KmpPlatform, KmpSupportMode,
+    Syntax,
+    lower::{KmpLowerer, KmpLoweringOptions, KmpSupportPlan},
+    plan::KmpJvmDelegateOutput,
 };
+
+/// Default Kotlin package used for generated KMP sources.
+pub const DEFAULT_KMP_PACKAGE_NAME: &str = "com.example.boltffi";
+
+/// Default generated Kotlin module/source class name.
+pub const DEFAULT_KMP_MODULE_NAME: &str = "BoltFFI";
 
 /// Kotlin Multiplatform host renderer for the IR backend plan.
 ///
-/// The host currently lowers to a typed [`super::KmpModule`] plan and emits no
-/// Kotlin strings. Complete coverage rendering remains strict: APIs outside
-/// the selected platform capability intersection produce diagnostics that the
-/// backend driver turns into generation failures.
+/// The host lowers to a typed [`super::KmpModule`] plan before file emission.
+/// Complete coverage rendering remains strict: APIs outside the selected
+/// platform capability intersection or current body-emission ownership produce
+/// diagnostics that the backend driver turns into generation failures.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 #[non_exhaustive]
 pub struct KmpHost {
     selected_platforms: Vec<KmpPlatform>,
+    support_mode: KmpSupportMode,
+    package_name: String,
+    module_name: String,
+    min_sdk: u32,
+    jvm_delegate: Option<KmpJvmDelegateOutput>,
 }
 
 impl KmpHost {
@@ -31,6 +44,11 @@ impl KmpHost {
     pub fn new() -> Self {
         Self {
             selected_platforms: KmpPlatform::default_selected(),
+            support_mode: KmpSupportMode::Strict,
+            package_name: DEFAULT_KMP_PACKAGE_NAME.to_string(),
+            module_name: DEFAULT_KMP_MODULE_NAME.to_string(),
+            min_sdk: 24,
+            jvm_delegate: None,
         }
     }
 
@@ -40,41 +58,104 @@ impl KmpHost {
         self
     }
 
+    /// Sets the support mode recorded by emitted KMP support metadata.
+    pub fn support_mode(mut self, support_mode: KmpSupportMode) -> Self {
+        self.support_mode = support_mode;
+        self
+    }
+
+    /// Sets the Kotlin package used for common and platform source sets.
+    pub fn package_name(mut self, package_name: impl Into<String>) -> Self {
+        self.package_name = package_name.into();
+        self
+    }
+
+    /// Sets the generated Kotlin module/source class name.
+    pub fn module_name(mut self, module_name: impl Into<String>) -> Self {
+        self.module_name = module_name.into();
+        self
+    }
+
+    /// Sets the Android minSdk written into generated Gradle output.
+    pub fn min_sdk(mut self, min_sdk: u32) -> Self {
+        self.min_sdk = min_sdk;
+        self
+    }
+
+    /// Supplies JVM-family delegate output for APIs rendered by the Kotlin/JNI backend.
+    pub fn jvm_delegate(mut self, delegate: KmpJvmDelegateOutput) -> Self {
+        self.jvm_delegate = Some(delegate);
+        self
+    }
+
     /// Creates the backend target stack for this skeletal KMP host.
     pub fn into_target(self) -> Target<Self, KmpBridge> {
         Target::new(self, KmpBridge)
     }
 
-    fn emit_admitted(
-        &self,
-        declaration: boltffi_binding::DeclarationRef<'_, Native>,
-        bindings: &Bindings<Native>,
-    ) -> Emitted {
-        let label = DeclarationLabel::from_ref(declaration);
-        let records = KmpAdmission::for_bindings(self.selected_platforms.clone(), bindings)
-            .evaluate_declaration(declaration);
-        let diagnostics = records
-            .iter()
-            .filter(|record| !record.is_admitted())
-            .map(|record| Diagnostic::new(admission_message(&label, record)))
-            .collect::<Vec<_>>();
-        if diagnostics.is_empty() {
-            Emitted::primary("")
-        } else {
-            Emitted::primary("").with_diagnostics(diagnostics)
+    fn emit_declaration_placeholder(&self) -> Emitted {
+        Emitted::primary("")
+    }
+
+    fn support_plan(&self, bindings: &Bindings<Native>) -> KmpSupportPlan {
+        KmpLowerer::new(self.lowering_options(KmpSupportMode::Strict)).support_plan(bindings)
+    }
+
+    fn lowering_options(&self, support_mode: KmpSupportMode) -> KmpLoweringOptions {
+        let mut options = KmpLoweringOptions::new()
+            .selected_platforms(self.selected_platforms.clone())
+            .support_mode(support_mode);
+        let internal_package = format!("{}.jvm", self.package_name);
+        if let Some(delegate) = self
+            .jvm_delegate
+            .clone()
+            .filter(|delegate| delegate.internal_package() == internal_package)
+        {
+            options = options.jvm_delegate(delegate);
         }
+        options
     }
 }
 
-fn admission_message(
-    label: &DeclarationLabel,
-    record: &super::lower::admission::KmpAdmissionRecord,
-) -> String {
-    let reason = record.reason().unwrap_or("unsupported");
-    if record.kind() == label.kind() && record.name() == label.name() {
+fn coverage_from_support_plan(support_plan: &KmpSupportPlan) -> CoverageReport {
+    let mut coverage = CoverageReport::new();
+    for declaration in support_plan.declarations() {
+        for message in support_messages(declaration) {
+            coverage.push(UnsupportedDeclaration::new(
+                declaration.label().clone(),
+                message,
+            ));
+        }
+    }
+    coverage
+}
+
+fn diagnostics_from_support_plan(support_plan: &KmpSupportPlan) -> Vec<Diagnostic> {
+    support_plan
+        .declarations()
+        .iter()
+        .flat_map(support_messages)
+        .map(Diagnostic::new)
+        .collect()
+}
+
+fn support_messages(declaration: &super::lower::KmpDeclarationSupport) -> Vec<String> {
+    declaration
+        .records()
+        .iter()
+        .filter_map(|record| {
+            record.reason().map(|reason| {
+                api_message(declaration.label(), record.kind(), record.name(), reason)
+            })
+        })
+        .collect()
+}
+
+fn api_message(label: &DeclarationLabel, kind: &str, name: &str, reason: &str) -> String {
+    if kind == label.kind() && name == label.name() {
         reason.to_owned()
     } else {
-        format!("{} {}: {reason}", record.kind(), record.name())
+        format!("{kind} {name}: {reason}")
     }
 }
 
@@ -109,123 +190,119 @@ impl host::HostBackend for KmpHost {
         CapabilityRequirements::new()
     }
 
+    fn preflight_coverage(
+        &self,
+        bindings: &Bindings<Self::Surface>,
+        _bridge: &Self::Bridge,
+        _context: &RenderContext<Self::Surface>,
+    ) -> Result<CoverageReport> {
+        Ok(coverage_from_support_plan(&self.support_plan(bindings)))
+    }
+
     fn record(
         &self,
-        decl: &RecordDecl<Self::Surface>,
+        _decl: &RecordDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Record(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn enumeration(
         &self,
-        decl: &EnumDecl<Self::Surface>,
+        _decl: &EnumDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Enum(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn function(
         &self,
-        decl: &FunctionDecl<Self::Surface>,
+        _decl: &FunctionDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Function(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn class(
         &self,
-        decl: &ClassDecl<Self::Surface>,
+        _decl: &ClassDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Class(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn callback(
         &self,
-        decl: &CallbackDecl<Self::Surface>,
+        _decl: &CallbackDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Callback(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn stream(
         &self,
-        decl: &StreamDecl<Self::Surface>,
+        _decl: &StreamDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Stream(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn constant(
         &self,
-        decl: &ConstantDecl<Self::Surface>,
+        _decl: &ConstantDecl<Self::Surface>,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::Constant(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn custom_type(
         &self,
-        decl: &CustomTypeDecl,
+        _decl: &CustomTypeDecl,
         _bridge: &Self::Bridge,
-        context: &RenderContext<Self::Surface>,
+        _context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        Ok(self.emit_admitted(
-            boltffi_binding::DeclarationRef::CustomType(decl),
-            context.bindings(),
-        ))
+        Ok(self.emit_declaration_placeholder())
     }
 
     fn assemble<'decl>(
         &self,
         bindings: &Bindings<Self::Surface>,
         _bridge: &Self::Bridge,
-        _context: &RenderContext<Self::Surface>,
-        declarations: Vec<RenderedDeclaration<'decl, Self::Surface>>,
+        context: &RenderContext<Self::Surface>,
+        _declarations: Vec<RenderedDeclaration<'decl, Self::Surface>>,
     ) -> Result<GeneratedOutput> {
-        KmpLowerer::new(
-            KmpLoweringOptions::new()
-                .selected_platforms(self.selected_platforms.clone())
-                .support_mode(KmpSupportMode::PreviewPruneUnsupported),
-        )
-        .lower(bindings)
-        .map_err(|error| error.into_backend_error())?;
-        Ok(GeneratedOutput::new(
-            Vec::new(),
-            declarations
-                .iter()
-                .flat_map(|declaration| declaration.emitted().diagnostics().iter().cloned())
-                .collect(),
+        let support_plan = self.support_plan(bindings);
+        let diagnostics = if matches!(context.coverage_mode(), CoverageMode::Partial) {
+            diagnostics_from_support_plan(&support_plan)
+        } else {
+            Vec::new()
+        };
+        let support_mode = if matches!(context.coverage_mode(), CoverageMode::Partial)
+            && support_plan.has_rejections()
+        {
+            KmpSupportMode::PreviewPruneUnsupported
+        } else {
+            self.support_mode
+        };
+        let module = KmpLowerer::new(self.lowering_options(support_mode))
+            .lower_support_plan(support_plan)
+            .map_err(|error| error.into_backend_error())?;
+        let emitted = KmpEmitter::new(KmpEmissionOptions::new(
+            self.package_name.clone(),
+            self.module_name.clone(),
+            self.min_sdk,
         ))
+        .emit(&module)?;
+        let (files, mut emitted_diagnostics, _coverage) = emitted.into_parts();
+        emitted_diagnostics.extend(diagnostics);
+        Ok(GeneratedOutput::new(files, emitted_diagnostics))
     }
 }
 
@@ -237,8 +314,11 @@ mod tests {
     use boltffi_binding::{Bindings, Native, lower};
 
     use crate::{
-        Error,
-        target::kmp::{KmpHost, KmpPlatform},
+        Error, GeneratedOutput, Result,
+        target::kmp::{
+            KMP_SUPPORT_REPORT_FILE, KmpHost, KmpJvmDelegateFunction, KmpJvmDelegateOutput,
+            KmpPlatform, KmpTypePlan,
+        },
     };
 
     fn bindings(source: &str) -> Bindings<Native> {
@@ -250,21 +330,78 @@ mod tests {
         lower::<Native>(&source).expect("source should lower")
     }
 
-    #[test]
-    fn kmp_target_renders_empty_surface_without_files() {
-        let output = KmpHost::new()
-            .into_target()
-            .render(&bindings(""))
-            .expect("empty KMP IR skeleton should render");
-
-        assert!(output.files().is_empty());
-        assert!(output.diagnostics().is_empty());
-        assert!(output.coverage().is_complete());
+    fn output_paths(output: &crate::GeneratedOutput) -> Vec<String> {
+        output
+            .files()
+            .iter()
+            .map(|file| file.path().as_path().display().to_string())
+            .collect()
     }
 
-    #[test]
-    fn kmp_target_renders_admitted_sync_function_without_files() {
-        let output = KmpHost::new()
+    fn file<'output>(output: &'output crate::GeneratedOutput, path: &str) -> &'output str {
+        output
+            .files()
+            .iter()
+            .find(|file| file.path().as_path() == std::path::Path::new(path))
+            .unwrap_or_else(|| panic!("missing generated file {path}"))
+            .contents()
+    }
+
+    fn expected_default_file_list() -> Vec<&'static str> {
+        vec![
+            "settings.gradle.kts",
+            "build.gradle.kts",
+            "src/commonMain/kotlin/com/example/boltffi/BoltFFI.kt",
+            KMP_SUPPORT_REPORT_FILE,
+            "src/jvmMain/kotlin/com/example/boltffi/BoltFFIJvmActual.kt",
+            "src/androidMain/kotlin/com/example/boltffi/BoltFFIAndroidActual.kt",
+            "src/jvmMain/kotlin/com/example/boltffi/jvm/BoltFFI.kt",
+            "src/androidMain/kotlin/com/example/boltffi/jvm/BoltFFI.kt",
+            "src/jvmMain/c/jni_glue.c",
+            "src/androidMain/c/jni_glue.c",
+        ]
+    }
+
+    fn add_delegate() -> KmpJvmDelegateOutput {
+        KmpJvmDelegateOutput::new(
+            "com.example.boltffi.jvm",
+            "private const val BOLTFFI_LIBRARY_NAME: String = \"boltffi_demo\"\n",
+            vec![KmpJvmDelegateFunction::new(
+                "boltffi_function_demo_add",
+                "add",
+                vec![
+                    KmpTypePlan::Primitive(boltffi_binding::Primitive::I32),
+                    KmpTypePlan::Primitive(boltffi_binding::Primitive::I32),
+                ],
+                Some(KmpTypePlan::Primitive(boltffi_binding::Primitive::I32)),
+                "/* delegated JNI glue */\n",
+            )],
+        )
+    }
+
+    fn add_delegate_with_internal_source(source: impl Into<String>) -> KmpJvmDelegateOutput {
+        KmpJvmDelegateOutput::new(
+            "com.example.boltffi.jvm",
+            "private const val BOLTFFI_LIBRARY_NAME: String = \"boltffi_demo\"\n",
+            vec![
+                KmpJvmDelegateFunction::new(
+                    "boltffi_function_demo_add",
+                    "add",
+                    vec![
+                        KmpTypePlan::Primitive(boltffi_binding::Primitive::I32),
+                        KmpTypePlan::Primitive(boltffi_binding::Primitive::I32),
+                    ],
+                    Some(KmpTypePlan::Primitive(boltffi_binding::Primitive::I32)),
+                    "/* delegated JNI glue */\n",
+                )
+                .with_internal_kotlin_source(source),
+            ],
+        )
+    }
+
+    fn render_add_with_delegate_source(source: impl Into<String>) -> Result<GeneratedOutput> {
+        KmpHost::new()
+            .jvm_delegate(add_delegate_with_internal_source(source))
             .into_target()
             .render(&bindings(
                 r#"
@@ -274,11 +411,344 @@ mod tests {
                 }
                 "#,
             ))
-            .expect("KMP IR plan should admit sync primitive functions for JVM and Android");
+    }
 
-        assert!(output.files().is_empty());
+    fn duplicate_ping_delegate() -> KmpJvmDelegateOutput {
+        KmpJvmDelegateOutput::new(
+            "com.example.boltffi.jvm",
+            "private const val BOLTFFI_LIBRARY_NAME: String = \"boltffi_demo\"\n",
+            vec![
+                KmpJvmDelegateFunction::new(
+                    "boltffi_function_demo_ping_pong",
+                    "pingPong",
+                    vec![KmpTypePlan::Primitive(boltffi_binding::Primitive::I32)],
+                    Some(KmpTypePlan::Primitive(boltffi_binding::Primitive::I32)),
+                    "/* delegated ping_pong JNI glue */\n",
+                ),
+                KmpJvmDelegateFunction::new(
+                    "boltffi_function_demo_ping__pong",
+                    "pingPong",
+                    vec![KmpTypePlan::Primitive(boltffi_binding::Primitive::I32)],
+                    Some(KmpTypePlan::Primitive(boltffi_binding::Primitive::I32)),
+                    "/* delegated ping__pong JNI glue */\n",
+                ),
+            ],
+        )
+    }
+
+    #[test]
+    fn kmp_target_renders_empty_surface_file_list() {
+        let output = KmpHost::new()
+            .into_target()
+            .render(&bindings(""))
+            .expect("empty KMP IR plan should render project files");
+
+        assert_eq!(output_paths(&output), expected_default_file_list());
         assert!(output.diagnostics().is_empty());
         assert!(output.coverage().is_complete());
+    }
+
+    #[test]
+    fn kmp_target_rejects_sync_primitive_function_until_jni_glue_is_delegated() {
+        let error = KmpHost::new()
+            .into_target()
+            .render(&bindings(
+                r#"
+                #[export]
+                pub fn add(left: i32, right: i32) -> i32 {
+                    left + right
+                }
+                "#,
+            ))
+            .expect_err("primitive sync functions need delegated JNI glue before generation");
+
+        match error {
+            Error::IncompleteCoverage {
+                target: "kotlin_multiplatform",
+                reason,
+            } => {
+                assert!(reason.contains("function add"), "{reason}");
+                assert!(reason.contains("JNI glue emission"), "{reason}");
+            }
+            other => panic!("unexpected KMP IR skeleton error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kmp_target_renders_sync_primitive_function_with_jvm_delegate() {
+        let output = KmpHost::new()
+            .jvm_delegate(add_delegate())
+            .into_target()
+            .render(&bindings(
+                r#"
+                #[export]
+                pub fn add(left: i32, right: i32) -> i32 {
+                    left + right
+                }
+                "#,
+            ))
+            .expect("delegated primitive sync function should render");
+
+        let common = file(
+            &output,
+            "src/commonMain/kotlin/com/example/boltffi/BoltFFI.kt",
+        );
+        assert!(common.contains("expect fun add(left: Int, right: Int): Int"));
+
+        for path in [
+            "src/jvmMain/kotlin/com/example/boltffi/BoltFFIJvmActual.kt",
+            "src/androidMain/kotlin/com/example/boltffi/BoltFFIAndroidActual.kt",
+        ] {
+            let actual = file(&output, path);
+            assert!(actual.contains("actual fun add(left: Int, right: Int): Int"));
+            assert!(actual.contains("return com.example.boltffi.jvm.add(left, right)"));
+            assert!(!actual.contains("FfiException"));
+        }
+
+        let delegated_kotlin = "// Auto-generated by BoltFFI. Do not edit.\n\npackage com.example.boltffi.jvm\n\nprivate object Native {\n    private const val BOLTFFI_LIBRARY_NAME: String = \"boltffi_demo\"\n    @JvmStatic external fun boltffi_function_demo_add(left: Int, right: Int): Int\n}\n\nfun add(left: Int, right: Int): Int {\n    return Native.boltffi_function_demo_add(left, right)\n}\n";
+        assert_eq!(
+            file(
+                &output,
+                "src/jvmMain/kotlin/com/example/boltffi/jvm/BoltFFI.kt"
+            ),
+            delegated_kotlin
+        );
+        assert_eq!(
+            file(
+                &output,
+                "src/androidMain/kotlin/com/example/boltffi/jvm/BoltFFI.kt"
+            ),
+            delegated_kotlin
+        );
+        assert_eq!(
+            file(&output, "src/jvmMain/c/jni_glue.c"),
+            "/* Auto-generated by BoltFFI. Do not edit. */\n\n/* delegated JNI glue */\n"
+        );
+        assert_eq!(
+            file(&output, "src/androidMain/c/jni_glue.c"),
+            "/* Auto-generated by BoltFFI. Do not edit. */\n\n/* delegated JNI glue */\n"
+        );
+
+        let report: serde_json::Value =
+            serde_json::from_str(file(&output, KMP_SUPPORT_REPORT_FILE))
+                .expect("valid support report");
+        assert_eq!(report["admitted_apis"][0]["kind"], "function");
+        assert_eq!(report["admitted_apis"][0]["name"], "add");
+        assert_eq!(report["rejected_apis"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn kmp_target_prefers_delegate_internal_kotlin_function_source() {
+        let output = render_add_with_delegate_source(
+            "/**\n * Adds two values.\n */\nfun add(left: Int, right: Int): Int {\n    val delegated = Native.boltffi_function_demo_add(left, right)\n    return delegated\n}\n",
+        )
+        .expect("delegate-owned internal Kotlin source should render");
+
+        let internal = file(
+            &output,
+            "src/jvmMain/kotlin/com/example/boltffi/jvm/BoltFFI.kt",
+        );
+        assert!(internal.contains("val delegated = Native.boltffi_function_demo_add(left, right)"));
+        assert!(internal.contains("return delegated"));
+    }
+
+    #[test]
+    fn kmp_target_ignores_blank_delegate_internal_kotlin_function_source() {
+        let output = render_add_with_delegate_source("   \n\t")
+            .expect("blank delegate-owned internal Kotlin source should use fallback rendering");
+
+        let internal = file(
+            &output,
+            "src/jvmMain/kotlin/com/example/boltffi/jvm/BoltFFI.kt",
+        );
+        assert!(internal.contains("fun add(left: Int, right: Int): Int"));
+        assert!(internal.contains("return Native.boltffi_function_demo_add(left, right)"));
+    }
+
+    #[test]
+    fn kmp_target_partial_prunes_sync_function_rejected_by_body_emission() {
+        let output = KmpHost::new()
+            .into_target()
+            .render_partial(&bindings(
+                r#"
+                #[export]
+                pub fn add(left: i32, right: i32) -> i32 {
+                    left + right
+                }
+                "#,
+            ))
+            .expect("partial KMP generation should prune unrenderable function bodies");
+
+        assert_eq!(output_paths(&output), expected_default_file_list());
+        assert!(!output.coverage().is_complete());
+        assert!(
+            output
+                .diagnostics()
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("JNI glue emission"))
+        );
+
+        let common = file(
+            &output,
+            "src/commonMain/kotlin/com/example/boltffi/BoltFFI.kt",
+        );
+        assert!(!common.contains("expect fun add"));
+
+        let report: serde_json::Value =
+            serde_json::from_str(file(&output, KMP_SUPPORT_REPORT_FILE))
+                .expect("valid support report");
+        assert_eq!(report["admitted_apis"], serde_json::json!([]));
+        assert_eq!(report["rejected_apis"][0]["kind"], "function");
+        assert_eq!(report["rejected_apis"][0]["name"], "add");
+        assert!(
+            report["rejected_apis"][0]["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("JNI glue emission")
+        );
+    }
+
+    #[test]
+    fn kmp_target_partial_prunes_delegate_with_mismatched_internal_package() {
+        let output = KmpHost::new()
+            .package_name("com.acme.demo")
+            .jvm_delegate(add_delegate())
+            .into_target()
+            .render_partial(&bindings(
+                r#"
+                #[export]
+                pub fn add(left: i32, right: i32) -> i32 {
+                    left + right
+                }
+                "#,
+            ))
+            .expect("partial KMP generation should prune a package-mismatched delegate");
+
+        let common = file(&output, "src/commonMain/kotlin/com/acme/demo/BoltFFI.kt");
+        assert!(!common.contains("expect fun add"));
+
+        let report: serde_json::Value =
+            serde_json::from_str(file(&output, KMP_SUPPORT_REPORT_FILE))
+                .expect("valid support report");
+        assert_eq!(report["admitted_apis"], serde_json::json!([]));
+        assert_eq!(report["rejected_apis"][0]["kind"], "function");
+        assert_eq!(report["rejected_apis"][0]["name"], "add");
+        assert!(
+            report["rejected_apis"][0]["reason"]
+                .as_str()
+                .expect("reason")
+                .contains("JNI glue emission")
+        );
+    }
+
+    #[test]
+    fn kmp_target_partial_reports_support_metadata_reasons_for_duplicate_function_declarations() {
+        let output = KmpHost::new()
+            .jvm_delegate(duplicate_ping_delegate())
+            .into_target()
+            .render_partial(&bindings(
+                r#"
+                #[export]
+                pub fn ping_pong(value: i32) -> i32 {
+                    value
+                }
+
+                #[export]
+                pub fn ping__pong(value: i32) -> i32 {
+                    value
+                }
+                "#,
+            ))
+            .expect("partial KMP generation should prune duplicate unrenderable functions");
+        let diagnostic_messages = output
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>();
+        let unsupported_reasons = output
+            .coverage()
+            .unsupported()
+            .iter()
+            .map(|unsupported| unsupported.reason())
+            .collect::<Vec<_>>();
+        let report: serde_json::Value =
+            serde_json::from_str(file(&output, KMP_SUPPORT_REPORT_FILE))
+                .expect("valid support report");
+        let rejected_reasons = report["rejected_apis"]
+            .as_array()
+            .expect("rejected APIs")
+            .iter()
+            .map(|api| {
+                api["reason"]
+                    .as_str()
+                    .expect("support report rejection reason")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(rejected_reasons.len(), 1, "{rejected_reasons:#?}");
+        for reasons in [diagnostic_messages, unsupported_reasons, rejected_reasons] {
+            assert!(
+                reasons
+                    .iter()
+                    .any(|reason| reason.contains("duplicate Kotlin function signature")),
+                "{reasons:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn kmp_target_rejects_unsigned_primitive_function_until_jni_carrier_plan_exists() {
+        let error = KmpHost::new()
+            .into_target()
+            .render(&bindings(
+                r#"
+                #[export]
+                pub fn round_trip(value: u32) -> u32 {
+                    value
+                }
+                "#,
+            ))
+            .expect_err("unsigned primitives need an explicit JNI carrier plan");
+
+        match error {
+            Error::IncompleteCoverage {
+                target: "kotlin_multiplatform",
+                reason,
+            } => {
+                assert!(reason.contains("function round::trip"), "{reason}");
+                assert!(
+                    reason.contains("unsigned primitive JNI carrier"),
+                    "{reason}"
+                );
+            }
+            other => panic!("unexpected KMP IR skeleton error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn kmp_target_uses_configured_output_identity_in_files_and_metadata() {
+        let output = KmpHost::new()
+            .package_name("com.acme.demo")
+            .module_name("Demo")
+            .min_sdk(26)
+            .into_target()
+            .render(&bindings(""))
+            .expect("empty KMP IR plan should render project files");
+        let paths = output_paths(&output);
+        let report = output
+            .files()
+            .iter()
+            .find(|file| file.path().as_path() == std::path::Path::new(KMP_SUPPORT_REPORT_FILE))
+            .expect("support report");
+        let json: serde_json::Value =
+            serde_json::from_str(report.contents()).expect("valid support metadata");
+
+        assert!(paths.contains(&"src/commonMain/kotlin/com/acme/demo/Demo.kt".to_string()));
+        assert!(paths.contains(&"src/jvmMain/kotlin/com/acme/demo/DemoJvmActual.kt".to_string()));
+        assert_eq!(json["package_name"], "com.acme.demo");
+        assert_eq!(json["module_name"], "Demo");
+        assert_eq!(json["min_sdk"], 26);
+        assert_eq!(json["mode"], "strict");
     }
 
     #[test]
@@ -353,6 +823,23 @@ mod tests {
     }
 
     #[test]
+    fn kmp_target_rejects_non_default_platform_matrix_until_emission_is_parameterized() {
+        let error = KmpHost::new()
+            .selected_platforms(vec![KmpPlatform::Jvm])
+            .into_target()
+            .render(&bindings(""))
+            .expect_err("empty JVM-only KMP plans must not emit JVM+Android files");
+
+        match error {
+            Error::UnsupportedTarget {
+                target: "kotlin_multiplatform",
+                shape: "non-default KMP platform emission",
+            } => {}
+            other => panic!("unexpected KMP IR skeleton error: {other:?}"),
+        }
+    }
+
+    #[test]
     fn kmp_target_rejects_api_using_custom_type_with_unsupported_representation() {
         let error = KmpHost::new()
             .into_target()
@@ -407,7 +894,7 @@ mod tests {
             .expect("partial KMP IR skeleton should report unsupported APIs");
         let unsupported = output.coverage().unsupported();
 
-        assert!(output.files().is_empty());
+        assert_eq!(output_paths(&output), expected_default_file_list());
         assert_eq!(output.diagnostics().len(), 2);
         assert!(
             output
@@ -438,14 +925,10 @@ mod tests {
             .into_target()
             .render_partial(&bindings(
                 r#"
-                #[repr(C)]
-                #[data]
-                pub struct Point {
-                    pub x: i32,
-                }
+                pub struct Engine;
 
-                #[data(impl)]
-                impl Point {
+                #[export(single_threaded)]
+                impl Engine {
                     pub async fn load(&self) -> i32 {
                         1
                     }
@@ -460,18 +943,18 @@ mod tests {
         let unsupported = output.coverage().unsupported();
         let diagnostics = output.diagnostics();
 
-        assert!(output.files().is_empty());
-        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(output_paths(&output), expected_default_file_list());
+        assert_eq!(diagnostics.len(), 3);
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message().contains("record method point::load"))
+                .any(|diagnostic| diagnostic.message().contains("class method engine::load"))
         );
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message().contains("record method point::save"))
+                .any(|diagnostic| diagnostic.message().contains("class method engine::save"))
         );
-        assert_eq!(unsupported.len(), 2);
+        assert_eq!(unsupported.len(), 3);
     }
 }

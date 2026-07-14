@@ -45,6 +45,11 @@ fn kotlin_target_renders_direct_records_and_function_bridges() {
 }
 
 #[test]
+fn kotlin_target_returns_mutated_direct_record_receivers_from_the_shared_buffer() {
+    insta::assert_snapshot!(rendered_fixture("associated/mutable_record_receiver"));
+}
+
+#[test]
 fn kotlin_target_renders_encoded_records_through_codec_methods() {
     insta::assert_snapshot!(rendered_source(SourceFixture::many([
         "enums/role",

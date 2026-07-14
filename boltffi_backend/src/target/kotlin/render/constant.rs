@@ -93,7 +93,7 @@ impl Constant {
             Name::new(declaration.name()).function()?,
             symbol,
             callable,
-            Vec::new(),
+            None,
         )?;
         if call.async_call().is_some() {
             return Err(KotlinHost::unsupported("async constant accessor"));

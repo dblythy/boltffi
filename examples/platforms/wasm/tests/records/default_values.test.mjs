@@ -33,4 +33,11 @@ export async function run() {
   assert.equal(demo.ServiceConfig.describe(demo.ServiceConfig.fromBorrowedName("borrowed")), "borrowed:3:standard:none:https://default");
   globalThis.demoCase("case:records.default_values.service_config.from_string_ref_name.should_return_config");
   assert.equal(demo.ServiceConfig.describe(demo.ServiceConfig.fromStringRefName("stringref")), "stringref:3:standard:none:https://default");
+  globalThis.demoCase("case:records.default_values.service_config.from_non_empty_name.should_return_config_for_non_empty_values");
+  const validatedConfig = demo.ServiceConfig.fromNonEmptyName("optional", "eu-west");
+  assert.equal(validatedConfig.name, "optional");
+  assert.equal(validatedConfig.region, "eu-west");
+  globalThis.demoCase("case:records.default_values.service_config.from_non_empty_name.should_return_none_for_empty_values");
+  assert.equal(demo.ServiceConfig.fromNonEmptyName("", "eu-west"), null);
+  assert.equal(demo.ServiceConfig.fromNonEmptyName("optional", ""), null);
 }

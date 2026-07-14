@@ -179,6 +179,7 @@ sealed class {{ enumeration.name() }}{% if enumeration.error() %} : Exception(){
             buffer.close()
         }
     }
+
 {% for variant in enumeration.data_variants() %}
 {%- if variant.unit() %}
     object {{ variant.name() }} : {{ enumeration.name() }}() {

@@ -141,7 +141,7 @@ struct FallibleReturn<'error> {
 
 struct HandleParameter {
     public: Parameter,
-    native_argument: Expression,
+    native_arguments: Vec<Expression>,
     setup: Vec<Statement>,
     cleanup: Vec<Statement>,
 }
@@ -657,7 +657,7 @@ impl HandleMethod {
         .chain(
             parameters
                 .iter()
-                .map(|parameter| parameter.native_argument.clone()),
+                .flat_map(|parameter| parameter.native_arguments.iter().cloned()),
         )
         .collect::<Vec<_>>();
         let native_call = NativeCall::new(
@@ -822,7 +822,7 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
                     self.name.clone(),
                     KotlinPrimitive::new(*primitive).api_type()?,
                 ),
-                native_argument: KotlinPrimitive::new(*primitive).native_argument(value)?,
+                native_arguments: vec![KotlinPrimitive::new(*primitive).native_argument(value)?],
                 setup: Vec::new(),
                 cleanup: Vec::new(),
             }),
@@ -830,7 +830,7 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
                 let ty = Record::type_name_from_id(*record, self.context)?;
                 Ok(HandleParameter {
                     public: Parameter::new(self.name.clone(), ty),
-                    native_argument: Record::encode_expression(value)?,
+                    native_arguments: vec![Record::direct_buffer_expression(value)?],
                     setup: Vec::new(),
                     cleanup: Vec::new(),
                 })
@@ -839,9 +839,11 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
                 let enumeration = Enumeration::from_id(*enumeration, self.host, self.context)?;
                 Ok(HandleParameter {
                     public: Parameter::new(self.name.clone(), enumeration.name().clone()),
-                    native_argument: KotlinPrimitive::new(enumeration.repr()?).native_argument(
-                        Expression::property(value, Identifier::parse("value")?),
-                    )?,
+                    native_arguments: vec![
+                        KotlinPrimitive::new(enumeration.repr()?).native_argument(
+                            Expression::property(value, Identifier::parse("value")?),
+                        )?,
+                    ],
                     setup: Vec::new(),
                     cleanup: Vec::new(),
                 })
@@ -865,10 +867,10 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
             self.host,
             self.context,
         )?;
-        let (setup, native_argument, cleanup) = write.into_parts();
+        let (setup, native_arguments, cleanup) = write.into_direct_parts();
         Ok(HandleParameter {
             public: Parameter::new(self.name.clone(), KotlinType::type_ref(ty, self.context)?),
-            native_argument,
+            native_arguments,
             setup,
             cleanup,
         })
@@ -887,7 +889,7 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
                 let handle = ClassHandle::new(*class, presence, self.context)?;
                 Ok(HandleParameter {
                     public: Parameter::new(self.name.clone(), handle.ty()?),
-                    native_argument: handle.parameter_argument(value)?,
+                    native_arguments: vec![handle.parameter_argument(value)?],
                     setup: Vec::new(),
                     cleanup: Vec::new(),
                 })
@@ -896,7 +898,7 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
                 let handle = CallbackHandle::new(*callback, presence, self.context)?;
                 Ok(HandleParameter {
                     public: Parameter::new(self.name.clone(), handle.ty()?),
-                    native_argument: handle.parameter_argument(value)?,
+                    native_arguments: vec![handle.parameter_argument(value)?],
                     setup: Vec::new(),
                     cleanup: Vec::new(),
                 })
@@ -912,20 +914,22 @@ impl<'plan> ParamPlanRender<'plan, Native, OutOfRust> for HandleParameterRender<
 
     fn scalar_option(&mut self, primitive: Primitive) -> Self::Output {
         let write = ScalarOption::new(primitive).write(&self.source_name)?;
-        let (setup, native_argument, cleanup) = write.into_parts();
+        let (setup, native_arguments, cleanup) = write.into_direct_parts();
         Ok(HandleParameter {
             public: Parameter::new(self.name.clone(), ScalarOption::new(primitive).ty()?),
-            native_argument,
+            native_arguments,
             setup,
             cleanup,
         })
     }
 
-    fn direct_vector(&mut self, element: &'plan DirectVectorElementType) -> Self::Output {
+    fn direct_vector(&mut self, element: &'plan DirectVectorElementType, _: ()) -> Self::Output {
         let vector = DirectVector::from_element(element, self.context)?;
         Ok(HandleParameter {
             public: Parameter::new(self.name.clone(), vector.ty().clone()),
-            native_argument: vector.native_argument(Expression::identifier(self.name.clone()))?,
+            native_arguments: vec![
+                vector.native_argument(Expression::identifier(self.name.clone()))?,
+            ],
             setup: Vec::new(),
             cleanup: Vec::new(),
         })
@@ -1341,7 +1345,7 @@ impl ReturnValue {
                     host,
                     context,
                 )?;
-                let (setup, expression, cleanup) = write.into_parts();
+                let (setup, expression, cleanup) = write.into_array_parts();
                 Ok(std::iter::once(Statement::value(result, call))
                     .chain(setup)
                     .chain(std::iter::once(Statement::value(bytes.clone(), expression)))
@@ -1359,7 +1363,7 @@ impl ReturnValue {
                 let bytes = source_name.generated("bytes")?;
                 let write = ScalarOption::new(*primitive)
                     .write_value(source_name, Expression::identifier(result.clone()))?;
-                let (setup, expression, cleanup) = write.into_parts();
+                let (setup, expression, cleanup) = write.into_array_parts();
                 Ok(std::iter::once(Statement::value(result, call))
                     .chain(setup)
                     .chain(std::iter::once(Statement::value(bytes.clone(), expression)))
@@ -1532,13 +1536,13 @@ impl ReturnValue {
             }
             ReturnConversion::Encoded { codec, source_name } => Ok(WireBuffer::new(source_name)?
                 .write_value(codec, value, host, context)?
-                .into_parts()),
+                .into_array_parts()),
             ReturnConversion::ScalarOption {
                 primitive,
                 source_name,
             } => Ok(ScalarOption::new(*primitive)
                 .write_value(source_name, value)?
-                .into_parts()),
+                .into_array_parts()),
             ReturnConversion::DirectVector(vector) => {
                 Ok((Vec::new(), vector.byte_array_expression(value)?, Vec::new()))
             }
@@ -1606,7 +1610,7 @@ impl ReturnValue {
                     [value].into_iter().collect::<ArgumentList>(),
                 ))],
             )?
-            .into_parts();
+            .into_array_parts();
         Ok(encoded)
     }
 }
@@ -1659,7 +1663,7 @@ impl FallibleReturn<'_> {
             host,
             context,
         )?;
-        let (setup, expression, cleanup) = write.into_parts();
+        let (setup, expression, cleanup) = write.into_array_parts();
         Ok(Expression::run(
             setup
                 .into_iter()
@@ -1684,7 +1688,7 @@ impl FallibleReturn<'_> {
             host,
             context,
         )?;
-        let (setup, expression, cleanup) = write.into_parts();
+        let (setup, expression, cleanup) = write.into_array_parts();
         Ok(Expression::run(
             setup
                 .into_iter()

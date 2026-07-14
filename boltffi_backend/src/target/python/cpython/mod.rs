@@ -513,6 +513,41 @@ mod tests {
     }
 
     #[test]
+    fn python_target_renders_borrowed_direct_record_param_as_addressed_local() {
+        let output = target()
+            .render(&bindings(
+                r#"
+                #[repr(C)]
+                #[data]
+                pub struct Point {
+                    pub x: f64,
+                    pub y: f64,
+                }
+
+                #[export]
+                pub fn distance(point: &Point) -> f64 {
+                    point.x
+                }
+                "#,
+            ))
+            .expect("Python target should render borrowed direct record params");
+        let extension = extension(&output);
+        let stub = file(&output, "demo/__init__.pyi");
+
+        assert!(extension.contains("___Point point;"));
+        assert!(extension.contains("boltffi_python_parse_point(args[0], &point)"));
+        assert!(
+            extension.contains("boltffi_python_boltffi_function_demo_distance(&point)"),
+            "borrowed direct records should stay Python record-shaped and pass an addressed local to the pointer-shaped C ABI\n{extension}"
+        );
+        assert!(
+            !extension.contains("boltffi_python_boltffi_function_demo_distance(point)"),
+            "borrowed direct records must not keep passing the local by value after the C ABI becomes pointer-shaped\n{extension}"
+        );
+        assert!(stub.contains("def distance(point: Point) -> float: ..."));
+    }
+
+    #[test]
     fn python_target_renders_direct_record_vector_function_wrapper() {
         let output = target()
             .render(&bindings(
@@ -577,6 +612,30 @@ mod tests {
         ));
         assert!(stub.contains("from collections.abc import Sequence"));
         assert!(stub.contains("def echo_numbers(values: Sequence[int]) -> list[int]: ..."));
+    }
+
+    #[test]
+    fn python_target_returns_mutated_primitive_slices() {
+        let output = target()
+            .render(&bindings(
+                r#"
+                #[export]
+                pub fn increment(values: &mut [u64]) {
+                    values.iter_mut().for_each(|value| *value += 1);
+                }
+                "#,
+            ))
+            .expect("Python target should render mutable primitive slice");
+        let extension = extension(&output);
+        let stub = file(&output, "demo/__init__.pyi");
+
+        assert!(extension.contains(
+            "FfiStatus status = boltffi_python_boltffi_function_demo_increment((uint64_t *)values_ptr, values_len);"
+        ));
+        assert!(extension.contains(
+            "result = boltffi_python_box_vec_u64((const uint64_t *)values_ptr, values_len);"
+        ));
+        assert!(stub.contains("def increment(values: Sequence[int]) -> Sequence[int]: ..."));
     }
 
     #[test]

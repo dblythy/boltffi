@@ -1732,6 +1732,19 @@ mod tests {
         source
     }
 
+    fn mutable_byte_vec_param_contract() -> SourceContract {
+        let mut function =
+            FunctionDef::new(FunctionId::new("demo::grow"), CanonicalName::single("grow"));
+        let mut parameter = parameter("bytes", byte_vec());
+        parameter.passing = ParameterPassing::RefMut;
+        function.parameters = vec![parameter];
+        function.returns = ReturnDef::Void;
+
+        let mut source = SourceContract::new(PackageInfo::new("demo", None));
+        source.functions.push(function);
+        source
+    }
+
     fn encoded_record_param_contract() -> SourceContract {
         let mut function = FunctionDef::new(
             FunctionId::new("demo::name_score"),
@@ -2669,6 +2682,27 @@ mod tests {
         assert!(matches!(
             error,
             Error::UnsupportedExpansion("encoded tuple arity")
+        ));
+    }
+
+    #[test]
+    fn native_mutable_byte_vec_param_expansion_rejects_unsupported_growable_param() {
+        let source = mutable_byte_vec_param_contract();
+        let lowered = lower_with_declarations::<Native>(&source).expect("lowered bindings");
+        let expansion = Expansion::new(&lowered);
+        let syntax = syn::parse_quote! {
+            pub fn grow(bytes: &mut Vec<u8>) {}
+        };
+
+        let error = expand_function(&expansion, &source.functions[0], syntax)
+            .expect_err("`&mut Vec<u8>` params must reject");
+
+        assert!(matches!(
+            error,
+            Error::UnsupportedExpansion(
+                "`&mut Vec<u8>` parameters are not supported; \
+                 use `&mut [u8]` for in-place mutation or return `Vec<u8>`"
+            )
         ));
     }
 
@@ -3957,6 +3991,37 @@ mod tests {
     }
 
     #[test]
+    fn native_borrowed_string_return_expansion_encodes_result() {
+        let mut function = FunctionDef::new(
+            FunctionId::new("demo::label"),
+            CanonicalName::single("label"),
+        );
+        function.returns = ReturnDef::value(TypeExpr::Str);
+        let mut source = SourceContract::new(PackageInfo::new("demo", None));
+        source.functions.push(function);
+        let native_lowered =
+            lower_with_declarations::<Native>(&source).expect("native lowered bindings");
+        let native_expansion = Expansion::new(&native_lowered);
+        let syntax: ItemFn = syn::parse_quote! {
+            pub fn label() -> &'static str {
+                "up"
+            }
+        };
+        let native_wrapper = wrapper::function::Renderer::new(
+            native_expansion.function(&source.functions[0]).unwrap(),
+            &native_expansion,
+        )
+        .render()
+        .expect("native wrapper");
+        let tokens = quote! {
+            #syntax
+            #native_wrapper
+        };
+
+        assert_generated_crate_checks("native_borrowed_string_return", tokens);
+    }
+
+    #[test]
     fn native_async_function_expansion_exports_poll_handle_lifecycle() {
         let source = async_answer_contract();
         let lowered = lower_with_declarations::<Native>(&source).expect("lowered bindings");
@@ -4518,7 +4583,7 @@ mod tests {
     }
 
     #[test]
-    fn void_function_expansion_returns_status() {
+    fn void_function_expansion_returns_void() {
         let source = void_source_contract();
         let lowered = lower_with_declarations::<Native>(&source).expect("lowered bindings");
         let expansion = Expansion::new(&lowered);
@@ -4535,9 +4600,8 @@ mod tests {
                 pub fn ping() {}
                 #[cfg(not(target_arch = "wasm32"))]
                 #[unsafe(no_mangle)]
-                pub extern "C" fn boltffi_function_demo_ping() -> ::boltffi::__private::FfiStatus {
+                pub extern "C" fn boltffi_function_demo_ping() {
                     ping();
-                    ::boltffi::__private::FfiStatus::OK
                 }
             }
             .to_string()
@@ -4650,12 +4714,17 @@ mod tests {
                 #[cfg(not(target_arch = "wasm32"))]
                 #[unsafe(no_mangle)]
                 pub unsafe extern "C" fn boltffi_function_demo_shift(
-                    point: <Point as ::boltffi::__private::Passable>::In
+                    point: *mut <Point as ::boltffi::__private::Passable>::In
                 ) -> f64 {
-                    let mut point: Point = unsafe {
-                        <Point as ::boltffi::__private::Passable>::unpack(point)
-                    };
-                    shift(&mut point)
+                    if point.is_null() {
+                        ::boltffi::__private::set_last_error(format!(
+                            "{}: null direct record pointer",
+                            stringify!(point)
+                        ));
+                        return <f64 as ::core::default::Default>::default();
+                    }
+                    let point: &mut Point = unsafe { &mut *(point as *mut Point) };
+                    shift(point)
                 }
             }
             .to_string()

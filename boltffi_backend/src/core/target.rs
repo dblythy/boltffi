@@ -137,10 +137,13 @@ where
         contract
             .capabilities()
             .require_bridge(self.host.name(), &self.host.bridge_capabilities())?;
-        let context = RenderContext::new(bindings, self.host.name())
+        let context = RenderContext::new(bindings, self.host.name(), mode)
             .with_custom_type_mappings(self.host.custom_type_mappings(bindings)?);
+        let preflight_coverage = self
+            .host
+            .preflight_coverage(bindings, &contract, &context)?;
         let (declarations, coverage) = bindings.decls().iter().try_fold(
-            (Vec::new(), CoverageReport::new()),
+            (Vec::new(), preflight_coverage),
             |accumulator, decl| {
                 self.render_declaration_with_coverage(
                     decl,

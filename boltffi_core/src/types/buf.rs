@@ -113,6 +113,14 @@ pub extern "C" fn boltffi_buf_from_bytes(ptr: *const u8, len: usize) -> FfiBuf {
     FfiBuf::from_vec(bytes.to_vec())
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn boltffi_buf_with_len(len: usize) -> FfiBuf {
+    if len == 0 {
+        return FfiBuf::empty();
+    }
+    FfiBuf::from_vec(vec![0u8; len])
+}
+
 #[cfg(target_arch = "wasm32")]
 impl FfiBuf {
     pub fn into_packed(self) -> u64 {
@@ -169,5 +177,12 @@ mod tests {
         let buf = FfiBuf::empty();
         assert!(buf.is_empty());
         assert!(buf.as_ptr().is_null());
+    }
+
+    #[test]
+    fn buf_with_len_is_rust_owned() {
+        let buf = boltffi_buf_with_len(24);
+        assert_eq!(buf.len(), 24);
+        assert_eq!(unsafe { buf.as_byte_slice() }, &[0; 24]);
     }
 }

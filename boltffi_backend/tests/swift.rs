@@ -385,6 +385,13 @@ fn swift_target_renders_documented_record_and_enum_methods() {
 }
 
 #[test]
+fn swift_target_allocates_scoped_optional_initializer_locals() {
+    insta::assert_snapshot!(rendered_fixture(
+        "associated/scoped_optional_enum_initializer"
+    ));
+}
+
+#[test]
 fn swift_target_renders_class_handles_and_methods() {
     insta::assert_snapshot!(rendered_fixture("exports/kotlin_class_handles"));
 }
@@ -402,6 +409,13 @@ fn swift_target_renders_constants() {
 #[test]
 fn swift_target_passes_primitive_direct_vectors() {
     insta::assert_snapshot!(rendered_fixture("direct_vector/primitive_vector_parameter"));
+}
+
+#[test]
+fn swift_target_passes_mutable_primitive_slices_inout() {
+    insta::assert_snapshot!(rendered_fixture(
+        "direct_vector/mutable_primitive_slice_parameter"
+    ));
 }
 
 #[test]

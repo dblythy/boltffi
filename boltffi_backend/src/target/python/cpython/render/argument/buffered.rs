@@ -1,5 +1,5 @@
 use crate::{
-    bridge::c::{Expression, Identifier, TypeFragment},
+    bridge::c::{ArgumentList, Expression, Identifier, TypeFragment},
     core::{Error, Result},
     target::python::cpython::render::{direct_vector, primitive, result},
 };
@@ -31,7 +31,10 @@ impl BufferedArgument {
         match self {
             Self::DirectVector(element) => Ok(vec![
                 Expression::cast(
-                    TypeFragment::new(format!("const {} *", element.c_type())),
+                    TypeFragment::new(match mutation {
+                        Some(_) => format!("{} *", element.c_type()),
+                        None => format!("const {} *", element.c_type()),
+                    }),
                     Expression::identifier(pointer.clone()),
                 ),
                 Expression::identifier(length.clone()),
@@ -43,7 +46,7 @@ impl BufferedArgument {
                     .map(Expression::identifier)
                     .chain(
                         mutation
-                            .map(MutationOutput::buffer)
+                            .and_then(MutationOutput::buffer)
                             .cloned()
                             .map(Expression::identifier)
                             .map(Expression::address_of),
@@ -53,7 +56,12 @@ impl BufferedArgument {
         }
     }
 
-    pub fn mutation_output(&self, name: &Identifier) -> Result<Option<MutationOutput>> {
+    pub fn mutation_output(
+        &self,
+        name: &Identifier,
+        pointer: &Identifier,
+        length: &Identifier,
+    ) -> Result<Option<MutationOutput>> {
         match self {
             Self::RegisteredObject(registered) => Ok(Some(MutationOutput::new(
                 Identifier::parse(format!("{name}_out"))?,
@@ -65,7 +73,12 @@ impl BufferedArgument {
                 result::OwnedBuffer::RawWire.converter()?,
                 Some(result::OwnedBuffer::RawWire),
             ))),
-            Self::OptionalPrimitive(_) | Self::DirectVector(_) => Err(Error::UnsupportedTarget {
+            Self::DirectVector(element) => Ok(Some(MutationOutput::direct_vector(
+                pointer.clone(),
+                length.clone(),
+                element,
+            ))),
+            Self::OptionalPrimitive(_) => Err(Error::UnsupportedTarget {
                 target: "python",
                 shape: "mutable encoded parameter",
             }),
@@ -108,8 +121,8 @@ impl RegisteredObject {
 
 #[derive(Clone)]
 pub struct MutationOutput {
-    buffer: Identifier,
-    decoder: Identifier,
+    buffer: Option<Identifier>,
+    conversion: Expression,
     owned_buffer: Option<result::OwnedBuffer>,
 }
 
@@ -120,18 +133,42 @@ impl MutationOutput {
         owned_buffer: Option<result::OwnedBuffer>,
     ) -> Self {
         Self {
-            buffer,
-            decoder,
+            conversion: Expression::call(
+                decoder,
+                ArgumentList::from_iter([Expression::identifier(buffer.clone())]),
+            ),
+            buffer: Some(buffer),
             owned_buffer,
         }
     }
 
-    pub fn buffer(&self) -> &Identifier {
-        &self.buffer
+    fn direct_vector(
+        pointer: Identifier,
+        length: Identifier,
+        element: &direct_vector::Element,
+    ) -> Self {
+        Self {
+            buffer: None,
+            conversion: Expression::call(
+                element.vector_boxer().clone(),
+                ArgumentList::from_iter([
+                    Expression::cast(
+                        TypeFragment::new(format!("const {} *", element.c_type())),
+                        Expression::identifier(pointer),
+                    ),
+                    Expression::identifier(length),
+                ]),
+            ),
+            owned_buffer: None,
+        }
     }
 
-    pub fn decoder(&self) -> &Identifier {
-        &self.decoder
+    pub fn buffer(&self) -> Option<&Identifier> {
+        self.buffer.as_ref()
+    }
+
+    pub fn conversion(&self) -> &Expression {
+        &self.conversion
     }
 
     pub fn owned_buffer(&self) -> Option<result::OwnedBuffer> {

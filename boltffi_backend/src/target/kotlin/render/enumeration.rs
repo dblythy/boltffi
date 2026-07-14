@@ -10,12 +10,13 @@ use crate::{
     core::{Emitted, RenderContext, Result},
     target::kotlin::{
         KotlinHost,
+        codec::WireBuffer,
         name_style::KotlinPackage,
         name_style::Name,
         primitive::KotlinPrimitive,
         render::{
             field::EncodedField,
-            function::{EncodedReceiverMutation, ExportedCall, ExportedCallRenderer},
+            function::{ExportedCall, ExportedCallRenderer, ReceiverCarrier, ReceiverMutation},
         },
         syntax::{ArgumentList, Expression, Identifier, Literal, Statement, TypeName},
     },
@@ -93,7 +94,7 @@ pub struct DataVariant {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct Receiver {
-    argument: Expression,
+    carrier: ReceiverCarrier,
     writeback: Option<TypeName>,
 }
 
@@ -210,7 +211,9 @@ impl Enumeration {
     }
 
     pub fn unknown_tag(&self) -> Expression {
-        Expression::throw_illegal_argument(Literal::string(&format!("unknown {self} tag: $tag")))
+        Expression::throw_illegal_argument(Literal::interpolated_string(&format!(
+            "unknown {self} tag: $tag"
+        )))
     }
 
     pub fn type_name_from_id(id: EnumId, context: &RenderContext<Native>) -> Result<TypeName> {
@@ -285,10 +288,9 @@ impl Enumeration {
         let primitive = enumeration.repr().primitive();
         let name = Name::new(enumeration.name()).type_name();
         let receiver = Receiver {
-            argument: KotlinPrimitive::new(primitive).native_argument(Expression::property(
-                Expression::this(),
-                Identifier::parse("value")?,
-            ))?,
+            carrier: ReceiverCarrier::direct(KotlinPrimitive::new(primitive).native_argument(
+                Expression::property(Expression::this(), Identifier::parse("value")?),
+            )?),
             writeback: None,
         };
         Ok(Self {
@@ -338,8 +340,23 @@ impl Enumeration {
     ) -> Result<Self> {
         let error = enumeration.is_error_payload();
         let name = Name::new(enumeration.name()).type_name();
+        let buffer = WireBuffer::new(&Name::new(enumeration.name()))?;
+        let writer = buffer.writer().clone();
         let receiver = Receiver {
-            argument: Self::encode_expression(Expression::this())?,
+            carrier: ReceiverCarrier::encoded(buffer.write_statements(
+                Expression::call(
+                    Expression::this(),
+                    Identifier::parse("wireSize")?,
+                    ArgumentList::default(),
+                ),
+                vec![Statement::expression(Expression::call(
+                    Expression::this(),
+                    Identifier::parse("writeTo")?,
+                    [Expression::identifier(writer)]
+                        .into_iter()
+                        .collect::<ArgumentList>(),
+                ))],
+            )?),
             writeback: Some(name.clone()),
         };
         let variant_names = enumeration
@@ -387,14 +404,6 @@ impl Enumeration {
         })
     }
 
-    fn encode_expression(value: Expression) -> Result<Expression> {
-        Ok(Expression::call(
-            value,
-            Identifier::parse("toByteArray")?,
-            Default::default(),
-        ))
-    }
-
     fn initializer_calls(
         initializers: &[InitializerDecl<Native>],
         bridge: Option<&JniBridgeContract>,
@@ -413,14 +422,14 @@ impl Enumeration {
                             Name::new(initializer.name()).function()?,
                             initializer.symbol(),
                             initializer.callable(),
-                            Vec::new(),
+                            None,
                             package,
                         ),
                         None => calls.exported(
                             Name::new(initializer.name()).function()?,
                             initializer.symbol(),
                             initializer.callable(),
-                            Vec::new(),
+                            None,
                         ),
                     })
                     .collect()
@@ -450,15 +459,15 @@ impl Enumeration {
                                 .ok_or(KotlinHost::unsupported("mutable c-style enum receiver"))
                                 .and_then(|writeback| {
                                     let mutation = match package {
-                                        Some(package) => EncodedReceiverMutation::new(writeback)
+                                        Some(package) => ReceiverMutation::encoded(writeback)
                                             .with_package(package),
-                                        None => EncodedReceiverMutation::new(writeback),
+                                        None => ReceiverMutation::encoded(writeback),
                                     };
-                                    calls.with_encoded_receiver_mutation(
+                                    calls.with_receiver_mutation(
                                         Name::new(method.name()).function()?,
                                         method.target(),
                                         method.callable(),
-                                        vec![receiver.argument],
+                                        receiver.carrier,
                                         mutation,
                                     )
                                 }),
@@ -468,14 +477,14 @@ impl Enumeration {
                                         Name::new(method.name()).function()?,
                                         method.target(),
                                         method.callable(),
-                                        vec![receiver.argument],
+                                        Some(receiver.carrier),
                                         package,
                                     ),
                                     None => calls.exported(
                                         Name::new(method.name()).function()?,
                                         method.target(),
                                         method.callable(),
-                                        vec![receiver.argument],
+                                        Some(receiver.carrier),
                                     ),
                                 }
                             }
@@ -484,14 +493,14 @@ impl Enumeration {
                                     Name::new(method.name()).function()?,
                                     method.target(),
                                     method.callable(),
-                                    Vec::new(),
+                                    None,
                                     package,
                                 ),
                                 None => calls.exported(
                                     Name::new(method.name()).function()?,
                                     method.target(),
                                     method.callable(),
-                                    Vec::new(),
+                                    None,
                                 ),
                             },
                             _ => Err(KotlinHost::unsupported("enum method receiver")),

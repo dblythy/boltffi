@@ -19,7 +19,7 @@ use crate::{
 /// FFI decision already made.
 ///
 /// Generic over `S: Surface` because every variant transitively contains
-/// at least one [`CallableDecl`], and callable shapes diverge by target.
+/// at least one callable declaration, and callable shapes diverge by target.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "S::BufferShape: Serialize, S::HandleCarrier: Serialize, S::AsyncProtocol: Serialize, S::CallbackProtocol: Serialize",
@@ -82,6 +82,14 @@ pub enum DeclarationRole {
 }
 
 impl DeclarationRole {
+    const fn from_error_payload(error_payload: bool) -> Self {
+        if error_payload {
+            Self::ErrorPayload
+        } else {
+            Self::Value
+        }
+    }
+
     const fn is_value(&self) -> bool {
         matches!(self, Self::Value)
     }
@@ -112,6 +120,20 @@ impl<'a, S: Surface> From<&'a Decl<S>> for DeclarationRef<'a, S> {
 }
 
 impl<'a, S: Surface> DeclarationRef<'a, S> {
+    /// Returns the typed identity of this declaration.
+    pub const fn id(self) -> DeclarationId {
+        match self {
+            Self::Record(record) => DeclarationId::Record(record.id()),
+            Self::Enum(enumeration) => DeclarationId::Enum(enumeration.id()),
+            Self::Function(function) => DeclarationId::Function(function.id()),
+            Self::Class(class) => DeclarationId::Class(class.id()),
+            Self::Callback(callback) => DeclarationId::Callback(callback.id()),
+            Self::Stream(stream) => DeclarationId::Stream(stream.id()),
+            Self::Constant(constant) => DeclarationId::Constant(constant.id()),
+            Self::CustomType(custom_type) => DeclarationId::CustomType(custom_type.id()),
+        }
+    }
+
     /// Returns the record declaration when this view is a record.
     pub const fn record(self) -> Option<&'a RecordDecl<S>> {
         match self {
@@ -234,16 +256,7 @@ impl<'a, S: Surface> DeclarationRef<'a, S> {
 impl<S: Surface> Decl<S> {
     /// Returns the typed identity of this declaration.
     pub fn id(&self) -> DeclarationId {
-        match self {
-            Self::Record(record) => DeclarationId::Record(record.id()),
-            Self::Enum(enum_decl) => DeclarationId::Enum(enum_decl.id()),
-            Self::Function(function) => DeclarationId::Function(function.id()),
-            Self::Class(class) => DeclarationId::Class(class.id()),
-            Self::Callback(callback) => DeclarationId::Callback(callback.id()),
-            Self::Stream(stream) => DeclarationId::Stream(stream.id()),
-            Self::Constant(constant) => DeclarationId::Constant(constant.id()),
-            Self::CustomType(custom) => DeclarationId::CustomType(custom.id()),
-        }
+        DeclarationRef::from(self).id()
     }
 
     /// Iterates over every Rust-implemented callable this declaration
@@ -471,16 +484,16 @@ impl<S: Surface> RecordDecl<S> {
         }
     }
 
-    pub(crate) fn mark_error_payload(&mut self) {
+    pub(crate) fn set_error_payload(&mut self, error_payload: bool) {
         match self {
-            Self::Direct(record) => record.mark_error_payload(),
-            Self::Encoded(record) => record.mark_error_payload(),
+            Self::Direct(record) => record.set_error_payload(error_payload),
+            Self::Encoded(record) => record.set_error_payload(error_payload),
         }
     }
 
-    pub(crate) fn mark_codec_payload(&mut self) {
+    pub(crate) fn set_codec_payload(&mut self, codec_payload: bool) {
         if let Self::Direct(record) = self {
-            record.mark_codec_payload();
+            record.set_codec_payload(codec_payload);
         }
     }
 
@@ -644,12 +657,12 @@ impl<S: Surface> DirectRecordDecl<S> {
             || self.methods.iter().any(MethodDecl::uses_async_execution)
     }
 
-    fn mark_error_payload(&mut self) {
-        self.role = DeclarationRole::ErrorPayload;
+    fn set_error_payload(&mut self, error_payload: bool) {
+        self.role = DeclarationRole::from_error_payload(error_payload);
     }
 
-    fn mark_codec_payload(&mut self) {
-        self.codec_payload = true;
+    fn set_codec_payload(&mut self, codec_payload: bool) {
+        self.codec_payload = codec_payload;
     }
 }
 
@@ -792,8 +805,8 @@ impl<S: Surface> EncodedRecordDecl<S> {
             || self.methods.iter().any(MethodDecl::uses_async_execution)
     }
 
-    fn mark_error_payload(&mut self) {
-        self.role = DeclarationRole::ErrorPayload;
+    fn set_error_payload(&mut self, error_payload: bool) {
+        self.role = DeclarationRole::from_error_payload(error_payload);
     }
 }
 
@@ -972,10 +985,10 @@ impl<S: Surface> EnumDecl<S> {
         self.role().is_error_payload()
     }
 
-    pub(crate) fn mark_error_payload(&mut self) {
+    pub(crate) fn set_error_payload(&mut self, error_payload: bool) {
         match self {
-            Self::CStyle(enumeration) => enumeration.mark_error_payload(),
-            Self::Data(enumeration) => enumeration.mark_error_payload(),
+            Self::CStyle(enumeration) => enumeration.set_error_payload(error_payload),
+            Self::Data(enumeration) => enumeration.set_error_payload(error_payload),
         }
     }
 
@@ -1127,8 +1140,8 @@ impl<S: Surface> CStyleEnumDecl<S> {
             || self.methods.iter().any(MethodDecl::uses_async_execution)
     }
 
-    fn mark_error_payload(&mut self) {
-        self.role = DeclarationRole::ErrorPayload;
+    fn set_error_payload(&mut self, error_payload: bool) {
+        self.role = DeclarationRole::from_error_payload(error_payload);
     }
 }
 
@@ -1300,8 +1313,8 @@ impl<S: Surface> DataEnumDecl<S> {
             || self.methods.iter().any(MethodDecl::uses_async_execution)
     }
 
-    fn mark_error_payload(&mut self) {
-        self.role = DeclarationRole::ErrorPayload;
+    fn set_error_payload(&mut self, error_payload: bool) {
+        self.role = DeclarationRole::from_error_payload(error_payload);
     }
 }
 
@@ -1413,7 +1426,7 @@ impl DataVariantPayload {
 /// A free function exported across the boundary.
 ///
 /// Carries the binding name, the native symbol foreign code links
-/// against, and the [`CallableDecl`] that describes how the call
+/// against, and the callable declaration that describes how the call
 /// actually crosses.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 #[serde(bound(

@@ -146,10 +146,28 @@ impl ValueSpecialization {
         ids: &DeclarationIds,
         type_expr: &TypeExpr,
     ) -> Result<Option<Self>, LowerError> {
-        match type_expr {
-            TypeExpr::Option(inner) => Ok(Self::primitive(inner).map(Self::ScalarOption)),
-            TypeExpr::Vec(inner) => Self::direct_vector_element(index, ids, inner)
-                .map(|element| element.map(Self::DirectVector)),
+        Self::from_parameter(index, ids, type_expr, Receive::ByValue)
+    }
+
+    fn from_parameter(
+        index: &Index,
+        ids: &DeclarationIds,
+        type_expr: &TypeExpr,
+        receive: Receive,
+    ) -> Result<Option<Self>, LowerError> {
+        match (type_expr, receive) {
+            (TypeExpr::Option(inner), Receive::ByValue) => {
+                Ok(Self::primitive(inner).map(Self::ScalarOption))
+            }
+            (TypeExpr::Vec(inner), Receive::ByValue) => {
+                Self::direct_vector_element(index, ids, inner)
+                    .map(|element| element.map(Self::DirectVector))
+            }
+            (TypeExpr::Slice(inner), Receive::ByRef | Receive::ByMutRef) => {
+                Ok(Self::primitive(inner)
+                    .and_then(DirectVectorElementType::primitive)
+                    .map(Self::DirectVector))
+            }
             _ => Ok(None),
         }
     }

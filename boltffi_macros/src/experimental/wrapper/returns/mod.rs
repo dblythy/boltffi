@@ -7,7 +7,7 @@ use crate::experimental::{
     error::Error,
     expansion::Expansion,
     rust_api,
-    surface::RenderSurface,
+    surface::{InfallibleVoidReturn, RenderSurface},
     wrapper::{self, Render, names},
 };
 
@@ -27,6 +27,7 @@ pub struct RustInvocation {
     call: TokenStream,
     conversions: Vec<TokenStream>,
     writebacks: Vec<TokenStream>,
+    has_ffi_parameters: bool,
 }
 
 impl RustInvocation {
@@ -35,6 +36,7 @@ impl RustInvocation {
         call: TokenStream,
         conversions: Vec<TokenStream>,
         writebacks: Vec<TokenStream>,
+        has_ffi_parameters: bool,
     ) -> Self {
         let span = owner.span();
         Self {
@@ -43,6 +45,7 @@ impl RustInvocation {
             call,
             conversions,
             writebacks,
+            has_ffi_parameters,
         }
     }
 
@@ -53,7 +56,13 @@ impl RustInvocation {
         arguments: Vec<TokenStream>,
     ) -> Self {
         let call = quote! { #function(#(#arguments),*) };
-        Self::new(function, call, conversions, writebacks)
+        Self::new(
+            function,
+            call,
+            conversions,
+            writebacks,
+            !arguments.is_empty(),
+        )
     }
 }
 
@@ -182,10 +191,27 @@ where
             call,
             conversions,
             writebacks,
+            has_ffi_parameters,
             ..
         } = input.invocation;
         let locals = names::Locals::new(span);
         match input.returns.plan() {
+            ReturnPlan::Void
+                if S::INFALLIBLE_VOID_RETURN == InfallibleVoidReturn::Direct
+                    && !has_ffi_parameters
+                    && conversions.is_empty()
+                    && writebacks.is_empty() =>
+            {
+                Ok(Tokens {
+                    items: Vec::new(),
+                    ffi_parameters: Vec::new(),
+                    return_type: TokenStream::new(),
+                    body: quote! {
+                        #(#conversions)*
+                        #call;
+                    },
+                })
+            }
             ReturnPlan::Void => Ok(Tokens {
                 items: Vec::new(),
                 ffi_parameters: Vec::new(),
@@ -252,7 +278,7 @@ where
                     "binding encoded return requires a source return type",
                 ))?;
                 let result = locals.result();
-                let encoded_input = match input.source.borrowed_constant() {
+                let encoded_input = match input.source.borrowed_value()? {
                     true => {
                         encoded::Input::borrowed(codec, *shape, result.clone(), input.expansion)
                     }

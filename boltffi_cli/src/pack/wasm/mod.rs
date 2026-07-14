@@ -3,7 +3,9 @@ mod npm;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::build::{BuildOptions, Builder, OutputCallback, all_successful, failed_targets};
+use crate::build::{
+    BuildOptions, BuildSelection, Builder, OutputCallback, all_successful, failed_targets,
+};
 use crate::cli::{CliError, Result};
 use crate::commands::generate::{GenerateOptions, GenerateTarget, run_generate_with_output};
 use crate::commands::pack::PackWasmOptions;
@@ -170,9 +172,10 @@ fn build_wasm_target(
 
     let build_options = BuildOptions {
         release: matches!(profile, WasmProfile::Release),
-        package: Some(config.library_name().to_string()),
-        cargo_args: build_cargo_args.to_vec(),
-        env: Vec::new(),
+        selection: BuildSelection::Package {
+            package: config.library_name().to_string(),
+            cargo_args: build_cargo_args.to_vec(),
+        },
         on_output,
     };
     let builder = Builder::new(config, build_options);

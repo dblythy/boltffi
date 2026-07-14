@@ -346,6 +346,10 @@ internal class WireWriter(initialCapacity: Int) {
         return bytes
     }
 
+    fun directBuffer(): java.nio.ByteBuffer = buffer
+
+    fun size(): Int = position
+
     fun writeBool(value: Boolean) {
         ensureCapacity(1)
         buffer.put(position, if (value) 1.toByte() else 0.toByte())
@@ -606,6 +610,10 @@ private class BorrowedWireWriter(
     val writer: WireWriter,
 ) : AutoCloseable {
     fun bytes(): ByteArray = writer.toByteArray()
+
+    fun directBuffer(): java.nio.ByteBuffer = writer.directBuffer()
+
+    fun size(): Int = writer.size()
 
     override fun close() {
         state.release()

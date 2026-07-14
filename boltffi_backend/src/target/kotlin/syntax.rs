@@ -1,4 +1,4 @@
-use std::fmt;
+use std::fmt::{self, Write};
 
 use crate::core::{Error, LanguageSyntax, Result, syntax::sealed};
 
@@ -513,7 +513,39 @@ impl fmt::Display for Literal {
 
 impl Literal {
     pub fn string(value: &str) -> Self {
-        Self(format!("{value:?}"))
+        Self::render(value, true)
+    }
+
+    pub fn interpolated_string(value: &str) -> Self {
+        Self::render(value, false)
+    }
+
+    fn render(value: &str, escape_dollar: bool) -> Self {
+        let mut literal = String::with_capacity(value.len() + 2);
+        literal.push('"');
+        value.chars().for_each(|character| match character {
+            '\t' => literal.push_str("\\t"),
+            '\u{8}' => literal.push_str("\\b"),
+            '\n' => literal.push_str("\\n"),
+            '\r' => literal.push_str("\\r"),
+            '"' => literal.push_str("\\\""),
+            '\\' => literal.push_str("\\\\"),
+            '$' if escape_dollar => literal.push_str("\\$"),
+            '\u{2028}' | '\u{2029}' => Self::push_unicode_escape(&mut literal, character),
+            character if character.is_control() => {
+                Self::push_unicode_escape(&mut literal, character)
+            }
+            character => literal.push(character),
+        });
+        literal.push('"');
+        Self(literal)
+    }
+
+    fn push_unicode_escape(literal: &mut String, character: char) {
+        let mut units = [0; 2];
+        character.encode_utf16(&mut units).iter().for_each(|unit| {
+            write!(literal, "\\u{unit:04x}").expect("writing a Kotlin Unicode escape")
+        });
     }
 }
 
@@ -541,5 +573,26 @@ impl ArgumentList {
 impl FromIterator<Expression> for ArgumentList {
     fn from_iter<T: IntoIterator<Item = Expression>>(expressions: T) -> Self {
         Self::from_expressions(expressions)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Literal;
+
+    #[test]
+    fn string_escapes_interpolation_markers() {
+        assert_eq!(
+            Literal::string("native-$core\0\u{8}\u{c}\n\r\"\\\u{2028}😀").to_string(),
+            "\"native-\\$core\\u0000\\b\\u000c\\n\\r\\\"\\\\\\u2028😀\""
+        );
+    }
+
+    #[test]
+    fn interpolated_string_preserves_interpolation_markers() {
+        assert_eq!(
+            Literal::interpolated_string("unknown tag: $tag").to_string(),
+            "\"unknown tag: $tag\""
+        );
     }
 }

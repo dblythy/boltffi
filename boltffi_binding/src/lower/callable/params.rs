@@ -95,15 +95,15 @@ fn specialize_param<S: SurfaceLower, D: Direction>(
     type_expr: &TypeExpr,
     receive: Receive,
 ) -> Result<Option<ParamPlan<S, D>>, LowerError> {
-    if !matches!(receive, Receive::ByValue) {
-        return Ok(None);
-    }
-    let specialization = ValueSpecialization::from_type_expr(index, ids, type_expr)?;
+    let specialization = ValueSpecialization::from_parameter(index, ids, type_expr, receive)?;
     Ok(match specialization {
         Some(ValueSpecialization::ScalarOption(primitive)) => {
             Some(ParamPlan::ScalarOption { primitive })
         }
-        Some(ValueSpecialization::DirectVector(element)) => Some(ParamPlan::DirectVec { element }),
+        Some(ValueSpecialization::DirectVector(element)) => Some(ParamPlan::DirectVec {
+            element,
+            receive: D::receive_from(receive),
+        }),
         None => None,
     })
 }

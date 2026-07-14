@@ -1037,11 +1037,19 @@ impl<'a> TypeScriptLowerer<'a> {
                         _ => (None, TsCallbackImportReturn::Void),
                     },
                 };
-                let (_, proxy_return_route) = self.select_output_route(
-                    &abi_method.returns,
-                    TsReturnSemantics::Source(&method_def.returns),
-                    TsExecutionModel::Sync,
-                );
+                let proxy_return_route =
+                    if matches!(&import_return, TsCallbackImportReturn::PackedUtf8) {
+                        TsOutputRoute::raw_packed(
+                            "_module.takePackedUtf8String(packed)".to_string(),
+                        )
+                    } else {
+                        let (_, route) = self.select_output_route(
+                            &abi_method.returns,
+                            TsReturnSemantics::Source(&method_def.returns),
+                            TsExecutionModel::Sync,
+                        );
+                        route
+                    };
 
                 Some(TsCallbackMethod {
                     ts_name,
@@ -1560,7 +1568,7 @@ impl<'a> TypeScriptLowerer<'a> {
                 }
                 _ => match &returns.decode_ops {
                     Some(decode_ops) => {
-                        self.encoded_output_route(decode_ops, semantics, execution_model)
+                        self.encoded_output_route(returns, decode_ops, semantics, execution_model)
                     }
                     None => (None, TsOutputRoute::void()),
                 },
@@ -1571,7 +1579,7 @@ impl<'a> TypeScriptLowerer<'a> {
             | ValueReturnStrategy::Buffer(EncodedReturnStrategy::WireEncoded) => {
                 match &returns.decode_ops {
                     Some(decode_ops) => {
-                        self.encoded_output_route(decode_ops, semantics, execution_model)
+                        self.encoded_output_route(returns, decode_ops, semantics, execution_model)
                     }
                     None => (None, TsOutputRoute::void()),
                 }
@@ -1790,12 +1798,15 @@ impl<'a> TypeScriptLowerer<'a> {
 
     fn encoded_output_route(
         &self,
+        returns: &ReturnShape,
         decode_ops: &ReadSeq,
         semantics: TsReturnSemantics<'_>,
         execution_model: TsExecutionModel,
     ) -> (Option<String>, TsOutputRoute) {
         match execution_model {
-            TsExecutionModel::Sync => self.sync_encoded_output_route(decode_ops, semantics),
+            TsExecutionModel::Sync => {
+                self.sync_encoded_output_route(returns, decode_ops, semantics)
+            }
             TsExecutionModel::AsyncFunction | TsExecutionModel::AsyncMethod => {
                 self.async_encoded_output_route(decode_ops, semantics)
             }
@@ -1804,6 +1815,7 @@ impl<'a> TypeScriptLowerer<'a> {
 
     fn sync_encoded_output_route(
         &self,
+        returns: &ReturnShape,
         decode_ops: &ReadSeq,
         semantics: TsReturnSemantics<'_>,
     ) -> (Option<String>, TsOutputRoute) {
@@ -1841,7 +1853,9 @@ impl<'a> TypeScriptLowerer<'a> {
                     (Some(ts_type_str), TsOutputRoute::packed(decode))
                 }
             }
-            Some(ReadOp::String { .. }) => {
+            Some(ReadOp::String { .. })
+                if matches!(returns.transport, Some(Transport::Span(SpanContent::Utf8))) =>
+            {
                 let decode = "_module.takePackedUtf8String(packed)".to_string();
                 (Some(ts_type_str), TsOutputRoute::raw_packed(decode))
             }
@@ -2310,6 +2324,7 @@ fn remap_named_in_write_op(op: &WriteOp) -> WriteOp {
 mod tests {
     use super::*;
     use crate::ir::Lowerer as IrLowerer;
+    use crate::ir::codec::CodecPlan;
     use crate::ir::contract::{FfiContract, PackageInfo};
     use crate::ir::definitions::{
         CStyleVariant, CallbackKind, CallbackMethodDef, CallbackTraitDef, ClassDef, ConstructorDef,
@@ -2319,7 +2334,9 @@ mod tests {
     use crate::ir::ids::{
         CallbackId, ClassId, EnumId, FunctionId, MethodId, ParamName, VariantName,
     };
+    use crate::ir::ops::{OffsetExpr, WireShape};
     use boltffi_ffi_rules::callable::ExecutionKind;
+    use boltffi_ffi_rules::transport::ReturnContract;
     use std::path::PathBuf;
 
     fn empty_contract() -> FfiContract {
@@ -2408,6 +2425,33 @@ mod tests {
         lower_contract_result(contract).expect("typescript lowering should succeed")
     }
 
+    fn sync_return_route(returns: &ReturnShape) -> TsOutputRoute {
+        let contract = empty_contract();
+        let abi = IrLowerer::new(&contract).to_abi_contract();
+        let lowerer = TypeScriptLowerer::new(
+            &contract,
+            &abi,
+            "Test".to_string(),
+            TypeScriptExperimental::default(),
+        );
+        let (_, route) = lowerer.sync_encoded_output_route(
+            returns,
+            returns.decode_ops.as_ref().expect("decode ops"),
+            TsReturnSemantics::AbiOnly,
+        );
+        route
+    }
+
+    fn string_read_seq() -> ReadSeq {
+        ReadSeq {
+            size: SizeExpr::StringLen(ValueExpr::Var("value".to_string())),
+            ops: vec![ReadOp::String {
+                offset: OffsetExpr::Base,
+            }],
+            shape: WireShape::Value,
+        }
+    }
+
     fn class_with_sync_and_async_methods() -> ClassDef {
         ClassDef {
             id: ClassId::new("Counter"),
@@ -2474,6 +2518,40 @@ mod tests {
         assert_eq!(import.params.len(), 1);
         assert_eq!(import.params[0].name, "count");
         assert_eq!(import.params[0].wasm_type, "number");
+    }
+
+    #[test]
+    fn sync_wire_string_return_uses_wire_reader() {
+        let returns = ReturnShape {
+            contract: ReturnContract::infallible(ValueReturnStrategy::Buffer(
+                EncodedReturnStrategy::WireEncoded,
+            )),
+            transport: Some(Transport::Span(SpanContent::Encoded(CodecPlan::String))),
+            decode_ops: Some(string_read_seq()),
+            encode_ops: None,
+        };
+        let route = sync_return_route(&returns);
+
+        assert!(route.is_packed());
+        assert!(!route.is_raw_packed());
+        assert_eq!(route.decode_expr(), "reader.readString()");
+    }
+
+    #[test]
+    fn sync_raw_string_return_uses_packed_utf8() {
+        let returns = ReturnShape {
+            contract: ReturnContract::infallible(ValueReturnStrategy::Buffer(
+                EncodedReturnStrategy::Utf8String,
+            )),
+            transport: Some(Transport::Span(SpanContent::Utf8)),
+            decode_ops: Some(string_read_seq()),
+            encode_ops: None,
+        };
+        let route = sync_return_route(&returns);
+
+        assert!(route.is_raw_packed());
+        assert!(!route.is_packed());
+        assert_eq!(route.decode_expr(), "_module.takePackedUtf8String(packed)");
     }
 
     #[test]

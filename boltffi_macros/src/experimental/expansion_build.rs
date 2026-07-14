@@ -79,10 +79,9 @@ impl Request {
             .collect::<Vec<_>>();
         let root_types =
             RootModuleTypes::with_visible_paths(&complete.package, visible_paths.clone());
-        let root = root_types.contract(scan.root());
         let source = root_types.contract(&source);
-        let complete = root_types.contract(complete);
-        let expander = Expander::with_support(&root, &complete, visible_paths);
+        let root = root_types.contract(scan.root());
+        let expander = Expander::with_support(&root, &source, visible_paths);
 
         match requested_surface()? {
             BindingMetadataSurface::Native => {

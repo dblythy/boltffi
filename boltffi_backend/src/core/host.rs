@@ -12,8 +12,8 @@ use boltffi_binding::{
 };
 
 use crate::core::{
-    BridgeCapability, BridgeContract, CapabilityRequirements, Emitted, GeneratedOutput,
-    HostCapabilities, LanguageSyntax, RenderContext, RenderedDeclaration,
+    BridgeCapability, BridgeContract, CapabilityRequirements, CoverageReport, Emitted,
+    GeneratedOutput, HostCapabilities, LanguageSyntax, RenderContext, RenderedDeclaration,
     ResolvedCustomTypeMappings, Result, contract::sealed,
 };
 
@@ -42,6 +42,16 @@ pub trait HostBackend: sealed::HostBackend {
         _bindings: &Bindings<Self::Surface>,
     ) -> Result<ResolvedCustomTypeMappings> {
         Ok(ResolvedCustomTypeMappings::default())
+    }
+
+    /// Computes target-owned coverage before per-declaration rendering.
+    fn preflight_coverage(
+        &self,
+        _bindings: &Bindings<Self::Surface>,
+        _bridge: &Self::Bridge,
+        _context: &RenderContext<Self::Surface>,
+    ) -> Result<CoverageReport> {
+        Ok(CoverageReport::new())
     }
 
     /// Renders a record declaration.

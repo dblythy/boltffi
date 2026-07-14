@@ -148,7 +148,7 @@ pub fn ts_type(type_expr: &TypeExpr) -> String {
     match type_expr {
         TypeExpr::Void => "void".to_string(),
         TypeExpr::Primitive(p) => ts_primitive(*p),
-        TypeExpr::String => "string".to_string(),
+        TypeExpr::String | TypeExpr::Str => "string".to_string(),
         TypeExpr::Builtin(id) => ts_builtin(id),
         TypeExpr::Option(inner) => format!("{} | null", ts_type(inner)),
         TypeExpr::Vec(inner) => {

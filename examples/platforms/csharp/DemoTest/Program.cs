@@ -209,6 +209,7 @@ public static class DemoTest
         Require(RepeatString("ab", 3u) == "ababab", "case:primitives.strings.string.should_repeat_value repeatString(ab, 3)");
         Require(RepeatString("x", 0u) == "", "repeatString(x, 0)");
         Require(RepeatString("🌟", 2u) == "🌟🌟", "repeatString(emoji, 2)");
+        Require(BorrowedStaticString() == "borrowed static", "case:primitives.strings.borrowed_static_string.should_return_value");
         Console.WriteLine("  PASS\n");
     }
 
@@ -609,6 +610,13 @@ public static class DemoTest
             ServiceConfig.FromStringRefName("stringref").Describe() == "stringref:3:standard:none:https://default",
             "ServiceConfig.FromStringRefName(string)"
         );
+        DemoCase("case:records.default_values.service_config.from_non_empty_name.should_return_config_for_non_empty_values");
+        ServiceConfig? validatedConfig = ServiceConfig.FromNonEmptyName("optional", "eu-west");
+        Require(validatedConfig?.Name == "optional", "ServiceConfig.FromNonEmptyName name");
+        Require(validatedConfig?.Region == "eu-west", "ServiceConfig.FromNonEmptyName region");
+        DemoCase("case:records.default_values.service_config.from_non_empty_name.should_return_none_for_empty_values");
+        Require(ServiceConfig.FromNonEmptyName("", "eu-west") is null, "ServiceConfig.FromNonEmptyName empty name");
+        Require(ServiceConfig.FromNonEmptyName("optional", "") is null, "ServiceConfig.FromNonEmptyName empty region");
 
         Console.WriteLine("  PASS\n");
     }
@@ -1838,6 +1846,11 @@ public static class DemoTest
             "EchoVecOptionalI32 all-Some preserved"
         );
 
+        DemoCase("case:options.complex.shape.should_return_radius_for_circle");
+        Require(RadiusIfCircle(new Shape.Circle(5.0)) == 5.0, "RadiusIfCircle(Circle) returns Some(radius)");
+        DemoCase("case:options.complex.shape.should_return_none_for_non_circle");
+        Require(RadiusIfCircle(new Shape.Rectangle(3.0, 4.0)) == null, "RadiusIfCircle(Rectangle) returns None");
+
         Console.WriteLine("  PASS\n");
     }
 
@@ -2740,6 +2753,12 @@ public static class DemoTest
     private static async System.Threading.Tasks.Task TestAsyncClassMethods()
     {
         Console.WriteLine("Testing async class methods...");
+
+        DemoCase("case:classes.async_methods.async_factory.new.should_construct_from_async_initializer");
+        using (var factory = await AsyncFactory.New(42))
+        {
+            Require(factory.Value() == 42, "AsyncFactory.New constructs an initialized class handle");
+        }
 
         using (var worker = new AsyncWorker("worker"))
         {

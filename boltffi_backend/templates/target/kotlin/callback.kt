@@ -78,6 +78,8 @@ private class {{ callback.handle_name() }}(private val handle: Long) : {{ callba
         check(!closed) { "callback handle is closed" }
         return handle
     }
+
+    fun rawHandle(): Long = requireOpen()
 {%- for method in callback.handle_methods() %}
 
     override fun {{ method.name() }}({% for parameter in method.parameters() %}{{ parameter.name() }}: {{ parameter.ty() }}{% if !loop.last %}, {% endif %}{% endfor %}){% if let Some(return_type) = method.returns() %}: {{ return_type }}{% endif %} {
@@ -106,6 +108,11 @@ private class {{ callback.handle_name() }}(private val handle: Long) : {{ callba
 
 object {{ callback.bridge_name() }} {
     fun create(value: {{ callback.name() }}): Long {
+{%- if !callback.handle_methods().is_empty() %}
+        if (value is {{ callback.handle_name() }}) {
+            return value.rawHandle()
+        }
+{%- endif %}
         return {{ callback.map_name() }}.insert(value)
     }
 }

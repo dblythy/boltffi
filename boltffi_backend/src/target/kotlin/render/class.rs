@@ -12,7 +12,7 @@ use crate::{
     target::kotlin::{
         KotlinFactoryStyle, KotlinHost,
         name_style::Name,
-        render::function::{ExportedCall, ExportedCallRenderer},
+        render::function::{ExportedCall, ExportedCallRenderer, ReceiverCarrier},
         syntax::{Expression, Identifier, Statement, TypeName},
     },
 };
@@ -118,11 +118,11 @@ impl Class {
             .iter()
             .filter(|method| method.callable().receiver().is_some() == receiver.is_some())
             .map(|method| {
-                let native_prefix = match (method.callable().receiver(), receiver.clone()) {
+                let receiver = match (method.callable().receiver(), receiver.clone()) {
                     (Some(Receive::ByRef | Receive::ByMutRef | Receive::ByValue), Some(handle)) => {
-                        vec![handle]
+                        Some(ReceiverCarrier::direct(handle))
                     }
-                    (None, None) => Vec::new(),
+                    (None, None) => None,
                     _ => {
                         return Err(KotlinHost::unsupported("class method receiver"));
                     }
@@ -131,7 +131,7 @@ impl Class {
                     Name::new(method.name()).function()?,
                     method.target(),
                     method.callable(),
-                    native_prefix,
+                    receiver,
                 )
             })
             .collect()
@@ -150,7 +150,7 @@ impl Initializer {
                 Name::new(initializer.name()).function()?,
                 initializer.symbol(),
                 initializer.callable(),
-                Vec::new(),
+                None,
             )
             .map(|call| Self {
                 call,

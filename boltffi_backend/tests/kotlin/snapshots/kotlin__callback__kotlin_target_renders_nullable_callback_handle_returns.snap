@@ -72,6 +72,8 @@ private class ListenerHandle(private val handle: Long) : Listener, AutoCloseable
         return handle
     }
 
+    fun rawHandle(): Long = requireOpen()
+
     override fun onValue(value: UInt): UInt {
         return Native.boltffi_callback_handle_demo_listener_on_value(this.requireOpen(), value.toInt()).toUInt()
     }
@@ -79,6 +81,9 @@ private class ListenerHandle(private val handle: Long) : Listener, AutoCloseable
 
 object ListenerBridge {
     fun create(value: Listener): Long {
+        if (value is ListenerHandle) {
+            return value.rawHandle()
+        }
         return ListenerMap.insert(value)
     }
 }

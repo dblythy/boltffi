@@ -1273,7 +1273,7 @@ impl<'expansion, 'lowered, S: CallbackMethodSurface> MethodParameter<'expansion,
             OutgoingParam::Value(ParamPlan::ScalarOption { primitive }) => {
                 self.foreign_scalar_option_tokens(*primitive)
             }
-            OutgoingParam::Value(ParamPlan::DirectVec { element }) => {
+            OutgoingParam::Value(ParamPlan::DirectVec { element, .. }) => {
                 self.foreign_direct_vec_tokens(element)
             }
             OutgoingParam::Value(_) => Err(Error::UnsupportedExpansion(

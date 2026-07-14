@@ -18,7 +18,8 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EncodedWrite {
     setup: Vec<Statement>,
-    argument: Expression,
+    array_argument: Expression,
+    direct_arguments: Vec<Expression>,
     cleanup: Vec<Statement>,
 }
 
@@ -42,16 +43,26 @@ pub struct WriteStatement {
 }
 
 impl EncodedWrite {
-    pub fn new(setup: Vec<Statement>, argument: Expression, cleanup: Vec<Statement>) -> Self {
+    pub fn new(
+        setup: Vec<Statement>,
+        array_argument: Expression,
+        direct_arguments: Vec<Expression>,
+        cleanup: Vec<Statement>,
+    ) -> Self {
         Self {
             setup,
-            argument,
+            array_argument,
+            direct_arguments,
             cleanup,
         }
     }
 
-    pub fn into_parts(self) -> (Vec<Statement>, Expression, Vec<Statement>) {
-        (self.setup, self.argument, self.cleanup)
+    pub fn into_array_parts(self) -> (Vec<Statement>, Expression, Vec<Statement>) {
+        (self.setup, self.array_argument, self.cleanup)
+    }
+
+    pub fn into_direct_parts(self) -> (Vec<Statement>, Vec<Expression>, Vec<Statement>) {
+        (self.setup, self.direct_arguments, self.cleanup)
     }
 }
 
@@ -122,17 +133,30 @@ impl WireBuffer {
         )))
         .chain(writes)
         .collect();
-        let argument = Expression::call(
-            Expression::identifier(self.buffer.clone()),
-            Identifier::parse("bytes")?,
-            ArgumentList::default(),
-        );
         let cleanup = vec![Statement::expression(Expression::call(
-            Expression::identifier(self.buffer),
+            Expression::identifier(self.buffer.clone()),
             Identifier::parse("close")?,
             ArgumentList::default(),
         ))];
-        Ok(EncodedWrite::new(setup, argument, cleanup))
+        let buffer = Expression::identifier(self.buffer);
+        let array_argument = Expression::call(
+            buffer.clone(),
+            Identifier::parse("bytes")?,
+            ArgumentList::default(),
+        );
+        let direct_arguments = ["directBuffer", "size"]
+            .into_iter()
+            .map(|method| {
+                Identifier::parse(method)
+                    .map(|method| Expression::call(buffer.clone(), method, ArgumentList::default()))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(EncodedWrite::new(
+            setup,
+            array_argument,
+            direct_arguments,
+            cleanup,
+        ))
     }
 }
 

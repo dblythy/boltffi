@@ -2960,7 +2960,7 @@ impl<'a> KotlinLowerer<'a> {
     fn kotlin_type(&self, ty: &TypeExpr) -> String {
         match ty {
             TypeExpr::Primitive(p) => self.primitive_kotlin_type(*p),
-            TypeExpr::String => "String".to_string(),
+            TypeExpr::String | TypeExpr::Str => "String".to_string(),
             TypeExpr::Builtin(id) => self.builtin_kotlin_type(id),
             TypeExpr::Record(id) => NamingConvention::class_name(id.as_str()),
             TypeExpr::Custom(id) => {
