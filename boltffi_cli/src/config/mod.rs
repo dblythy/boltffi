@@ -923,6 +923,10 @@ impl Config {
         self.targets.csharp.namespace.as_deref()
     }
 
+    pub fn csharp_data_namespace(&self) -> Option<&str> {
+        self.targets.csharp.data_namespace.as_deref()
+    }
+
     pub fn csharp_package_id(&self) -> String {
         self.targets
             .csharp

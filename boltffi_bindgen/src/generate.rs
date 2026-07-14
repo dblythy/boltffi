@@ -43,6 +43,7 @@ pub struct Generation {
     python_package_version: Option<String>,
     python_native_library: Option<String>,
     csharp_namespace: Option<String>,
+    csharp_data_namespace: Option<String>,
     csharp_native_library: Option<String>,
     java_package: Option<String>,
     java_file: Option<String>,
@@ -88,6 +89,7 @@ impl Generation {
             python_package_version: None,
             python_native_library: None,
             csharp_namespace: None,
+            csharp_data_namespace: None,
             csharp_native_library: None,
             java_package: None,
             java_file: None,
@@ -351,6 +353,13 @@ impl Generation {
     /// Sets the namespace used by generated C# source.
     pub fn csharp_namespace(mut self, namespace: Option<String>) -> Self {
         self.csharp_namespace = namespace;
+        self
+    }
+
+    /// Sets the namespace used by generated C# records/enums. Defaults to
+    /// [`Self::csharp_namespace`] when unset.
+    pub fn csharp_data_namespace(mut self, data_namespace: Option<String>) -> Self {
+        self.csharp_data_namespace = data_namespace;
         self
     }
 
@@ -657,6 +666,13 @@ impl Generation {
             .transpose()
             .map_err(GenerationError::Render)?
             .unwrap_or_default();
+        let host = self
+            .csharp_data_namespace
+            .as_deref()
+            .map(|data_namespace| host.clone().data_namespace(data_namespace))
+            .transpose()
+            .map_err(GenerationError::Render)?
+            .unwrap_or(host);
         Ok(self
             .csharp_native_library
             .iter()

@@ -9,6 +9,10 @@ pub struct CSharpConfig {
     #[serde(default = "default_csharp_output")]
     pub output: PathBuf,
     pub namespace: Option<String>,
+    /// Namespace for generated records/enums (the DTO/public-contract surface). Defaults to
+    /// `namespace` when unset — classes/callbacks (the handle surface) always stay on
+    /// `namespace`, so only setting this splits the two.
+    pub data_namespace: Option<String>,
     pub package_id: Option<String>,
     pub target_framework: Option<String>,
     pub package_output: Option<PathBuf>,
@@ -24,6 +28,7 @@ impl Default for CSharpConfig {
         Self {
             output: default_csharp_output(),
             namespace: None,
+            data_namespace: None,
             package_id: None,
             target_framework: None,
             package_output: None,

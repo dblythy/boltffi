@@ -318,6 +318,7 @@ fn generate_csharp(config: &Config, options: &GenerateOptions) -> Result<()> {
         .generation()
         .coverage_mode(CoverageMode::Partial)
         .csharp_namespace(config.csharp_namespace().map(str::to_owned))
+        .csharp_data_namespace(config.csharp_data_namespace().map(str::to_owned))
         .csharp_native_library(expansion.artifact_name())
         .render(Target::CSharp)
         .and_then(|output| {
@@ -519,6 +520,7 @@ pub fn run_csharp_generation(
         .cargo_args(cargo_args)
         .coverage_mode(CoverageMode::Partial)
         .csharp_namespace(config.csharp_namespace().map(str::to_owned))
+        .csharp_data_namespace(config.csharp_data_namespace().map(str::to_owned))
         .csharp_native_library(artifact_name)
         .render(Target::CSharp)
         .and_then(|output| {
