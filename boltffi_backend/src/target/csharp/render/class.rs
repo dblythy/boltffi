@@ -27,6 +27,10 @@ struct ClassReleaseTemplate<'class> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::target::csharp) struct Class {
     namespace: Namespace,
+    // Only `Some` when it differs from `namespace` — drives the `using` directive so methods
+    // whose return/param types are records/enums (rendered by-value into `data_namespace`) can
+    // reference them; see Record::ffi_namespace's doc comment for the mirror-image case.
+    data_namespace: Option<Namespace>,
     name: Identifier,
     carrier_type: TypeFragment,
     release_name: Identifier,
@@ -47,6 +51,7 @@ impl Class {
     pub(in crate::target::csharp) fn from_declaration(
         declaration: &ClassDecl<Native>,
         namespace: Namespace,
+        data_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -60,7 +65,7 @@ impl Class {
                 declaration.id(),
                 &name,
                 declaration.handle(),
-                Some(&namespace),
+                Some(&data_namespace),
                 bridge,
                 context,
             ) {
@@ -78,7 +83,7 @@ impl Class {
                 declaration.id(),
                 &name,
                 declaration.handle(),
-                Some(&namespace),
+                Some(&data_namespace),
                 bridge,
                 context,
             ) {
@@ -87,6 +92,7 @@ impl Class {
             }
         }
         Ok(Self {
+            data_namespace: (data_namespace != namespace).then_some(data_namespace),
             namespace,
             name: name.clone(),
             carrier_type: handle_carrier_type(declaration.handle())?,

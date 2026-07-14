@@ -30,6 +30,12 @@ struct CallbackTemplate<'callback> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::target::csharp) struct Callback {
     namespace: Namespace,
+    // Only `Some` when it differs from `namespace`. Callback method parameter/return types are
+    // rendered unqualified (`type_name::type_ref`, no namespace-qualifying pass — unlike the
+    // Direct-record/enum path other declarations go through), so a record/enum type used in a
+    // callback signature needs this `using` directive to resolve once it lives in a different
+    // namespace than the callback interface itself.
+    data_namespace: Option<Namespace>,
     name: Identifier,
     proxy_name: Identifier,
     bridge_name: Identifier,
@@ -78,6 +84,7 @@ impl Callback {
     pub(in crate::target::csharp) fn from_declaration(
         declaration: &CallbackDecl<Native>,
         namespace: Namespace,
+        data_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -105,6 +112,7 @@ impl Callback {
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {
+            data_namespace: (data_namespace != namespace).then_some(data_namespace),
             namespace,
             proxy_name: Identifier::parse(format!("{name}Proxy"))?,
             bridge_name,

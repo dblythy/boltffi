@@ -4,7 +4,8 @@
 #nullable enable
 
 using System.Runtime.InteropServices;
-
+{% if let Some(ffi_namespace) = record.ffi_namespace %}using {{ ffi_namespace }};
+{% endif %}
 namespace {{ record.namespace }}
 {
 {% if record.direct %}    [StructLayout(LayoutKind.Sequential)]

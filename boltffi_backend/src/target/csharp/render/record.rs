@@ -28,6 +28,11 @@ struct RecordTemplate<'record> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::target::csharp) struct Record {
     namespace: Namespace,
+    // Only `Some` when the data namespace differs from the ffi namespace records live in by
+    // default — keeps the byte-for-byte output of the common single-namespace case unchanged.
+    // Drives the `using` directive that lets #[data(impl)] methods reach WireReader/WireWriter/
+    // NativeMethods, which stay declared in `ffi_namespace`.
+    ffi_namespace: Option<Namespace>,
     name: Identifier,
     direct: bool,
     codec_payload: bool,
@@ -51,12 +56,17 @@ impl Record {
     pub(in crate::target::csharp) fn from_declaration(
         declaration: &RecordDecl<Native>,
         namespace: Namespace,
+        ffi_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
         match declaration {
-            RecordDecl::Direct(record) => Self::from_direct(record, namespace, bridge, context),
-            RecordDecl::Encoded(record) => Self::from_encoded(record, namespace, bridge, context),
+            RecordDecl::Direct(record) => {
+                Self::from_direct(record, namespace, ffi_namespace, bridge, context)
+            }
+            RecordDecl::Encoded(record) => {
+                Self::from_encoded(record, namespace, ffi_namespace, bridge, context)
+            }
             _ => Err(Error::UnexpectedBindingShape {
                 layer: "csharp record",
                 shape: "unknown record declaration",
@@ -67,6 +77,7 @@ impl Record {
     fn from_direct(
         declaration: &DirectRecordDecl<Native>,
         namespace: Namespace,
+        ffi_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -147,6 +158,7 @@ impl Record {
             )?;
         }
         Ok(Self {
+            ffi_namespace: (ffi_namespace != namespace).then_some(ffi_namespace),
             namespace,
             name,
             direct: true,
@@ -165,6 +177,7 @@ impl Record {
     fn from_encoded(
         declaration: &EncodedRecordDecl<Native>,
         namespace: Namespace,
+        ffi_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -242,6 +255,7 @@ impl Record {
             )?;
         }
         Ok(Self {
+            ffi_namespace: (ffi_namespace != namespace).then_some(ffi_namespace),
             namespace,
             name,
             direct: false,

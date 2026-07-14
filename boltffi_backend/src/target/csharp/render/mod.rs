@@ -161,6 +161,7 @@ struct CopyBufferTemplate<'entry> {
 #[template(path = "target/csharp/module.cs", escape = "none")]
 struct ModuleTemplate<'module> {
     namespace: &'module Namespace,
+    data_namespace: Option<&'module Namespace>,
     class_name: &'module Identifier,
     library: &'module Literal,
     support: &'module [Statement],
@@ -2051,6 +2052,7 @@ fn lower_encoded_receiver(
 
 pub(super) struct Module<'module> {
     namespace: &'module Namespace,
+    data_namespace: &'module Namespace,
     class_name: Identifier,
     library: Literal,
 }
@@ -2058,11 +2060,13 @@ pub(super) struct Module<'module> {
 impl<'module> Module<'module> {
     pub(super) fn new(
         namespace: &'module Namespace,
+        data_namespace: &'module Namespace,
         class_name: Identifier,
         library: Literal,
     ) -> Self {
         Self {
             namespace,
+            data_namespace,
             class_name,
             library,
         }
@@ -2132,6 +2136,7 @@ impl<'module> Module<'module> {
         let support = support.into_values().collect::<Vec<_>>();
         let source = ModuleTemplate {
             namespace: self.namespace,
+            data_namespace: (self.data_namespace != self.namespace).then_some(self.data_namespace),
             class_name: &self.class_name,
             library: &self.library,
             support: &support,

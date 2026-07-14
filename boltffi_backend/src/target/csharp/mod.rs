@@ -33,6 +33,7 @@ pub use syntax::{ArgumentList, Expression, Identifier, Statement, Syntax, TypeFr
 #[non_exhaustive]
 pub struct CSharpHost {
     namespace: Option<Namespace>,
+    data_namespace: Option<Namespace>,
     library: Option<String>,
     custom_mappings: crate::core::CustomTypeMappingSet,
 }
@@ -46,6 +47,16 @@ impl CSharpHost {
     /// Selects the namespace used by generated C# source.
     pub fn namespace(mut self, namespace: impl AsRef<str>) -> Result<Self> {
         self.namespace = Some(Namespace::parse(namespace.as_ref())?);
+        Ok(self)
+    }
+
+    /// Selects the namespace used by generated records/enums (the DTO surface). Defaults to the
+    /// same namespace as [`Self::namespace`] when unset, so callers that never split data from
+    /// handles see no change. Handle types (classes/callbacks) always stay on `namespace` — only
+    /// records and enums move, so a consumer's own handle-colliding names never collide with the
+    /// generated DTOs.
+    pub fn data_namespace(mut self, namespace: impl AsRef<str>) -> Result<Self> {
+        self.data_namespace = Some(Namespace::parse(namespace.as_ref())?);
         Ok(self)
     }
 
@@ -75,6 +86,15 @@ impl CSharpHost {
             .clone()
             .map(Ok)
             .unwrap_or_else(|| Namespace::from_canonical(bindings.package().name()))
+    }
+
+    /// The namespace records/enums render into. Falls back to [`Self::namespace_for`] when
+    /// `data_namespace` was never set, so the default (single-namespace) output is unaffected.
+    fn data_namespace_for(&self, bindings: &Bindings<Native>) -> Result<Namespace> {
+        match &self.data_namespace {
+            Some(namespace) => Ok(namespace.clone()),
+            None => self.namespace_for(bindings),
+        }
     }
 
     fn library_for(&self, bindings: &Bindings<Native>) -> String {
@@ -130,6 +150,7 @@ impl host::HostBackend for CSharpHost {
     ) -> Result<Emitted> {
         render::Record::from_declaration(
             decl,
+            self.data_namespace_for(context.bindings())?,
             self.namespace_for(context.bindings())?,
             bridge,
             context,
@@ -145,6 +166,7 @@ impl host::HostBackend for CSharpHost {
     ) -> Result<Emitted> {
         render::Enumeration::from_declaration(
             decl,
+            self.data_namespace_for(context.bindings())?,
             self.namespace_for(context.bindings())?,
             bridge,
             context,
@@ -158,8 +180,8 @@ impl host::HostBackend for CSharpHost {
         bridge: &Self::Bridge,
         context: &RenderContext<Self::Surface>,
     ) -> Result<Emitted> {
-        let namespace = self.namespace_for(context.bindings())?;
-        render::Function::from_declaration(decl, Some(&namespace), bridge, context)?.render()
+        let data_namespace = self.data_namespace_for(context.bindings())?;
+        render::Function::from_declaration(decl, Some(&data_namespace), bridge, context)?.render()
     }
 
     fn class(
@@ -171,6 +193,7 @@ impl host::HostBackend for CSharpHost {
         render::Class::from_declaration(
             decl,
             self.namespace_for(context.bindings())?,
+            self.data_namespace_for(context.bindings())?,
             bridge,
             context,
         )?
@@ -186,6 +209,7 @@ impl host::HostBackend for CSharpHost {
         render::Callback::from_declaration(
             decl,
             self.namespace_for(context.bindings())?,
+            self.data_namespace_for(context.bindings())?,
             bridge,
             context,
         )?
@@ -227,8 +251,10 @@ impl host::HostBackend for CSharpHost {
         declarations: Vec<RenderedDeclaration<'decl, Self::Surface>>,
     ) -> Result<GeneratedOutput> {
         let namespace = self.namespace_for(bindings)?;
+        let data_namespace = self.data_namespace_for(bindings)?;
         render::Module::new(
             &namespace,
+            &data_namespace,
             Name::new(bindings.package().name()).pascal()?,
             Literal::string(&self.library_for(bindings)),
         )

@@ -4,7 +4,8 @@
 #nullable enable
 
 using System.Runtime.InteropServices;
-
+{% if let Some(data_namespace) = data_namespace %}using {{ data_namespace }};
+{% endif %}
 namespace {{ namespace }}
 {
 {% for item in support %}{{ item }}

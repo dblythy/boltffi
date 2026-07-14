@@ -26,6 +26,8 @@ struct EnumerationTemplate<'enumeration> {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(in crate::target::csharp) struct Enumeration {
     namespace: Namespace,
+    // Only `Some` when it differs from `namespace` — see Record::ffi_namespace's doc comment.
+    ffi_namespace: Option<Namespace>,
     name: Identifier,
     c_style: bool,
     error_payload: bool,
@@ -62,14 +64,17 @@ impl Enumeration {
     pub(in crate::target::csharp) fn from_declaration(
         declaration: &EnumDecl<Native>,
         namespace: Namespace,
+        ffi_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
         match declaration {
             EnumDecl::CStyle(enumeration) => {
-                Self::from_c_style(enumeration, namespace, bridge, context)
+                Self::from_c_style(enumeration, namespace, ffi_namespace, bridge, context)
             }
-            EnumDecl::Data(enumeration) => Self::from_data(enumeration, namespace, bridge, context),
+            EnumDecl::Data(enumeration) => {
+                Self::from_data(enumeration, namespace, ffi_namespace, bridge, context)
+            }
             _ => Err(Error::UnexpectedBindingShape {
                 layer: "csharp enum",
                 shape: "unknown enum declaration",
@@ -80,6 +85,7 @@ impl Enumeration {
     fn from_c_style(
         declaration: &CStyleEnumDecl<Native>,
         namespace: Namespace,
+        ffi_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -161,6 +167,7 @@ impl Enumeration {
             )?;
         }
         Ok(Self {
+            ffi_namespace: (ffi_namespace != namespace).then_some(ffi_namespace),
             namespace,
             name,
             c_style: true,
@@ -176,6 +183,7 @@ impl Enumeration {
     fn from_data(
         declaration: &DataEnumDecl<Native>,
         namespace: Namespace,
+        ffi_namespace: Namespace,
         bridge: &CBridgeContract,
         context: &RenderContext<Native>,
     ) -> Result<Self> {
@@ -286,6 +294,7 @@ impl Enumeration {
             )?;
         }
         Ok(Self {
+            ffi_namespace: (ffi_namespace != namespace).then_some(ffi_namespace),
             namespace,
             name,
             c_style: false,

@@ -209,10 +209,201 @@ fn csharp_target_does_not_collide_with_a_class_exporting_its_own_release_method(
     compile_csharp_with_dotnet_when_available(&output, "csharp-release-collision-smoke");
 }
 
+/// `[targets.csharp] data_namespace` (parse-core-sdks' consumer-facing namespace-leak fix):
+/// records/enums (the DTO/public-contract surface) render into a namespace separate from
+/// classes/callbacks (the handle surface), so a shim's own hand-written types never collide with
+/// generated handle types of the same name. Verifies every declaration kind that can carry a
+/// record/enum reference — a free function, a class method, a callback method, and a record's own
+/// `#[data(impl)]` method calling back into the native runtime — still resolves once split, with a
+/// real `dotnet build` including a standalone consumer file that reaches every DTO kind through
+/// `using ParseCore;` alone, never `ParseCore.Ffi`.
+#[test]
+fn csharp_target_splits_data_records_and_enums_into_a_separate_namespace() {
+    let bindings = bindings(
+        r#"
+        #[repr(u8)]
+        #[data]
+        pub enum Mode {
+            Fast = 1,
+            Slow = 2,
+        }
+
+        #[data]
+        pub struct Profile {
+            pub name: String,
+            pub mode: Mode,
+        }
+
+        #[data(impl)]
+        impl Profile {
+            pub fn describe(&self) -> String { self.name.clone() }
+        }
+
+        #[data]
+        pub enum Shape {
+            Empty,
+            Circle { radius: f64 },
+        }
+
+        pub struct ParseObject {
+            id: i32,
+        }
+
+        #[export]
+        impl ParseObject {
+            pub fn new(id: i32) -> Self { Self { id } }
+            pub fn profile(&self) -> Profile {
+                Profile { name: "demo".to_string(), mode: Mode::Fast }
+            }
+        }
+
+        #[export]
+        pub trait ProfileListener {
+            fn on_profile(&self, profile: Profile) -> Profile;
+        }
+
+        #[export]
+        pub fn echo_profile(profile: Profile) -> Profile { profile }
+
+        #[export]
+        pub fn echo_shape(shape: Shape) -> Shape { shape }
+        "#,
+    );
+    let output = target(
+        CSharpHost::new()
+            .namespace("ParseCore.Ffi")
+            .expect("valid namespace")
+            .data_namespace("ParseCore")
+            .expect("valid data namespace")
+            .native_library("demo_native"),
+    )
+    .render(&bindings)
+    .expect("a split data/handle namespace should still render");
+
+    assert!(
+        output.diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        output.diagnostics()
+    );
+
+    let file = |name: &str| -> String {
+        output
+            .files()
+            .iter()
+            .find(|file| file.path().as_path() == Path::new(name))
+            .map(|file| file.contents().to_owned())
+            .unwrap_or_else(|| panic!("generated {name}"))
+    };
+
+    let profile = file("Profile.cs");
+    assert!(
+        profile.contains("namespace ParseCore\n"),
+        "Profile (a #[data] record) should render into the data namespace:\n{profile}"
+    );
+    assert!(
+        profile.contains("using ParseCore.Ffi;"),
+        "Profile's own #[data(impl)] method needs the ffi namespace in scope for \
+         NativeMethods/WireReader/WireWriter:\n{profile}"
+    );
+
+    let shape = file("Shape.cs");
+    assert!(
+        shape.contains("namespace ParseCore\n"),
+        "Shape (data enum) should split too"
+    );
+
+    let mode = file("Mode.cs");
+    assert!(
+        mode.contains("namespace ParseCore\n"),
+        "Mode (C-style data enum) should split too"
+    );
+
+    let object = file("ParseObject.cs");
+    assert!(
+        object.contains("namespace ParseCore.Ffi\n"),
+        "the handle class itself stays on the ffi namespace:\n{object}"
+    );
+    assert!(
+        object.contains("global::ParseCore.Profile"),
+        "a class method returning a record must qualify against the DATA namespace, not the \
+         ffi namespace it's declared in:\n{object}"
+    );
+
+    let listener = file("ProfileListener.cs");
+    assert!(
+        listener.contains("using ParseCore;"),
+        "a callback interface referencing a record type in its signature needs the data \
+         namespace imported, since callback signatures render type refs unqualified:\n{listener}"
+    );
+    assert!(
+        listener.contains("Profile OnProfile(Profile profile);"),
+        "the callback method signature itself stays unqualified (resolved via the `using`):\n{listener}"
+    );
+
+    let module = file("Demo.cs");
+    assert!(
+        module.contains("global::ParseCore.Profile EchoProfile(global::ParseCore.Profile profile)"),
+        "a free function taking/returning a record must qualify against the data namespace:\n{module}"
+    );
+    assert!(
+        module.contains("global::ParseCore.Shape EchoShape(global::ParseCore.Shape shape)"),
+        "same for a data enum:\n{module}"
+    );
+
+    compile_csharp_with_dotnet_when_available_with_extra_source(
+        &output,
+        "csharp-data-namespace-split-smoke",
+        "Consumer.cs",
+        r#"using ParseCore;
+
+namespace ParseCore.Consumer
+{
+    // The whole point of the split: a consumer only ever needs `using ParseCore;` — never
+    // `ParseCore.Ffi` — to work with every generated DTO kind (record, enum, and a data record
+    // with its own #[data(impl)] method).
+    public static class Reach
+    {
+        public static Profile MakeProfile() => new Profile("demo", Mode.Fast);
+
+        public static string Describe(Profile profile) => profile.Describe();
+
+        public static Shape MakeShape() => new Shape.Circle(1.0);
+
+        public static Mode MakeMode() => Mode.Slow;
+    }
+}
+"#,
+    );
+}
+
 /// Real `dotnet build` of the generated sources when a `dotnet` toolchain is
 /// on `PATH` (skips cleanly otherwise, matching the Java backend's
 /// `*_when_available` convention in `boltffi_backend/tests/java.rs`).
 fn compile_csharp_with_dotnet_when_available(output: &GeneratedOutput, prefix: &str) {
+    compile_csharp_with_dotnet_when_available_impl(output, prefix, None);
+}
+
+/// Same as [`compile_csharp_with_dotnet_when_available`], plus one extra hand-written consumer
+/// source file compiled into the same project — proves real, non-generated code can consume the
+/// generated output the way a shim/consumer actually would.
+fn compile_csharp_with_dotnet_when_available_with_extra_source(
+    output: &GeneratedOutput,
+    prefix: &str,
+    extra_file_name: &str,
+    extra_source: &str,
+) {
+    compile_csharp_with_dotnet_when_available_impl(
+        output,
+        prefix,
+        Some((extra_file_name, extra_source)),
+    );
+}
+
+fn compile_csharp_with_dotnet_when_available_impl(
+    output: &GeneratedOutput,
+    prefix: &str,
+    extra: Option<(&str, &str)>,
+) {
     if Command::new("dotnet").arg("--version").output().is_err() {
         return;
     }
@@ -232,6 +423,9 @@ fn compile_csharp_with_dotnet_when_available(output: &GeneratedOutput, prefix: &
         fs::create_dir_all(path.parent().expect("generated C# parent"))
             .expect("create generated C# parent directory");
         fs::write(&path, file.contents()).expect("write generated C# source");
+    }
+    if let Some((name, source)) = extra {
+        fs::write(src.join(name), source).expect("write extra consumer source");
     }
     fs::write(
         directory.join("Smoke.csproj"),
