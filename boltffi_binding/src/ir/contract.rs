@@ -563,6 +563,22 @@ pub const BINDING_METADATA_SURFACE_ENV: &str = "BOLTFFI_BINDING_METADATA_SURFACE
 /// variable so source scanning applies the same cfg gates as the build.
 pub const BINDING_METADATA_FEATURES_ENV: &str = "BOLTFFI_BINDING_METADATA_FEATURES";
 
+/// Environment variable carrying the [`NamingStyle`](crate::NamingStyle) the
+/// metadata build should describe the `Native` surface with.
+///
+/// Absent (or unparseable) means [`NamingStyle::Experimental`](crate::NamingStyle::Experimental)
+/// — the metadata build's long-standing default, matching every pack command
+/// (`apple`, `android`, `kotlin_multiplatform`, ...) whose own real artifact
+/// build ALSO runs through the experimental macro expansion
+/// (`BINDING_EXPANSION_BUILD_ENV`, set by `boltffi_cli`'s `BindingExpansion`
+/// for those targets specifically). Only a caller whose real artifact build
+/// is a plain `cargo build` (no experimental opt-in — `pack csharp` today)
+/// should set this to `legacy-compatible`, or the metadata will describe
+/// entry points the plain build never exports (`EntryPointNotFoundException`
+/// class of bug — `docs/tracks/boltffi-fork.md` in the downstream consumer
+/// this env var's introduction fixed).
+pub const BINDING_METADATA_NAMING_STYLE_ENV: &str = "BOLTFFI_BINDING_METADATA_NAMING_STYLE";
+
 /// Environment variable the build orchestrator sets to switch IR wrapper
 /// expansion on.
 ///

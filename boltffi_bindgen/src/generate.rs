@@ -14,7 +14,7 @@ use boltffi_backend::target::{
     swift::SwiftHost,
 };
 use boltffi_backend::{CustomTypeMapping, GeneratedOutput, Target as BackendTarget};
-use boltffi_binding::{BindingMetadataSurface, Bindings, Native, Surface};
+use boltffi_binding::{BindingMetadataSurface, Bindings, NamingStyle, Native, Surface};
 use thiserror::Error;
 
 use crate::metadata::{BindingMetadataBuild, BindingMetadataBuildError};
@@ -72,6 +72,7 @@ pub struct Generation {
     kmp_min_sdk: Option<u32>,
     kmp_kotlin_options: KotlinOptions,
     kmp_support_mode: KmpSupportMode,
+    native_naming_style: NamingStyle,
 }
 
 impl Generation {
@@ -118,12 +119,26 @@ impl Generation {
             kmp_min_sdk: None,
             kmp_kotlin_options: KotlinOptions::default(),
             kmp_support_mode: KmpSupportMode::Strict,
+            native_naming_style: NamingStyle::Experimental,
         }
     }
 
     /// Builds for a Cargo target triple.
     pub fn triple(mut self, triple: impl Into<String>) -> Self {
         self.triple = Some(triple.into());
+        self
+    }
+
+    /// Sets which native-symbol naming scheme the `Native` surface's
+    /// metadata should describe. Defaults to [`NamingStyle::Experimental`] —
+    /// unchanged behavior for every existing caller (`apple`, `android`,
+    /// `kotlin_multiplatform`, and anything else whose real artifact build
+    /// itself opts into the experimental macro expansion). Only a caller
+    /// whose real artifact build is a plain `cargo build` — `csharp` today —
+    /// should pass [`NamingStyle::LegacyCompatible`] (see [`NamingStyle`]'s
+    /// doc for why getting this wrong is silent and runtime-only).
+    pub fn native_naming_style(mut self, native_naming_style: NamingStyle) -> Self {
+        self.native_naming_style = native_naming_style;
         self
     }
 
@@ -707,7 +722,8 @@ impl Generation {
 
     fn metadata_build(&self) -> BindingMetadataBuild {
         let mut build = BindingMetadataBuild::new(&self.manifest_path)
-            .cargo_environment(self.cargo_environment.clone());
+            .cargo_environment(self.cargo_environment.clone())
+            .naming_style(self.native_naming_style);
         if !self.cargo_args.is_empty() {
             build = build.cargo_args(self.cargo_args.clone());
         }

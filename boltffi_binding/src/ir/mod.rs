@@ -104,10 +104,11 @@ pub use codec::{CodecNode, CodecPlan, CodecRead, CodecSize, CodecWrite, ReadPlan
 pub use contract::{
     BINDING_EXPANSION_BUILD_ENV, BINDING_EXPANSION_ROOT_ENV, BINDING_EXPANSION_SOURCE_ENV,
     BINDING_EXPANSION_SURFACE_ENV, BINDING_METADATA_BUILD_ENV, BINDING_METADATA_FEATURES_ENV,
-    BINDING_METADATA_ROOT_ENV, BINDING_METADATA_SOURCE_ENV, BINDING_METADATA_SURFACE_ENV,
-    BindingMetadataEnvelope, BindingMetadataError, BindingMetadataFormat, BindingMetadataHash,
-    BindingMetadataSection, BindingMetadataSectionBytes, BindingMetadataSurface, Bindings,
-    ContractVersion, PackageInfo, SerializedBindings,
+    BINDING_METADATA_NAMING_STYLE_ENV, BINDING_METADATA_ROOT_ENV, BINDING_METADATA_SOURCE_ENV,
+    BINDING_METADATA_SURFACE_ENV, BindingMetadataEnvelope, BindingMetadataError,
+    BindingMetadataFormat, BindingMetadataHash, BindingMetadataSection,
+    BindingMetadataSectionBytes, BindingMetadataSurface, Bindings, ContractVersion, PackageInfo,
+    SerializedBindings,
 };
 pub use custom::{
     CustomConverterExpression, CustomConverterPath, CustomConverterPathRoot, CustomTypeConverter,

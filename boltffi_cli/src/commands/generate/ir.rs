@@ -13,6 +13,7 @@ use boltffi_backend::target::kotlin::{
 };
 use boltffi_backend::{CoverageMode, GeneratedOutput};
 use boltffi_bindgen::generate::{Generation, GenerationError};
+use boltffi_binding::NamingStyle;
 use boltffi_bindgen::render::kotlin::{
     FactoryStyle as BindgenFactoryStyle, KotlinApiStyle as BindgenKotlinApiStyle,
     KotlinDesktopLoader as BindgenKotlinDesktopLoader, KotlinOptions,
@@ -317,6 +318,10 @@ fn generate_csharp(config: &Config, options: &GenerateOptions) -> Result<()> {
     expansion
         .generation()
         .coverage_mode(CoverageMode::Partial)
+        // `pack csharp` builds the real cdylib with a plain `cargo build` (no
+        // experimental-macro opt-in, unlike `apple`/`android`/`kmp`) — the
+        // metadata must describe that same real ABI, see `NamingStyle`'s doc.
+        .native_naming_style(NamingStyle::LegacyCompatible)
         .csharp_namespace(config.csharp_namespace().map(str::to_owned))
         .csharp_data_namespace(config.csharp_data_namespace().map(str::to_owned))
         .csharp_native_library(expansion.artifact_name())
@@ -519,6 +524,10 @@ pub fn run_csharp_generation(
     Generation::new(manifest_path)
         .cargo_args(cargo_args)
         .coverage_mode(CoverageMode::Partial)
+        // See the matching comment in `generate_csharp`: `pack csharp`'s own
+        // native-library build (`crate::pack::csharp::build_csharp_native_library`)
+        // is a plain `cargo build`, so the metadata must describe that ABI.
+        .native_naming_style(NamingStyle::LegacyCompatible)
         .csharp_namespace(config.csharp_namespace().map(str::to_owned))
         .csharp_data_namespace(config.csharp_data_namespace().map(str::to_owned))
         .csharp_native_library(artifact_name)

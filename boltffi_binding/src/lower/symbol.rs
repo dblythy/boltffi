@@ -10,19 +10,32 @@ pub const FFI_PREFIX: &str = "boltffi";
 /// Which native-symbol naming scheme a lowering pass computes.
 ///
 /// [`Experimental`](Self::Experimental) is the long-form, family- and
-/// module-path-qualified scheme `boltffi_macros::experimental` compiles
-/// when a crate opts in via its own build script (`boltffi_tests` is the
-/// only current example). [`LegacyCompatible`](Self::LegacyCompatible)
+/// module-path-qualified scheme `boltffi_macros::experimental` compiles for
+/// a crate that runs through the experimental macro expansion
+/// (`BINDING_EXPANSION_BUILD_ENV`) — either because the crate's own build
+/// script opts in (`boltffi_tests` is the only current example), OR because
+/// `boltffi_cli`'s `BindingExpansion` sets that env var itself while
+/// building the crate for real, which it does for the `apple`, `android`,
+/// and `kotlin_multiplatform` pack commands (confirmed:
+/// `boltffi_cli/src/build/expansion.rs`'s `env()`, and empirically — a real
+/// `boltffi pack apple` xcframework's exported symbols are long-form,
+/// matching this scheme, not `LegacyCompatible`). [`LegacyCompatible`](Self::LegacyCompatible)
 /// mirrors `boltffi_ffi_rules::naming` exactly — the scheme the STABLE,
-/// default macro path (`boltffi_macros::exports`/`lowering`, i.e. every
-/// ordinary crate that does not opt into the experimental build) actually
-/// compiles. A metadata build describing such a crate's real ABI (the CLI's
-/// `boltffi_bindgen::metadata` probe, which every native-target renderer
-/// reads) must lower with `LegacyCompatible`, or the entry points it
-/// describes will not match the real compiled artifact — confirmed against
-/// parse-core-rs's real dylib, whose exported symbols
-/// (`_boltffi_parse_client_new`, `_boltffi_parse_client_become_user`, ...)
-/// have no family tag or module-path qualifier at all.
+/// default macro path (`boltffi_macros::exports`/`lowering`) compiles for
+/// any crate whose REAL SHIPPED ARTIFACT is a plain, unadorned `cargo build`
+/// (`pack csharp` today — confirmed via `nm` against parse-core-rs's real
+/// dylib: `_boltffi_parse_client_new`, `_boltffi_parse_client_become_user`,
+/// ..., no family tag or module-path qualifier at all).
+///
+/// A metadata build (`boltffi_bindgen::metadata::BindingMetadataBuild`, read
+/// by every native-target renderer) must request whichever style matches
+/// how ITS CALLER actually builds the crate's real shipped artifact — there
+/// is no crate-level default that's correct for everyone, because different
+/// `boltffi_cli` pack commands build the real artifact differently. Getting
+/// this wrong produces a P/Invoke-style entry point that compiles clean but
+/// doesn't exist in the real library at runtime
+/// (`EntryPointNotFoundException` class of bug —
+/// `docs/tracks/boltffi-fork.md`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum NamingStyle {
     /// The in-progress macro rewrite's own long-form, collision-safe scheme.
@@ -31,6 +44,25 @@ pub enum NamingStyle {
     /// Matches `boltffi_ffi_rules::naming` — the stable macro path's real,
     /// currently-shipping scheme.
     LegacyCompatible,
+}
+
+impl NamingStyle {
+    /// Returns the stable metadata-build environment value for this style.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Experimental => "experimental",
+            Self::LegacyCompatible => "legacy-compatible",
+        }
+    }
+
+    /// Parses a metadata-build environment value.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "experimental" => Some(Self::Experimental),
+            "legacy-compatible" => Some(Self::LegacyCompatible),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -106,10 +138,16 @@ impl<'source> SymbolOwner<'source> {
     /// Legacy-compatible: no family tag, no module-path qualifier — matches
     /// `boltffi_ffi_rules::naming::method_ffi_name`, the real symbol scheme
     /// the stable macro path compiles (verified against parse-core-rs's
-    /// `_boltffi_parse_client_become_user`).
+    /// `_boltffi_parse_client_become_user`). Uses `member.spelling()` (the
+    /// exact Rust source identifier), not `source_member_name`'s
+    /// re-snake-cased canonical parts: the real macro
+    /// (`boltffi_macros/src/exports/methods.rs`) passes the method's bare
+    /// `to_string()`'d `syn::Ident` straight into `naming::method_ffi_name`
+    /// with no case transform at all, so the two only coincide by
+    /// convention (Rust method names already being snake_case), not by
+    /// construction.
     pub fn legacy_method_symbol_name(self, member: &SourceName) -> String {
-        legacy_naming::method_ffi_name(&self.leaf_name(), &source_member_name(member))
-            .into_string()
+        legacy_naming::method_ffi_name(&self.leaf_name(), member.spelling()).into_string()
     }
 
     /// Legacy has no separate initializer lane: a class initializer compiles
@@ -278,20 +316,45 @@ impl SymbolAllocator {
         ))
     }
 
-    /// Not yet mapped for [`NamingStyle::LegacyCompatible`] — same caveat as
-    /// [`Self::mint_callback_complete`]; no stream reaches a
-    /// `LegacyCompatible` metadata build in this repo today.
     pub fn mint_stream(
         &mut self,
         stream_id: &str,
         action: StreamLifecycle,
     ) -> Result<NativeSymbol, LowerError> {
-        self.mint(format!(
-            "{}_stream_{}_{}",
-            FFI_PREFIX,
-            symbol_path(stream_id),
-            action.suffix()
-        ))
+        let name = match self.style {
+            NamingStyle::Experimental => format!(
+                "{}_stream_{}_{}",
+                FFI_PREFIX,
+                symbol_path(stream_id),
+                action.suffix()
+            ),
+            // `boltffi_scan` always mints a stream's id as `<owner_class_full_path>::<stream_method>`
+            // (`boltffi_scan/src/items/stream.rs`'s `StreamId::new(format!("{owner}::{stream_name}"))`
+            // — `#[ffi_stream]` is only ever an impl-block method in the stable macro,
+            // `boltffi_macros/src/exports/methods.rs`'s `generate_stream_exports`, which mints via
+            // `naming::stream_ffi_*(class_name, stream_name)` — the exact scheme mirrored below.
+            NamingStyle::LegacyCompatible => {
+                let (class_portion, member) =
+                    stream_id.rsplit_once("::").unwrap_or(("", stream_id));
+                let class_leaf = leaf(class_portion);
+                match action {
+                    StreamLifecycle::Subscribe => {
+                        legacy_naming::stream_ffi_subscribe(&class_leaf, member)
+                    }
+                    StreamLifecycle::PopBatch => {
+                        legacy_naming::stream_ffi_pop_batch(&class_leaf, member)
+                    }
+                    StreamLifecycle::Wait => legacy_naming::stream_ffi_wait(&class_leaf, member),
+                    StreamLifecycle::Poll => legacy_naming::stream_ffi_poll(&class_leaf, member),
+                    StreamLifecycle::Unsubscribe => {
+                        legacy_naming::stream_ffi_unsubscribe(&class_leaf, member)
+                    }
+                    StreamLifecycle::Free => legacy_naming::stream_ffi_free(&class_leaf, member),
+                }
+                .into_string()
+            }
+        };
+        self.mint(name)
     }
 
     pub fn mint_async_lifecycle(
@@ -717,6 +780,30 @@ mod tests {
     }
 
     #[test]
+    fn legacy_method_symbol_name_uses_verbatim_spelling_not_the_re_snake_cased_canonical_name() {
+        // A method name whose exact Rust spelling differs from what
+        // re-snake-casing its canonical parts would produce — the real
+        // stable macro (`boltffi_macros/src/exports/methods.rs`) passes
+        // `method_name.to_string()` (the bare `syn::Ident`, verbatim)
+        // straight into `naming::method_ffi_name` with no case transform at
+        // all, so the legacy symbol must preserve `rawHTTPBody` exactly,
+        // not re-derive `raw_http_body` from the canonical parts.
+        let member = SourceName::new(
+            "rawHTTPBody",
+            boltffi_ast::CanonicalName::new(vec![
+                boltffi_ast::NamePart::new("raw"),
+                boltffi_ast::NamePart::new("HTTPBody"),
+            ]),
+        );
+
+        assert_eq!(
+            SymbolOwner::class("parse_core::ffi::client::ParseClient")
+                .legacy_method_symbol_name(&member),
+            "boltffi_parse_client_rawHTTPBody"
+        );
+    }
+
+    #[test]
     fn legacy_method_symbol_name_applies_uniformly_to_record_owners_too() {
         let member = SourceName::from_canonical(boltffi_ast::CanonicalName::new(vec![
             boltffi_ast::NamePart::new("get_public_read_access"),
@@ -791,5 +878,36 @@ mod tests {
             symbol.name().as_str(),
             "boltffi_parse_client_become_user_poll"
         );
+    }
+
+    #[test]
+    fn legacy_style_stream_lifecycle_uses_owner_class_leaf_and_bare_stream_name() {
+        let mut allocator = SymbolAllocator::new_legacy_compatible();
+
+        let subscribe = allocator
+            .mint_stream(
+                "parse_core::ffi::watch::WatchHandle::changes",
+                StreamLifecycle::Subscribe,
+            )
+            .expect("valid symbol");
+        let pop_batch = allocator
+            .mint_stream(
+                "parse_core::ffi::watch::WatchHandle::changes",
+                StreamLifecycle::PopBatch,
+            )
+            .expect("valid symbol");
+        let free = allocator
+            .mint_stream(
+                "parse_core::ffi::watch::WatchHandle::changes",
+                StreamLifecycle::Free,
+            )
+            .expect("valid symbol");
+
+        assert_eq!(subscribe.name().as_str(), "boltffi_watch_handle_changes");
+        assert_eq!(
+            pop_batch.name().as_str(),
+            "boltffi_watch_handle_changes_pop_batch"
+        );
+        assert_eq!(free.name().as_str(), "boltffi_watch_handle_changes_free");
     }
 }

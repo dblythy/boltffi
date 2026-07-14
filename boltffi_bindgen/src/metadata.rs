@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use boltffi_binding::{
-    BINDING_METADATA_BUILD_ENV, BINDING_METADATA_FEATURES_ENV, BINDING_METADATA_ROOT_ENV,
-    BINDING_METADATA_SOURCE_ENV, BINDING_METADATA_SURFACE_ENV, BindingMetadataEnvelope,
-    BindingMetadataSurface,
+    BINDING_METADATA_BUILD_ENV, BINDING_METADATA_FEATURES_ENV,
+    BINDING_METADATA_NAMING_STYLE_ENV, BINDING_METADATA_ROOT_ENV, BINDING_METADATA_SOURCE_ENV,
+    BINDING_METADATA_SURFACE_ENV, BindingMetadataEnvelope, BindingMetadataSurface, NamingStyle,
 };
 use serde::Deserialize;
 use thiserror::Error;
@@ -30,10 +30,14 @@ pub struct BindingMetadataBuild {
     toolchain_selector: Option<String>,
     cargo_args: Result<MetadataCargoArgs, LibraryCargoArgsError>,
     cargo_environment: Vec<(OsString, OsString)>,
+    naming_style: NamingStyle,
 }
 
 impl BindingMetadataBuild {
     /// Creates a metadata build for a Cargo manifest.
+    ///
+    /// Describes the crate's real ABI as [`NamingStyle::Experimental`] by
+    /// default — see [`Self::naming_style`].
     pub fn new(manifest_path: impl Into<PathBuf>) -> Self {
         Self {
             manifest_path: manifest_path.into(),
@@ -41,7 +45,21 @@ impl BindingMetadataBuild {
             toolchain_selector: None,
             cargo_args: Ok(MetadataCargoArgs::default()),
             cargo_environment: Vec::new(),
+            naming_style: NamingStyle::Experimental,
         }
+    }
+
+    /// Sets which native-symbol naming scheme the metadata should describe.
+    ///
+    /// Must match how the CALLER actually builds this crate's real, shipped
+    /// artifact — not a property of the crate itself. Pass
+    /// [`NamingStyle::LegacyCompatible`] only when that real build is a
+    /// plain `cargo build` with no experimental-macro opt-in (see
+    /// [`NamingStyle`]'s doc for why getting this wrong is a silent,
+    /// runtime-only bug).
+    pub fn naming_style(mut self, naming_style: NamingStyle) -> Self {
+        self.naming_style = naming_style;
+        self
     }
 
     /// Builds for a Cargo target triple.
@@ -404,6 +422,10 @@ impl<'build> CargoBuild<'build> {
         command.env(BINDING_METADATA_SOURCE_ENV, self.source_root.path());
         command.env(BINDING_METADATA_SURFACE_ENV, surface.as_str());
         command.env(
+            BINDING_METADATA_NAMING_STYLE_ENV,
+            self.build.naming_style.as_str(),
+        );
+        command.env(
             BINDING_METADATA_FEATURES_ENV,
             self.features.into_env_value(),
         );
@@ -411,6 +433,28 @@ impl<'build> CargoBuild<'build> {
             command.env(BINDING_METADATA_ROOT_ENV, root);
         }
         command.arg("--").arg("--cfg").arg("boltffi_metadata");
+        if self.build.naming_style == NamingStyle::LegacyCompatible {
+            // Cargo's incremental build cache fingerprints the rustc
+            // invocation's arguments, not arbitrary env vars a proc-macro
+            // reads at expansion time (no build script declares
+            // `cargo:rerun-if-env-changed` for `BINDING_METADATA_NAMING_STYLE_ENV`,
+            // and none reasonably could — it's this crate's internal
+            // signal, not the target crate's). Without a distinguishing
+            // `--cfg`, two metadata probes for the SAME crate under the
+            // SAME target triple but DIFFERENT `naming_style` (e.g. `pack
+            // csharp` then `pack apple` from a shared `target/` directory)
+            // can silently reuse each other's cached, wrongly-styled
+            // metadata — reproduced directly: a clean `pack csharp` run
+            // followed by `pack apple` in the same `target/` picked up
+            // csharp's `LegacyCompatible` output for Swift instead of
+            // `Experimental`. This inert cfg (nothing reads it) exists
+            // solely to make the two styles fingerprint as different
+            // builds, the same way `--cfg boltffi_metadata` itself already
+            // does for a metadata build vs. a normal one.
+            command
+                .arg("--cfg")
+                .arg("boltffi_metadata_naming_style_legacy_compatible");
+        }
         command
     }
 }
@@ -737,8 +781,8 @@ mod tests {
 
     use boltffi_ast::{PackageInfo, SourceContract};
     use boltffi_binding::{
-        BindingMetadataEnvelope, BindingMetadataSection, Decl, Native, SerializedBindings,
-        lower_with_declarations,
+        BindingMetadataEnvelope, BindingMetadataSection, Decl, NamingStyle, Native,
+        SerializedBindings, lower_with_declarations,
     };
 
     use super::{
@@ -968,21 +1012,24 @@ mod tests {
 
     /// Regression test for the entry-point-naming bug that blocked
     /// parse-core-rs's C# packaging (`docs/tracks/boltffi-fork.md`,
-    /// `EntryPointNotFoundException` at `ParseClient..ctor`): the `Native`
-    /// surface's `BindingMetadataBuild` — read by EVERY native-target
-    /// renderer, not just C# — must describe symbol names that actually
-    /// exist in a crate's real, plain-`cargo build`-compiled artifact. Before
-    /// the fix, the embedded metadata used the experimental macro path's
-    /// long-form, module-path-qualified naming
-    /// (`boltffi_init_class_metadata_fixture_counter_new`) while a plain
-    /// build (no crate opts into the experimental path without its own
-    /// build script) compiles the stable macro path's short form
-    /// (`boltffi_counter_new`) — every P/Invoke-style entry point a codegen
-    /// tool derived from the metadata was therefore unresolvable at runtime,
-    /// despite compiling cleanly (a bad symbol name is invisible to a
-    /// compile-only check).
+    /// `EntryPointNotFoundException` at `ParseClient..ctor`): a
+    /// `BindingMetadataBuild` set to `NamingStyle::LegacyCompatible` (what
+    /// `pack csharp`'s generation now requests) must describe symbol names
+    /// that actually exist in a crate's real, plain-`cargo build`-compiled
+    /// artifact. Before the fix existed at all, the embedded metadata always
+    /// used the experimental macro path's long-form, module-path-qualified
+    /// naming (`boltffi_init_class_metadata_fixture_counter_new`) — right
+    /// for `apple`/`android`/`kotlin_multiplatform` (whose own real builds
+    /// route through the SAME experimental expansion via
+    /// `boltffi_cli::build::BindingExpansion`, confirmed by a real `boltffi
+    /// pack apple` xcframework's `nm` output), but wrong for `csharp`, whose
+    /// real cdylib is a plain build compiling the stable macro path's short
+    /// form (`boltffi_counter_new`) — every P/Invoke-style entry point a
+    /// codegen tool derived from the metadata was therefore unresolvable at
+    /// runtime, despite compiling cleanly (a bad symbol name is invisible to
+    /// a compile-only check).
     #[test]
-    fn cargo_build_metadata_symbol_names_match_the_real_compiled_dylib() {
+    fn cargo_build_metadata_symbol_names_match_the_real_compiled_dylib_when_legacy_compatible() {
         if cfg!(miri) {
             return;
         }
@@ -1003,6 +1050,7 @@ mod tests {
         );
 
         let envelopes = BindingMetadataBuild::new(fixture.manifest())
+            .naming_style(NamingStyle::LegacyCompatible)
             .read()
             .expect("cargo metadata build reads");
         let SerializedBindings::Native(bindings) = envelopes[0].bindings() else {
@@ -1028,6 +1076,115 @@ mod tests {
                  P/Invoke import that throws EntryPointNotFoundException at runtime"
             );
         }
+    }
+
+    /// The other half of the contract above: a `BindingMetadataBuild` left
+    /// on the DEFAULT style (`NamingStyle::Experimental` — what `apple`,
+    /// `android`, and `kotlin_multiplatform` rely on today, since their own
+    /// real artifact build ALSO runs through the experimental macro
+    /// expansion) must NOT match a plain-`cargo build`-compiled crate's real
+    /// symbols. If this test starts failing, someone flipped the default —
+    /// which would silently re-break every plain-build target
+    /// (`LegacyCompatible` callers) the same way it currently protects the
+    /// experimental-expansion ones.
+    #[test]
+    fn cargo_build_metadata_symbol_names_do_not_match_a_plain_build_on_the_default_style() {
+        if cfg!(miri) {
+            return;
+        }
+        if Command::new("nm").arg("--help").output().is_err() {
+            return;
+        }
+
+        let fixture = FixtureCrate::with_real_exported_class();
+        let dylib = fixture.build_cdylib_with_plain_cargo_build();
+        let real_symbols = exported_symbols(&dylib);
+
+        let envelopes = BindingMetadataBuild::new(fixture.manifest())
+            .read()
+            .expect("cargo metadata build reads");
+        let SerializedBindings::Native(bindings) = envelopes[0].bindings() else {
+            panic!("expected native metadata");
+        };
+
+        let described_symbols = bindings
+            .symbols()
+            .symbols()
+            .iter()
+            .map(|symbol| symbol.name().as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !described_symbols.is_empty(),
+            "metadata should describe at least one native symbol"
+        );
+        assert!(
+            described_symbols
+                .iter()
+                .all(|symbol| !real_symbols.contains(*symbol)),
+            "expected the default (Experimental) style to describe long-form names absent from \
+             a plain build's real symbol table; got an overlap, which means either the default \
+             changed or the fixture crate's plain build unexpectedly matches — described: \
+             {described_symbols:?}, real: {real_symbols:?}"
+        );
+    }
+
+    /// Regression test for a caching bug the naming-style fix itself
+    /// introduced and then had to close: Cargo's incremental build cache
+    /// fingerprints a rustc invocation's ARGUMENTS, not arbitrary env vars a
+    /// proc-macro reads at expansion time. Two `BindingMetadataBuild`s for
+    /// the SAME crate/target-triple but DIFFERENT `naming_style`, run back
+    /// to back (sharing the fixture's `target/` directory — exactly what
+    /// `boltffi pack csharp` immediately followed by `boltffi pack apple`
+    /// does against a real crate), must NOT let the second reuse the
+    /// first's cached, differently-styled metadata. Reproduced directly
+    /// against parse-core-rs before the fix: a fresh `pack csharp` run
+    /// followed by `pack apple` picked up csharp's `LegacyCompatible`
+    /// entry points for the Swift renderer instead of `Experimental`. Fixed
+    /// by giving each style a distinguishing `--cfg` on the rustc
+    /// invocation (`CargoBuild::command`), the same way `--cfg
+    /// boltffi_metadata` itself already distinguishes a metadata build from
+    /// a normal one.
+    #[test]
+    fn sequential_metadata_builds_do_not_leak_naming_style_across_a_shared_target_dir() {
+        if cfg!(miri) {
+            return;
+        }
+
+        let fixture = FixtureCrate::with_real_exported_class();
+
+        let legacy_first = BindingMetadataBuild::new(fixture.manifest())
+            .naming_style(NamingStyle::LegacyCompatible)
+            .read()
+            .expect("legacy-compatible metadata build reads");
+        let experimental_second = BindingMetadataBuild::new(fixture.manifest())
+            .read()
+            .expect("experimental (default) metadata build reads");
+
+        let legacy_name = symbol_name_containing(&legacy_first, "new");
+        let experimental_name = symbol_name_containing(&experimental_second, "new");
+
+        assert_eq!(legacy_name, "boltffi_counter_new");
+        assert_eq!(
+            experimental_name, "boltffi_init_class_metadata_fixture_counter_new",
+            "the SECOND build (default style) returned the FIRST build's (legacy-compatible) \
+             cached metadata — a stale-cache leak across naming styles"
+        );
+    }
+
+    fn symbol_name_containing<'envelope>(
+        envelopes: &'envelope [BindingMetadataEnvelope],
+        needle: &str,
+    ) -> &'envelope str {
+        let SerializedBindings::Native(bindings) = envelopes[0].bindings() else {
+            panic!("expected native metadata");
+        };
+        bindings
+            .symbols()
+            .symbols()
+            .iter()
+            .map(|symbol| symbol.name().as_str())
+            .find(|name| name.contains(needle))
+            .expect("expected a matching symbol")
     }
 
     /// The defined, external symbols a compiled native library exports —
