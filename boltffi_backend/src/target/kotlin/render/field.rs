@@ -100,6 +100,15 @@ impl EncodedField {
         &self.ty
     }
 
+    /// Replaces the rendered field type, keeping every other codec detail untouched.
+    ///
+    /// Used to fully-qualify a Kotlin builtin primitive (`Int` -> `kotlin.Int`) when a sibling
+    /// data-enum variant of the same name would otherwise shadow it inside the enum's own body.
+    pub(crate) fn requalified(mut self, ty: TypeName) -> Self {
+        self.ty = ty;
+        self
+    }
+
     pub fn read(&self) -> &Expression {
         &self.read
     }

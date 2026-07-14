@@ -46,7 +46,33 @@ enum Body {
     },
     Data {
         variants: Vec<DataVariant>,
+        wire_size_type: TypeName,
     },
+}
+
+/// Kotlin builtin primitive type names that a data-enum's own nested variant class can shadow.
+///
+/// Kotlin resolves a bare type reference inside a nested class's own body against the enclosing
+/// class's member scope (which includes every sibling nested class) before falling back to
+/// `kotlin.*` — so a data-enum variant literally named `Int` or `Double` (e.g. `ParseValue::Int`,
+/// `ParseValue::Double`) shadows `kotlin.Int`/`kotlin.Double` inside the sealed class's own body.
+/// `kotlin.<name>` is always a valid, unambiguous spelling for these, so qualifying is safe
+/// whenever a variant of the same name exists — never applied otherwise, to keep non-colliding
+/// enums byte-identical to their pre-fix output.
+const KOTLIN_SHADOWABLE_PRIMITIVES: &[&str] = &[
+    "Boolean", "Byte", "UByte", "Short", "UShort", "Int", "UInt", "Long", "ULong", "Float",
+    "Double",
+];
+
+fn qualify_if_shadowed(ty: TypeName, variant_names: &[String]) -> TypeName {
+    let name = ty.to_string();
+    if KOTLIN_SHADOWABLE_PRIMITIVES.contains(&name.as_str())
+        && variant_names.iter().any(|variant| variant == &name)
+    {
+        TypeName::new(format!("kotlin.{name}"))
+    } else {
+        ty
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -156,8 +182,18 @@ impl Enumeration {
 
     pub fn data_variants(&self) -> &[DataVariant] {
         match &self.body {
-            Body::Data { variants } => variants,
+            Body::Data { variants, .. } => variants,
             Body::CStyle { .. } => &[],
+        }
+    }
+
+    /// Returns `Int`, or `kotlin.Int` when a variant of this data enum is itself named `Int`
+    /// (see `KOTLIN_SHADOWABLE_PRIMITIVES`). Every `wireSize(): ...` declaration in the sealed
+    /// class body shares this one type, so a single qualify decision covers all of them.
+    pub fn wire_size_type(&self) -> TypeName {
+        match &self.body {
+            Body::Data { wire_size_type, .. } => wire_size_type.clone(),
+            Body::CStyle { .. } => TypeName::int(),
         }
     }
 
@@ -306,6 +342,12 @@ impl Enumeration {
             argument: Self::encode_expression(Expression::this())?,
             writeback: Some(name.clone()),
         };
+        let variant_names = enumeration
+            .variants()
+            .iter()
+            .map(|variant| Name::new(variant.name()).variant().map(|name| name.to_string()))
+            .collect::<Result<Vec<_>>>()?;
+        let wire_size_type = qualify_if_shadowed(TypeName::int(), &variant_names);
         Ok(Self {
             name,
             error,
@@ -313,8 +355,11 @@ impl Enumeration {
                 variants: enumeration
                     .variants()
                     .iter()
-                    .map(|variant| DataVariant::from_declaration(variant, host, context, package))
+                    .map(|variant| {
+                        DataVariant::from_declaration(variant, host, context, package, &variant_names)
+                    })
                     .collect::<Result<Vec<_>>>()?,
+                wire_size_type,
             },
             initializers: Self::initializer_calls(
                 enumeration.initializers(),
@@ -523,10 +568,11 @@ impl DataVariant {
         host: &KotlinHost,
         context: &RenderContext<Native>,
         package: Option<&KotlinPackage>,
+        variant_names: &[String],
     ) -> Result<Self> {
         let name = Name::new(variant.name()).variant()?;
         let tag = Self::tag_expression(variant.tag())?;
-        let fields = Self::payload_fields(variant.payload(), host, context, package)?;
+        let fields = Self::payload_fields(variant.payload(), host, context, package, variant_names)?;
         let read = Self::read_expression(name.clone(), &fields);
         let size = fields
             .iter()
@@ -552,6 +598,7 @@ impl DataVariant {
         host: &KotlinHost,
         context: &RenderContext<Native>,
         package: Option<&KotlinPackage>,
+        variant_names: &[String],
     ) -> Result<Vec<EncodedField>> {
         let reader = Identifier::parse("reader")?;
         let writer = Identifier::parse("writer")?;
@@ -578,6 +625,12 @@ impl DataVariant {
                         &writer,
                         current.clone(),
                     ),
+                })
+                .map(|field| {
+                    field.map(|field| {
+                        let qualified = qualify_if_shadowed(field.ty().clone(), variant_names);
+                        field.requalified(qualified)
+                    })
                 })
                 .collect(),
             _ => Err(KotlinHost::unsupported("unknown data enum payload")),

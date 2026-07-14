@@ -165,7 +165,7 @@ enum class {{ enumeration.name() }}(val value: {{ value_type }}) {
 {%- endif %}
 {%- else if enumeration.data() %}
 sealed class {{ enumeration.name() }}{% if enumeration.error() %} : Exception(){% endif %} {
-    internal abstract fun wireSize(): Int
+    internal abstract fun wireSize(): {{ enumeration.wire_size_type() }}
 
     internal abstract fun writeTo(writer: WireWriter)
 
@@ -182,7 +182,7 @@ sealed class {{ enumeration.name() }}{% if enumeration.error() %} : Exception(){
 {% for variant in enumeration.data_variants() %}
 {%- if variant.unit() %}
     object {{ variant.name() }} : {{ enumeration.name() }}() {
-        internal override fun wireSize(): Int {
+        internal override fun wireSize(): {{ enumeration.wire_size_type() }} {
             return {{ variant.size() }}
         }
 
@@ -196,7 +196,7 @@ sealed class {{ enumeration.name() }}{% if enumeration.error() %} : Exception(){
         val {{ field.name() }}: {{ field.ty() }}{% if !loop.last %},{% endif %}
 {%- endfor %}
     ) : {{ enumeration.name() }}() {
-        internal override fun wireSize(): Int {
+        internal override fun wireSize(): {{ enumeration.wire_size_type() }} {
             return {{ variant.size() }}
         }
 

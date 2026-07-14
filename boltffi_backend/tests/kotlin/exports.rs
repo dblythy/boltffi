@@ -91,6 +91,11 @@ fn kotlin_target_qualifies_shadowed_data_enum_payloads() {
 }
 
 #[test]
+fn kotlin_target_qualifies_kotlin_primitive_names_shadowed_by_a_sibling_variant() {
+    insta::assert_snapshot!(rendered_fixture("enums/primitive_shadow"));
+}
+
+#[test]
 fn kotlin_target_renders_result_values_through_shared_codec() {
     insta::assert_snapshot!(rendered_fixture("exports/result_values"));
 }
