@@ -32,7 +32,7 @@ impl<'a> CSharpLowerer<'a> {
             CallMode::Sync => call.returns.decode_ops.as_ref(),
             CallMode::Async(async_call) => async_call.result.decode_ops.as_ref(),
         };
-        let shadowed = self.self_name_shadow(function.id.as_str());
+        let shadowed = self.scope_shadow(self.ffi.functions.iter().map(|f| f.id.as_str()));
         let return_kind = self.return_kind(
             &function.returns,
             &return_type,

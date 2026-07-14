@@ -862,6 +862,85 @@ mod tests {
         assert_dotnet_build_succeeds(&target_framework, output, "self-shadowing-return-record");
     }
 
+    /// Regression test for the gap left by `emit_class_method_named_after_its_return_record_
+    /// qualifies_the_decode_call` above: parse-core-sdks' real `ParseClient` has BOTH
+    /// `server_info(&self) -> Result<ServerInfo, String>` AND a *sibling* method
+    /// `server_info_with(&self, options) -> Result<ServerInfo, String>` — same return type,
+    /// different method name. The original fix only added a method/constructor's OWN name to
+    /// its shadow set (`self_name_shadow`), so `server_info_with`'s body (whose own name doesn't
+    /// collide with anything) still emitted a bare, unqualified `ServerInfo.Decode(reader)` —
+    /// which C# resolves to the *other* method `ParseClient.ServerInfo(...)`'s method group
+    /// (member lookup is scoped to the whole enclosing class, not the one currently-rendering
+    /// method), the identical `CS0119` this file's other regression test already fixed for the
+    /// self-name case. Fixed by computing the shadow set once per class, over every sibling
+    /// method's name (`scope_shadow`), not once per method via its own name alone.
+    #[test]
+    fn emit_class_sibling_method_decoding_a_same_named_methods_return_record_qualifies_too() {
+        let mut worker = empty_class("parse_client");
+        worker.methods.push(MethodDef {
+            id: MethodId::new("server_info"),
+            receiver: Receiver::RefSelf,
+            params: vec![],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::Record(RecordId::new("server_info")),
+                err: TypeExpr::String,
+            },
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+        worker.methods.push(MethodDef {
+            id: MethodId::new("server_info_with"),
+            receiver: Receiver::RefSelf,
+            params: vec![param_with_passing(
+                "verbose",
+                TypeExpr::Primitive(PrimitiveType::Bool),
+                ParamPassing::Value,
+            )],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::Record(RecordId::new("server_info")),
+                err: TypeExpr::String,
+            },
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+
+        let mut contract = empty_contract();
+        contract.catalog.insert_record(record_with_fields(
+            "server_info",
+            false,
+            vec![("version", TypeExpr::String)],
+        ));
+        contract.catalog.insert_class(worker);
+
+        let output = emit_contract(&contract);
+        let src = output.combined_source();
+
+        assert_source_contains(
+            &src,
+            "Task<ServerInfo> ServerInfoWith(bool verbose)",
+            "the sibling method to be present so this test exercises the real collision shape",
+        );
+        assert_source_lacks(
+            &src,
+            "return ServerInfo.Decode(reader);",
+            "no unqualified Decode call left in EITHER method — the sibling collides just as \
+             much as the self-name case does, since C# resolves by enclosing-class scope",
+        );
+        let qualified_decodes = src.matches("global::DemoLib.ServerInfo.Decode(reader)").count();
+        assert_eq!(
+            qualified_decodes, 2,
+            "both ServerInfo() and ServerInfoWith(...) must qualify their decode call, not just \
+             the one whose own name happens to collide; got {qualified_decodes} in:\n{src}"
+        );
+
+        let Some(target_framework) = dotnet_target_framework() else {
+            return;
+        };
+        assert_dotnet_build_succeeds(&target_framework, output, "sibling-shadowing-return-record");
+    }
+
     /// The C ABI for a `String` parameter is `(const uint8_t* ptr, uintptr_t len)`,
     /// which on the C# side becomes a `byte[]` + `UIntPtr` pair. The wrapper
     /// exposes a plain `string` and UTF-8 encodes it just before the native call.

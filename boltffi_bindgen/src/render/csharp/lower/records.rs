@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use crate::ir::abi::{AbiCall, CallId};
 use crate::ir::definitions::{ConstructorDef, FieldDef, MethodDef, Receiver, RecordDef, ReturnDef};
 use crate::ir::ids::{FieldName, RecordId};
@@ -64,6 +66,17 @@ impl<'a> CSharpLowerer<'a> {
         record_class_name: &CSharpClassName,
         owner_is_blittable: bool,
     ) -> Vec<CSharpMethodPlan> {
+        // Computed once over every constructor + method name this record declares, not once
+        // per member: C# member lookup resolves ANY sibling member before an outer-scope type
+        // of the same name, so a constructor/method decoding a type shadowed by a *different*
+        // sibling needs the same qualification a self-collision would (see `scope_shadow`).
+        let member_names = record
+            .constructors
+            .iter()
+            .map(|ctor| ctor.name().map(|id| id.as_str()).unwrap_or("new"))
+            .chain(record.methods.iter().map(|m| m.id.as_str()));
+        let shadowed = self.scope_shadow(member_names);
+
         let mut methods = Vec::new();
 
         for (index, ctor) in record.constructors.iter().enumerate() {
@@ -74,9 +87,13 @@ impl<'a> CSharpLowerer<'a> {
             let Some(call) = self.abi.calls.iter().find(|c| c.id == call_id) else {
                 continue;
             };
-            if let Some(method) =
-                self.lower_record_constructor(ctor, call, &record.id, record_class_name)
-            {
+            if let Some(method) = self.lower_record_constructor(
+                ctor,
+                call,
+                &record.id,
+                record_class_name,
+                shadowed.as_ref(),
+            ) {
                 methods.push(method);
             }
         }
@@ -106,6 +123,7 @@ impl<'a> CSharpLowerer<'a> {
                 &record.id,
                 record_class_name,
                 owner_is_blittable,
+                shadowed.as_ref(),
             ) {
                 methods.push(method);
             }
@@ -127,6 +145,7 @@ impl<'a> CSharpLowerer<'a> {
         call: &AbiCall,
         record_id: &RecordId,
         record_class_name: &CSharpClassName,
+        shadowed: Option<&HashSet<CSharpClassName>>,
     ) -> Option<CSharpMethodPlan> {
         let raw_name: &str = match ctor.name() {
             Some(id) => id.as_str(),
@@ -138,12 +157,11 @@ impl<'a> CSharpLowerer<'a> {
         // already picks the blittable fast path for plain `Value(Record)`.
         let return_def = constructor_return_def(ctor, TypeExpr::Record(record_id.clone()));
         let return_type = self.lower_return(&return_def)?;
-        let shadowed = self.self_name_shadow(raw_name);
         let return_kind = self.return_kind(
             &return_def,
             &return_type,
             call.returns.decode_ops.as_ref(),
-            shadowed.as_ref(),
+            shadowed,
         );
         let mut ctor_size_locals = size::SizeLocalCounters::default();
         let mut ctor_encode_locals = encode::EncodeLocalCounters::default();
@@ -190,6 +208,7 @@ impl<'a> CSharpLowerer<'a> {
         record_id: &RecordId,
         record_class_name: &CSharpClassName,
         owner_is_blittable: bool,
+        shadowed: Option<&HashSet<CSharpClassName>>,
     ) -> Option<CSharpMethodPlan> {
         let name: CSharpMethodName = (&method_def.id).into();
         let lifted_returns = if matches!(method_def.receiver, Receiver::RefMutSelf)
@@ -200,12 +219,11 @@ impl<'a> CSharpLowerer<'a> {
             method_def.returns.clone()
         };
         let return_type = self.lower_return(&lifted_returns)?;
-        let shadowed = self.self_name_shadow(method_def.id.as_str());
         let return_kind = self.return_kind(
             &lifted_returns,
             &return_type,
             call.returns.decode_ops.as_ref(),
-            shadowed.as_ref(),
+            shadowed,
         );
 
         let receiver = match method_def.receiver {

@@ -59,24 +59,35 @@ impl<'a> CSharpLowerer<'a> {
             .collect()
     }
 
-    /// If `raw_name` (a method/function/constructor's own snake_case
-    /// source name) renders to the same PascalCase identifier as a
-    /// record or data-enum this pack decodes, returns a one-element
-    /// shadow set containing it — otherwise `None`.
+    /// Given every member name sharing one C# enclosing scope (a class's
+    /// methods, a record's constructors + methods, an enum's constructors
+    /// + methods, or every free function in the module), returns the
+    /// subset that renders to the same PascalCase identifier as a record
+    /// or data-enum this pack decodes — or `None` if none collide.
     ///
-    /// C# member lookup resolves a member of the *enclosing*
-    /// class/module before an outer-scope type of the same simple name,
-    /// so an unqualified `<Type>.Decode(reader)` call inside e.g. a
-    /// `ServerInfo()` method that decodes a `ServerInfo` record resolves
-    /// to the method group, not the type (CS0119). Scoping the shadow
-    /// set to just the colliding name (rather than qualifying every
-    /// decodable type unconditionally) keeps non-colliding decode
-    /// expressions in their plain, unqualified form.
-    pub(super) fn self_name_shadow(&self, raw_name: &str) -> Option<HashSet<CSharpClassName>> {
-        let candidate = CSharpClassName::from_source(raw_name);
-        self.decodable_class_names()
-            .contains(&candidate)
-            .then(|| HashSet::from([candidate]))
+    /// C# member lookup resolves a member of the *enclosing* class/module
+    /// before an outer-scope type of the same simple name — and it does
+    /// this for EVERY member's body, not just the member whose own name
+    /// collides. A method `ServerInfoWith(options)` that decodes the
+    /// `ServerInfo` record breaks exactly like `ServerInfo()` does if the
+    /// *same class* also has a sibling member named `ServerInfo`, even
+    /// though `ServerInfoWith` itself doesn't collide with anything.
+    /// Computing the shadow set once per enclosing scope (not once per
+    /// member) and applying it uniformly to every member's decode calls
+    /// is what makes that sibling case qualify too. Non-colliding names
+    /// are dropped, so scopes with no collision keep fully unqualified,
+    /// unchanged output.
+    pub(super) fn scope_shadow<'n>(
+        &self,
+        member_names: impl IntoIterator<Item = &'n str>,
+    ) -> Option<HashSet<CSharpClassName>> {
+        let decodable = self.decodable_class_names();
+        let shadow: HashSet<CSharpClassName> = member_names
+            .into_iter()
+            .map(CSharpClassName::from_source)
+            .filter(|name| decodable.contains(name))
+            .collect();
+        (!shadow.is_empty()).then_some(shadow)
     }
 
     /// Walks the contracts and produces a C# module plan.

@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use boltffi_ffi_rules::naming;
 
 use crate::ir::abi::{AbiCall, AbiStream, CallId, CallMode, StreamItemTransport};
@@ -129,6 +131,11 @@ impl<'a> CSharpLowerer<'a> {
         class: &ClassDef,
         class_name: &CSharpClassName,
     ) -> Vec<CSharpMethodPlan> {
+        // Computed once per class, over every sibling method's name, not per method: C# member
+        // lookup resolves ANY member of the enclosing class before an outer-scope type of the
+        // same name, so a method that decodes a type shadowed by a *different* sibling method
+        // (not its own name) needs the same qualification (see `scope_shadow`).
+        let shadowed = self.scope_shadow(class.methods.iter().map(|m| m.id.as_str()));
         class
             .methods
             .iter()
@@ -140,7 +147,7 @@ impl<'a> CSharpLowerer<'a> {
                         method_id: method_def.id.clone(),
                     }
                 })?;
-                self.lower_class_method(method_def, call, class_name)
+                self.lower_class_method(method_def, call, class_name, shadowed.as_ref())
             })
             .collect()
     }
@@ -154,6 +161,7 @@ impl<'a> CSharpLowerer<'a> {
         method_def: &MethodDef,
         call: &AbiCall,
         class_name: &CSharpClassName,
+        shadowed: Option<&HashSet<CSharpClassName>>,
     ) -> Option<CSharpMethodPlan> {
         let receiver = match method_def.receiver {
             Receiver::Static => CSharpReceiver::Static,
@@ -166,12 +174,11 @@ impl<'a> CSharpLowerer<'a> {
             CallMode::Sync => call.returns.decode_ops.as_ref(),
             CallMode::Async(async_call) => async_call.result.decode_ops.as_ref(),
         };
-        let shadowed = self.self_name_shadow(method_def.id.as_str());
         let return_kind = self.return_kind(
             &method_def.returns,
             &return_type,
             complete_decode_ops,
-            shadowed.as_ref(),
+            shadowed,
         );
 
         // Instance methods carry a synthetic `self` at the head of the

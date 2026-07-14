@@ -52,7 +52,22 @@ impl<'a> CSharpLowerer<'a> {
         let shadowed_variant_names: HashSet<CSharpClassName> = abi_enum_for_data
             .map(|abi_enum| abi_enum.variants.iter().map(|v| (&v.name).into()).collect())
             .unwrap_or_default();
-        let method_shadowed = abi_enum_for_data.map(|_| &shadowed_variant_names);
+        // Constructors/methods share one C# enclosing scope too (the sealed body for data
+        // enums, a methods-companion static class for C-style enums): a method decoding a type
+        // shadowed by a *sibling* constructor/method name needs the same qualification a
+        // self-collision would, same widening as `scope_shadow` gives classes/records/free
+        // functions. Union with the variant-name shadow above rather than replacing it — a
+        // method can be shadowed by either a sibling variant or a sibling member.
+        let member_names = enum_def
+            .constructors
+            .iter()
+            .map(|ctor| ctor.name().map(|id| id.as_str()).unwrap_or("new"))
+            .chain(enum_def.methods.iter().map(|m| m.id.as_str()));
+        let mut combined_method_shadow = shadowed_variant_names.clone();
+        if let Some(member_shadow) = self.scope_shadow(member_names) {
+            combined_method_shadow.extend(member_shadow);
+        }
+        let method_shadowed = (!combined_method_shadow.is_empty()).then_some(&combined_method_shadow);
         let methods = self.lower_enum_methods(enum_def, &class_name, method_shadowed);
         let methods_class_name = if methods.is_empty() {
             None
@@ -243,7 +258,7 @@ impl<'a> CSharpLowerer<'a> {
                 continue;
             };
             if let Some(method) =
-                self.lower_enum_constructor(ctor, call, &enum_def.id, enum_class_name)
+                self.lower_enum_constructor(ctor, call, &enum_def.id, enum_class_name, shadowed)
             {
                 methods.push(method);
             }
@@ -287,6 +302,7 @@ impl<'a> CSharpLowerer<'a> {
         call: &AbiCall,
         enum_id: &EnumId,
         enum_class_name: &CSharpClassName,
+        shadowed: Option<&HashSet<CSharpClassName>>,
     ) -> Option<CSharpMethodPlan> {
         let raw_name: &str = match ctor.name() {
             Some(id) => id.as_str(),
@@ -295,12 +311,11 @@ impl<'a> CSharpLowerer<'a> {
         let name = CSharpMethodName::from_source(raw_name);
         let return_def = constructor_return_def(ctor, TypeExpr::Enum(enum_id.clone()));
         let return_type = self.lower_return(&return_def)?;
-        let shadowed = self.self_name_shadow(raw_name);
         let return_kind = self.return_kind(
             &return_def,
             &return_type,
             call.returns.decode_ops.as_ref(),
-            shadowed.as_ref(),
+            shadowed,
         );
         let mut ctor_size_locals = size::SizeLocalCounters::default();
         let mut ctor_encode_locals = encode::EncodeLocalCounters::default();
