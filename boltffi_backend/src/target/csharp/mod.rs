@@ -435,6 +435,31 @@ mod tests {
     }
 
     #[test]
+    fn csharp_target_does_not_collide_with_a_callback_trait_exporting_its_own_release_method() {
+        // Same collision class as the class disposal helper (a plausible
+        // resource-cleanup trait method named `release`), in the sibling
+        // callback-proxy renderer's own unconditional disposal helper.
+        let bindings = bindings(
+            r#"
+            #[export]
+            pub trait Resource {
+                fn release(&self);
+            }
+            "#,
+        );
+        let output = target(CSharpHost::new())
+            .render(&bindings)
+            .expect("a callback trait exporting its own release() method should still render");
+
+        let callback = file(&output, "Resource.cs");
+        assert!(callback.contains("void Release();"));
+        assert!(callback.contains("public void Release()"));
+        assert!(callback.contains("private void BoltFfiRelease()"));
+        assert!(callback.contains("=> BoltFfiRelease();"));
+        assert!(output.diagnostics().is_empty());
+    }
+
+    #[test]
     fn csharp_target_renders_callback_parameter_and_return_shapes() {
         let bindings = bindings(
             r#"
@@ -978,10 +1003,10 @@ mod tests {
         assert!(class.contains("public void Increment()"));
         assert!(class.contains("public static int Add(int a, int b)"));
         assert!(class.contains("ThrowIfDisposed();"));
-        assert!(class.contains("~Counter() => Release();"));
+        assert!(class.contains("~Counter() => BoltFfiRelease();"));
 
         let module = file(&output, "Demo.cs");
-        assert!(module.contains("NativeCounterRelease(ulong handle)"));
+        assert!(module.contains("NativeCounterBoltFfiRelease(ulong handle)"));
         assert!(module.contains("NativeCounterNew(int value)"));
         assert!(module.contains("NativeCounterGet(ulong receiver)"));
         assert!(output.diagnostics().is_empty());

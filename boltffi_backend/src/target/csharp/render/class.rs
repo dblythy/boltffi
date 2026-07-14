@@ -90,7 +90,11 @@ impl Class {
             namespace,
             name: name.clone(),
             carrier_type: handle_carrier_type(declaration.handle())?,
-            release_name: Identifier::parse(format!("Native{name}Release"))?,
+            // "BoltFfi"-mangled (matching from_class_initializer's BoltFfiNew) so this
+            // native import can never collide with a real exported method's own
+            // Native{ClassName}{MethodName} import - including one literally named
+            // `release`, which would otherwise derive the identical `Native{name}Release`.
+            release_name: Identifier::parse(format!("Native{name}BoltFfiRelease"))?,
             release_entry: Literal::string(declaration.release().name().as_str()),
             release_helper_id: HelperId::new(CanonicalName::single(
                 declaration.release().name().as_str(),

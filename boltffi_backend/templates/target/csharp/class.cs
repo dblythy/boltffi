@@ -33,17 +33,17 @@ namespace {{ class.namespace }}
                 throw new global::System.ObjectDisposedException(nameof({{ class.name }}));
         }
 
-        private void Release()
+        private void BoltFfiRelease()
         {
             {{ class.carrier_type }} released = unchecked(({{ class.carrier_type }})(ulong)global::System.Threading.Interlocked.Exchange(ref handle, 0));
             if (released != 0) NativeMethods.{{ class.release_name }}(released);
         }
 
-        ~{{ class.name }}() => Release();
+        ~{{ class.name }}() => BoltFfiRelease();
 
         public void Dispose()
         {
-            Release();
+            BoltFfiRelease();
             global::System.GC.SuppressFinalize(this);
         }
     }

@@ -34,7 +34,7 @@ namespace {{ callback.namespace }}
 {{ method.proxy_body }}
         }
 
-{% endfor %}        private void Release()
+{% endfor %}        private void BoltFfiRelease()
         {
             if (handle.IsNull) return;
             var free = global::System.Runtime.InteropServices.Marshal.GetDelegateForFunctionPointer<{{ callback.bridge_name }}.FreeFn>(vtable.free);
@@ -43,11 +43,11 @@ namespace {{ callback.namespace }}
             free(released);
         }
 
-        ~{{ callback.proxy_name }}() => Release();
+        ~{{ callback.proxy_name }}() => BoltFfiRelease();
 
         public void Dispose()
         {
-            Release();
+            BoltFfiRelease();
             global::System.GC.SuppressFinalize(this);
         }
     }

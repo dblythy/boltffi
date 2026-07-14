@@ -1,13 +1,19 @@
-//! Regression coverage for the C# IR backend's sibling-name-shadow fix
-//! (`Class::from_declaration` threading its `Namespace` into
-//! `Function::from_class_method`/`from_class_initializer`).
+//! Regression coverage for two C# IR backend fixes:
 //!
-//! A class method whose PascalCase name collides with the record/enum it
-//! decodes (`ServerInfo() -> Result<ServerInfo, _>`, the shape
-//! `parse-core-rs`'s real `ParseClient::server_info` reaches) must qualify
-//! its own `Decode` call with `global::<namespace>.` — C# member lookup
-//! otherwise resolves the bare type name to the enclosing method group
-//! (CS0119), not the type.
+//! - The sibling-name-shadow fix (`Class::from_declaration` threading its
+//!   `Namespace` into `Function::from_class_method`/`from_class_initializer`).
+//!   A class method whose PascalCase name collides with the record/enum it
+//!   decodes (`ServerInfo() -> Result<ServerInfo, _>`, the shape
+//!   `parse-core-rs`'s real `ParseClient::server_info` reaches) must qualify
+//!   its own `Decode` call with `global::<namespace>.` — C# member lookup
+//!   otherwise resolves the bare type name to the enclosing method group
+//!   (CS0119), not the type.
+//! - The auto-generated disposal helper's collision-proof rename. Every
+//!   generated class unconditionally emits a private disposal method; when
+//!   that method was literally named `Release`, a real exported method also
+//!   named `release` (a plausible resource-cleanup method name) collided
+//!   with it at both the C# member level and the native P/Invoke import
+//!   level (CS0111).
 
 use std::{fs, path::Path, process::Command, time::UNIX_EPOCH};
 
@@ -92,6 +98,56 @@ fn csharp_target_qualifies_a_class_method_named_after_its_return_record() {
     );
 
     compile_csharp_with_dotnet_when_available(&output, "csharp-sibling-shadow-smoke");
+}
+
+#[test]
+fn csharp_target_does_not_collide_with_a_class_exporting_its_own_release_method() {
+    let bindings = bindings(
+        r#"
+        pub struct Resource {
+            id: i32,
+        }
+
+        #[export]
+        impl Resource {
+            pub fn new(id: i32) -> Self { Self { id } }
+
+            pub fn release(&self) {}
+        }
+        "#,
+    );
+    let output = target(
+        CSharpHost::new()
+            .namespace("Company.Bindings")
+            .expect("valid namespace")
+            .native_library("demo_native"),
+    )
+    .render(&bindings)
+    .expect("a class exporting its own release() method should still render");
+
+    assert!(
+        output.diagnostics().is_empty(),
+        "unexpected diagnostics: {:?}",
+        output.diagnostics()
+    );
+
+    let class = output
+        .files()
+        .iter()
+        .find(|file| file.path().as_path() == Path::new("Resource.cs"))
+        .map(|file| file.contents())
+        .expect("generated Resource.cs");
+
+    assert!(
+        class.contains("public void Release()"),
+        "expected the user's own release() method to render:\n{class}"
+    );
+    assert!(
+        class.contains("private void BoltFfiRelease()"),
+        "expected the auto-generated disposal helper to be collision-proofed:\n{class}"
+    );
+
+    compile_csharp_with_dotnet_when_available(&output, "csharp-release-collision-smoke");
 }
 
 /// Real `dotnet build` of the generated sources when a `dotnet` toolchain is
