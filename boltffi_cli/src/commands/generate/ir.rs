@@ -13,7 +13,6 @@ use boltffi_backend::target::kotlin::{
 };
 use boltffi_backend::{CoverageMode, GeneratedOutput};
 use boltffi_bindgen::generate::{Generation, GenerationError};
-use boltffi_binding::NamingStyle;
 use boltffi_bindgen::render::kotlin::{
     FactoryStyle as BindgenFactoryStyle, KotlinApiStyle as BindgenKotlinApiStyle,
     KotlinDesktopLoader as BindgenKotlinDesktopLoader, KotlinOptions,
@@ -318,10 +317,15 @@ fn generate_csharp(config: &Config, options: &GenerateOptions) -> Result<()> {
     expansion
         .generation()
         .coverage_mode(CoverageMode::Partial)
-        // `pack csharp` builds the real cdylib with a plain `cargo build` (no
-        // experimental-macro opt-in, unlike `apple`/`android`/`kmp`) — the
-        // metadata must describe that same real ABI, see `NamingStyle`'s doc.
-        .native_naming_style(NamingStyle::LegacyCompatible)
+        // `pack csharp` now builds the real cdylib through the same
+        // experimental binding expansion apple/android/kmp/python already
+        // build their real artifacts with (see `build_csharp_native_library`)
+        // — metadata stays on the default `NamingStyle::Experimental`, which
+        // already matches that real ABI (both the symbol names AND the
+        // fallible-return calling convention: success via out-pointer, error
+        // via the return slot). Do not reintroduce `LegacyCompatible` here
+        // without also reverting the C# native build to a plain `cargo
+        // build` — the two must always agree.
         .csharp_namespace(config.csharp_namespace().map(str::to_owned))
         .csharp_data_namespace(config.csharp_data_namespace().map(str::to_owned))
         .csharp_native_library(expansion.artifact_name())
@@ -526,8 +530,8 @@ pub fn run_csharp_generation(
         .coverage_mode(CoverageMode::Partial)
         // See the matching comment in `generate_csharp`: `pack csharp`'s own
         // native-library build (`crate::pack::csharp::build_csharp_native_library`)
-        // is a plain `cargo build`, so the metadata must describe that ABI.
-        .native_naming_style(NamingStyle::LegacyCompatible)
+        // now builds through the experimental binding expansion, so metadata
+        // stays on the default `NamingStyle::Experimental`.
         .csharp_namespace(config.csharp_namespace().map(str::to_owned))
         .csharp_data_namespace(config.csharp_data_namespace().map(str::to_owned))
         .csharp_native_library(artifact_name)

@@ -1013,10 +1013,18 @@ mod tests {
     /// Regression test for the entry-point-naming bug that blocked
     /// parse-core-rs's C# packaging (`docs/tracks/boltffi-fork.md`,
     /// `EntryPointNotFoundException` at `ParseClient..ctor`): a
-    /// `BindingMetadataBuild` set to `NamingStyle::LegacyCompatible` (what
-    /// `pack csharp`'s generation now requests) must describe symbol names
-    /// that actually exist in a crate's real, plain-`cargo build`-compiled
-    /// artifact. Before the fix existed at all, the embedded metadata always
+    /// `BindingMetadataBuild` set to `NamingStyle::LegacyCompatible` must
+    /// describe symbol names that actually exist in a crate's real,
+    /// plain-`cargo build`-compiled artifact. `pack csharp`'s generation no
+    /// longer requests this style — its real build now goes through the same
+    /// experimental expansion `apple`/`android`/`kotlin_multiplatform` use
+    /// (a deeper, structural ABI mismatch in the fallible-return calling
+    /// convention, not just symbol names, made a plain build untenable for
+    /// C# too — see `docs/tracks/boltffi-fork.md`'s "CRITICAL" follow-up).
+    /// `LegacyCompatible` has no caller today; this test and its sibling
+    /// below keep the mechanism itself correct for whichever future target
+    /// needs it. Before the naming fix existed at all, the embedded metadata
+    /// always
     /// used the experimental macro path's long-form, module-path-qualified
     /// naming (`boltffi_init_class_metadata_fixture_counter_new`) — right
     /// for `apple`/`android`/`kotlin_multiplatform` (whose own real builds

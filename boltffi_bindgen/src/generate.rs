@@ -132,11 +132,12 @@ impl Generation {
     /// Sets which native-symbol naming scheme the `Native` surface's
     /// metadata should describe. Defaults to [`NamingStyle::Experimental`] —
     /// unchanged behavior for every existing caller (`apple`, `android`,
-    /// `kotlin_multiplatform`, and anything else whose real artifact build
-    /// itself opts into the experimental macro expansion). Only a caller
-    /// whose real artifact build is a plain `cargo build` — `csharp` today —
-    /// should pass [`NamingStyle::LegacyCompatible`] (see [`NamingStyle`]'s
-    /// doc for why getting this wrong is silent and runtime-only).
+    /// `kotlin_multiplatform`, `csharp`, and anything else whose real
+    /// artifact build itself opts into the experimental macro expansion).
+    /// Only a caller whose real artifact build is a plain `cargo build` —
+    /// none, currently — should pass [`NamingStyle::LegacyCompatible`] (see
+    /// [`NamingStyle`]'s doc for why getting this wrong is silent and
+    /// runtime-only).
     pub fn native_naming_style(mut self, native_naming_style: NamingStyle) -> Self {
         self.native_naming_style = native_naming_style;
         self

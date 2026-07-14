@@ -4,7 +4,8 @@ use std::process::Command;
 use askama::Template;
 
 use crate::build::{
-    CargoBuildProfile, OutputCallback, resolve_build_profile, run_command_streaming,
+    BindingExpansion, CargoBuildProfile, OutputCallback, resolve_build_profile,
+    run_command_streaming,
 };
 use crate::cargo::Cargo;
 use crate::cli::{CliError, Result};
@@ -37,6 +38,19 @@ pub(crate) fn pack_csharp(
         &options.execution.cargo_args,
         options.execution.no_build,
     )?;
+    // C#'s real cdylib must compile through the same experimental binding
+    // expansion apple/android/kmp/python already build their real artifacts
+    // with — the metadata `boltffi_backend`'s C# renderer generates P/Invoke
+    // signatures from (entry-point names AND the fallible-return calling
+    // convention: success via out-pointer, error via the return slot)
+    // describes that expansion's real ABI, not the plain macro's. A plain
+    // `cargo build` here would compile a structurally different ABI for
+    // every fallible method (see docs/tracks/boltffi-fork.md's C# ABI
+    // mismatch finding) while sharing this same generated glue.
+    let build_cargo_args = resolve_build_cargo_args(config, &options.execution.cargo_args);
+    let expansion = (!options.execution.no_build)
+        .then(|| BindingExpansion::resolve(config, &build_cargo_args))
+        .transpose()?;
     step.finish_success();
 
     sync_csharp_project(config, &plan)?;
@@ -66,7 +80,10 @@ pub(crate) fn pack_csharp(
         let native_library = if options.execution.no_build {
             existing_csharp_native_library(packaging_target)?
         } else {
-            build_csharp_native_library(packaging_target, &step)?
+            let expansion = expansion
+                .as_ref()
+                .expect("expansion is resolved whenever no_build is false");
+            build_csharp_native_library(packaging_target, expansion, &step)?
         };
         copy_csharp_native_asset(&plan.layout, packaging_target, &native_library)?;
         step.finish_success_with(&format!("{}", native_library.display()));
@@ -270,6 +287,7 @@ fn ensure_csharp_pack_cargo_args_supported(cargo: &Cargo) -> Result<()> {
 
 fn build_csharp_native_library(
     packaging_target: &CSharpPackagingTarget,
+    expansion: &BindingExpansion,
     step: &Step,
 ) -> Result<PathBuf> {
     let cargo_context = &packaging_target.cargo_context;
@@ -291,12 +309,16 @@ fn build_csharp_native_library(
         command.arg(toolchain_selector);
     }
 
+    // `rustc` (not `build`) + `--lib`: required to forward the trailing
+    // `-- --cfg boltffi_binding_expansion` expansion.configure_rustc appends
+    // below to the single library target's compiler invocation.
     command
-        .arg("build")
+        .arg("rustc")
         .arg("--target")
         .arg(&cargo_context.rust_target_triple)
         .arg("--manifest-path")
-        .arg(&cargo_context.cargo_manifest_path);
+        .arg(&cargo_context.cargo_manifest_path)
+        .arg("--lib");
     if let Some(package_selector) = cargo_context.package_selector.as_deref() {
         command.arg("-p").arg(package_selector);
     }
@@ -313,6 +335,7 @@ fn build_csharp_native_library(
             status: None,
         })?
         .configure_cargo_build(&mut command);
+    expansion.configure_rustc(&mut command)?;
 
     if step.is_verbose() {
         crate::pack::print_verbose_detail(&format!(
