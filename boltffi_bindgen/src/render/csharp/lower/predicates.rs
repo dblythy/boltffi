@@ -67,6 +67,13 @@ impl<'a> CSharpLowerer<'a> {
                 !matches!(inner.as_ref(), TypeExpr::Option(_)) && self.is_supported_type(inner)
             }
             TypeExpr::Callback(id) => self.is_supported_callback(id),
+            // A class handle always admits: it crosses as a bare native `IntPtr` (see
+            // CSharpParamKind::ClassHandle / CSharpReturnKind::ClassHandle), never wire-encoded,
+            // so it doesn't depend on the supported-records/enums fixed point the way a Record/
+            // Enum reference does. `lower_return_value`'s plain `-> SomeClass` path already
+            // bypassed this function entirely (only Result-wrapped and param-position Handles
+            // reach it) -- this closes that gap without touching the already-working return path.
+            TypeExpr::Handle(_) => true,
             _ => false,
         }
     }

@@ -86,6 +86,9 @@ impl CSharpParamPlan {
                     self.name.clone(),
                 )]
             }
+            CSharpParamKind::ClassHandle => {
+                vec![CSharpParameter::bare(CSharpType::IntPtr, self.name.clone())]
+            }
             CSharpParamKind::InlineClosure {
                 bridge_class,
                 context_param_name,
@@ -216,6 +219,10 @@ impl CSharpParamPlan {
                     args: vec![param_ident(&self.name)].into(),
                 }]
             }
+            CSharpParamKind::ClassHandle => vec![CSharpExpression::MemberAccess {
+                receiver: Box::new(param_ident(&self.name)),
+                name: CSharpPropertyName::new("RawHandle"),
+            }],
             CSharpParamKind::InlineClosure { scope_local, .. } => {
                 let scope = CSharpExpression::Identity(CSharpIdentity::Local(scope_local.clone()));
                 vec![
@@ -330,6 +337,12 @@ pub enum CSharpParamKind {
     },
     /// A generated callback trait instance passed as `BoltFFICallbackHandle`.
     CallbackHandle { bridge_class: CSharpClassName },
+    /// A class handle (a Rust class instance passed by value, not a wire-decoded record).
+    /// Crosses the native call as the bare `IntPtr` the class wraps: the DllImport param
+    /// declares `IntPtr`, and the call site reads the argument's `RawHandle` property (the
+    /// same `internal IntPtr RawHandle => _handle;` every generated class exposes so
+    /// same-assembly code -- not just the class's own methods -- can reach its native handle).
+    ClassHandle,
     /// A generated closure delegate passed as an unmanaged function pointer
     /// plus an opaque GCHandle user-data pointer.
     InlineClosure {

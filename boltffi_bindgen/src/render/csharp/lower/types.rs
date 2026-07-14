@@ -39,6 +39,20 @@ impl<'a> CSharpLowerer<'a> {
         if let TypeExpr::Callback(id) = &param.type_expr {
             return self.lower_callback_param(param, id);
         }
+        // A class handle is a Rust class instance passed by value, not a wire-decoded record —
+        // `lower_type` maps it to `CSharpType::Record` too (the public wrapper signature is the
+        // class type either way), but it must cross the native call as the bare `IntPtr` the
+        // class wraps, not go through the generic `_ => CSharpParamKind::Direct` fallback below
+        // (which would pass the managed class object itself to `[DllImport]`, an invalid P/Invoke
+        // marshaling shape). Handled here, before that fallback, same as the Callback special
+        // case above.
+        if matches!(&param.type_expr, TypeExpr::Handle(_)) {
+            return Some(CSharpParamPlan {
+                name: csharp_param_name,
+                csharp_type,
+                kind: CSharpParamKind::ClassHandle,
+            });
+        }
         if let TypeExpr::Option(inner) = &param.type_expr
             && let TypeExpr::Callback(id) = inner.as_ref()
         {

@@ -950,6 +950,64 @@ mod tests {
         assert_dotnet_build_succeeds(&target_framework, output, "sibling-shadowing-return-record");
     }
 
+    /// Regression test for a bug `dropped_apis` (this session's own item-4a diagnostic) surfaced
+    /// but didn't itself fix: `is_supported_type` (predicates.rs) had no `TypeExpr::Handle` arm
+    /// and fell to `_ => false`, while `lower_type` (types.rs) already accepted `Handle`
+    /// unconditionally for the return-value path. Since `is_supported_param` gates every free
+    /// function/method param through `is_supported_type`, a free function taking another class
+    /// instance BY VALUE (e.g. `fn bump(target: &Counter)`, a normal, unremarkable shape) was
+    /// silently dropped -- confirmed by this test failing before the fix, with `dropped_apis`
+    /// reporting exactly this function.
+    ///
+    /// Fixing the admission gate alone wasn't enough: `lower_param`'s generic
+    /// `_ => CSharpParamKind::Direct` fallback would have passed the managed `Counter` object
+    /// itself to `[DllImport]`, not a valid P/Invoke marshaling shape for a class wrapping a
+    /// native `IntPtr`. The new `CSharpParamKind::ClassHandle` (types.rs's `lower_param`,
+    /// special-cased the same way `Callback` already was) declares the native param as `IntPtr`
+    /// and reads the argument's `RawHandle` property at the call site -- the same `internal
+    /// IntPtr RawHandle => _handle;` every generated class already exposes for exactly this
+    /// purpose (visible in every class snapshot; previously unreachable from the param side
+    /// because the admission gate never let a Handle param through to exercise it).
+    #[test]
+    fn emit_free_function_taking_another_class_by_value_passes_its_raw_handle() {
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(empty_class("counter"));
+        contract.functions.push(function_with_types(
+            "bump",
+            vec![("target", TypeExpr::Handle(ClassId::new("counter")))],
+            ReturnDef::Void,
+        ));
+
+        let output = emit_contract(&contract);
+        assert!(
+            output.dropped_apis.is_empty(),
+            "expecting bump to render now that Handle params are admitted; dropped_apis: {:?}",
+            output.dropped_apis
+        );
+        let src = output.combined_source();
+
+        assert_source_contains(
+            &src,
+            "public static void Bump(Counter target)",
+            "the public wrapper keeps the class type in its signature",
+        );
+        assert_source_contains(
+            &src,
+            "internal static extern void Bump(IntPtr target);",
+            "the DllImport declares the param as a bare IntPtr, not the managed class type",
+        );
+        assert_source_contains(
+            &src,
+            "NativeMethods.Bump(target.RawHandle);",
+            "the call site reads the argument's RawHandle property, not the object itself",
+        );
+
+        let Some(target_framework) = dotnet_target_framework() else {
+            return;
+        };
+        assert_dotnet_build_succeeds(&target_framework, output, "class-handle-value-param");
+    }
+
     /// The C ABI for a `String` parameter is `(const uint8_t* ptr, uintptr_t len)`,
     /// which on the C# side becomes a `byte[]` + `UIntPtr` pair. The wrapper
     /// exposes a plain `string` and UTF-8 encodes it just before the native call.

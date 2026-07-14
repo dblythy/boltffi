@@ -163,8 +163,10 @@ impl<'a> CSharpLowerer<'a> {
     }
 
     /// A short, human-readable name for a type, for diagnostic text only — never used to decide
-    /// support (that's `predicates.rs`'s job), so it doesn't need to be exhaustive or precise
-    /// about nested shapes.
+    /// support (that's `predicates.rs`'s job). Exhaustively matched on purpose: a `TypeExpr`
+    /// variant this doesn't know how to describe is worth a compile error, not a silent
+    /// "an unrecognized type shape" (the bug that motivated this arm-by-arm coverage in the
+    /// first place — a missing `Handle` arm made this function say exactly that).
     fn type_description(ty: &TypeExpr) -> String {
         match ty {
             TypeExpr::Void => "()".to_string(),
@@ -173,6 +175,7 @@ impl<'a> CSharpLowerer<'a> {
             TypeExpr::Builtin(id) => format!("builtin {}", id.as_str()),
             TypeExpr::Record(id) => format!("record {}", id.as_str()),
             TypeExpr::Enum(id) => format!("enum {}", id.as_str()),
+            TypeExpr::Handle(id) => format!("class handle {}", id.as_str()),
             TypeExpr::Custom(id) => format!("custom type {}", id.as_str()),
             TypeExpr::Callback(id) => format!("callback {}", id.as_str()),
             TypeExpr::Vec(inner) => format!("Vec<{}>", Self::type_description(inner)),
@@ -182,7 +185,6 @@ impl<'a> CSharpLowerer<'a> {
                 Self::type_description(ok),
                 Self::type_description(err)
             ),
-            _ => "an unrecognized type shape".to_string(),
         }
     }
 }
@@ -228,23 +230,6 @@ mod tests {
             )],
         ));
         contract
-    }
-
-    #[test]
-    fn zzz_scratch_probe_handle_divergence() {
-        use crate::ir::ids::ClassId;
-        let contract = empty_contract();
-        let abi = IrLowerer::new(&contract).to_abi_contract();
-        let options = CSharpOptions::default();
-        let lowerer = CSharpLowerer::new(&contract, &abi, &options);
-
-        let handle_ty = TypeExpr::Handle(ClassId::new("other_class"));
-        eprintln!("is_supported_type(Handle) = {}", lowerer.is_supported_type(&handle_ty));
-        eprintln!("lower_type(Handle).is_some() = {}", lowerer.lower_type(&handle_ty).is_some());
-        eprintln!(
-            "lower_return(Value(Handle)).is_some() = {}",
-            lowerer.lower_return(&crate::ir::definitions::ReturnDef::Value(handle_ty.clone())).is_some()
-        );
     }
 
     #[test]
