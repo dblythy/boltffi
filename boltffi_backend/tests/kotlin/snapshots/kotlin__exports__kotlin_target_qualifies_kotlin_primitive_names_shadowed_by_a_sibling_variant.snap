@@ -1,6 +1,6 @@
 ---
 source: boltffi_backend/tests/kotlin/exports.rs
-assertion_line: 95
+assertion_line: 100
 expression: "rendered_fixture(\"enums/primitive_shadow\")"
 ---
 ===== com/boltffi/demo/Demo.kt =====
@@ -23,6 +23,7 @@ sealed class PrimitiveValue {
             buffer.close()
         }
     }
+
 
     object Null : PrimitiveValue() {
         internal override fun wireSize(): kotlin.Int {
