@@ -13,7 +13,7 @@ use super::super::{
     syntax::{Expression, Identifier, Statement, TypeFragment},
     type_name,
 };
-use super::{NativeParameter, Parameter, direct_type};
+use super::{NativeParameter, Parameter, boltffi_local_identifier, direct_type};
 
 pub(super) struct ClosureArgument {
     pub(super) parameter: Parameter,
@@ -80,7 +80,7 @@ impl ClosureArgument {
                     requires_wire_runtime = true;
                     let pointer = Identifier::escape(c_closure.parameter(slice.pointer()).name())?;
                     let length = Identifier::escape(c_closure.parameter(slice.length()).name())?;
-                    let reader = Identifier::parse(format!("boltffi{pointer}Reader"))?;
+                    let reader = boltffi_local_identifier(&pointer, "Reader")?;
                     let decode = codec
                         .render_with(&mut Reader::new(reader.clone(), context))
                         .map(ReadExpression::into_expression)?;
@@ -217,7 +217,7 @@ impl ClosureArgument {
         let release_delegate = Identifier::parse(format!("{helper_name}Release"))?;
         let invoke = Identifier::parse(format!("{helper_name}Invoke"))?;
         let release = Identifier::parse(format!("{helper_name}Drop"))?;
-        let handle = Identifier::parse(format!("boltffi{name}Handle"))?;
+        let handle = boltffi_local_identifier(&name, "Handle")?;
         let return_attribute = matches!(native_return.to_string().as_str(), "bool")
             .then_some("        [return: global::System.Runtime.InteropServices.MarshalAs(global::System.Runtime.InteropServices.UnmanagedType.I1)]\n")
             .unwrap_or("");

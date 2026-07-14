@@ -1530,6 +1530,20 @@ fn generated_identifier(source: &Identifier, suffix: &str) -> Result<Identifier>
     ))
 }
 
+/// Derives a `boltffi`-prefixed local-variable identifier from a source
+/// identifier that may itself be a keyword-escaped verbatim identifier (e.g.
+/// `@event` for a C# parameter named `event`). Strips the leading `@` before
+/// embedding — same idiom as `generated_identifier`, plus the fixed
+/// `boltffi` prefix every callback/closure bridge local needs to avoid
+/// colliding with the public parameter name itself.
+pub(super) fn boltffi_local_identifier(source: &Identifier, suffix: &str) -> Result<Identifier> {
+    Identifier::escape(format!(
+        "boltffi{}{}",
+        source.as_str().trim_start_matches('@'),
+        suffix
+    ))
+}
+
 fn lower_error(
     channel: ErrorChannel<'_, Native, OutOfRust>,
     type_namespace: Option<&Namespace>,

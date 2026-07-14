@@ -469,6 +469,31 @@ mod tests {
     }
 
     #[test]
+    fn csharp_target_derives_boltffi_locals_for_a_keyword_named_callback_parameter() {
+        let bindings = bindings(
+            r#"
+            #[export]
+            pub trait Listener {
+                fn on_event(&self, event: String);
+            }
+            "#,
+        );
+        let output = target(CSharpHost::new())
+            .render(&bindings)
+            .expect("a callback parameter named after a C# keyword should still render");
+
+        assert!(output.diagnostics().is_empty(), "{:?}", output.diagnostics());
+
+        let listener = file(&output, "Listener.cs");
+        assert!(listener.contains("void OnEvent(string @event);"));
+        // The bridge-local reader/writer/bytes/pin/ptr variables derive from the
+        // parameter's escaped `@event` identifier; a naive `format!("boltffi{name}...")`
+        // would embed the `@` mid-identifier (`boltffi@eventReader`), which is not a
+        // valid C# identifier anywhere but the leading position.
+        assert!(!listener.contains("boltffi@event"));
+    }
+
+    #[test]
     fn csharp_target_renders_fallible_callback_methods() {
         let bindings = bindings(
             r#"

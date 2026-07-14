@@ -17,8 +17,8 @@ use super::super::{
     type_name,
 };
 use super::{
-    CallbackRuntimeTemplate, CopyBufferTemplate, FreeBufferTemplate, WireTemplate, direct_type,
-    direct_vector_element_type, primitive_type,
+    CallbackRuntimeTemplate, CopyBufferTemplate, FreeBufferTemplate, WireTemplate,
+    boltffi_local_identifier, direct_type, direct_vector_element_type, primitive_type,
 };
 
 #[derive(Template)]
@@ -296,7 +296,7 @@ impl LoweredParameters {
                     lowered.wire = true;
                     let pointer = Identifier::escape(slot.parameter(slice.pointer()).name())?;
                     let length = Identifier::escape(slot.parameter(slice.length()).name())?;
-                    let reader = Identifier::parse(format!("boltffi{name}Reader"))?;
+                    let reader = boltffi_local_identifier(&name, "Reader")?;
                     let decode = codec
                         .render_with(&mut Reader::new(reader.clone(), context))
                         .map(ReadExpression::into_expression)?;
@@ -308,10 +308,10 @@ impl LoweredParameters {
                         "WireReader {reader} = new WireReader({pointer}, {length});"
                     ));
                     lowered.entry_arguments.push(decode.to_string());
-                    let writer = Identifier::parse(format!("boltffi{name}Writer"))?;
-                    let bytes = Identifier::parse(format!("boltffi{name}Bytes"))?;
-                    let pin = Identifier::parse(format!("boltffi{name}Pin"))?;
-                    let ptr = Identifier::parse(format!("boltffi{name}Ptr"))?;
+                    let writer = boltffi_local_identifier(&name, "Writer")?;
+                    let bytes = boltffi_local_identifier(&name, "Bytes")?;
+                    let pin = boltffi_local_identifier(&name, "Pin")?;
+                    let ptr = boltffi_local_identifier(&name, "Ptr")?;
                     let writes = codec
                         .write_self_value()
                         .render_with(&mut Writer::new(
@@ -346,7 +346,7 @@ impl LoweredParameters {
                     lowered.wire = true;
                     let pointer = Identifier::escape(slot.parameter(slice.pointer()).name())?;
                     let length = Identifier::escape(slot.parameter(slice.length()).name())?;
-                    let reader = Identifier::parse(format!("boltffi{name}Reader"))?;
+                    let reader = boltffi_local_identifier(&name, "Reader")?;
                     lowered.public.push(CallbackParameter {
                         name: name.clone(),
                         ty: TypeFragment::new(format!("{}?", primitive_type(*primitive))),
@@ -359,10 +359,10 @@ impl LoweredParameters {
                         primitive_type(*primitive),
                         primitive_read_method(*primitive)
                     ));
-                    let writer = Identifier::parse(format!("boltffi{name}Writer"))?;
-                    let bytes = Identifier::parse(format!("boltffi{name}Bytes"))?;
-                    let pin = Identifier::parse(format!("boltffi{name}Pin"))?;
-                    let ptr = Identifier::parse(format!("boltffi{name}Ptr"))?;
+                    let writer = boltffi_local_identifier(&name, "Writer")?;
+                    let bytes = boltffi_local_identifier(&name, "Bytes")?;
+                    let pin = boltffi_local_identifier(&name, "Pin")?;
+                    let ptr = boltffi_local_identifier(&name, "Ptr")?;
                     lowered.proxy_setup.push(format!(
                         "WireWriter {writer} = new WireWriter();\nif ({name}.HasValue)\n{{\n    {writer}.WriteU8(1);\n    {writer}.{}({name}.Value);\n}}\nelse\n{{\n    {writer}.WriteU8(0);\n}}\nbyte[] {bytes} = {writer}.ToArray();\nglobal::System.Runtime.InteropServices.GCHandle {pin} = global::System.Runtime.InteropServices.GCHandle.Alloc({bytes}, global::System.Runtime.InteropServices.GCHandleType.Pinned);\nnint {ptr} = {pin}.AddrOfPinnedObject();",
                         primitive_write_method(*primitive)
@@ -380,7 +380,7 @@ impl LoweredParameters {
                     let pointer = Identifier::escape(slot.parameter(vector.pointer()).name())?;
                     let length = Identifier::escape(slot.parameter(vector.length()).name())?;
                     let element_type = direct_vector_element_type(element, None, context)?;
-                    let reader = Identifier::parse(format!("boltffi{name}Reader"))?;
+                    let reader = boltffi_local_identifier(&name, "Reader")?;
                     lowered.public.push(CallbackParameter {
                         name: name.clone(),
                         ty: TypeFragment::new(format!("{element_type}[]")),
@@ -408,13 +408,13 @@ impl LoweredParameters {
                         }
                         _ => format!("{reader}.ReadRawArray<{element_type}>()"),
                     });
-                    let pin = Identifier::parse(format!("boltffi{name}Pin"))?;
-                    let ptr = Identifier::parse(format!("boltffi{name}Ptr"))?;
+                    let pin = boltffi_local_identifier(&name, "Pin")?;
+                    let ptr = boltffi_local_identifier(&name, "Ptr")?;
                     let (pinned_value, length) = match element {
                         DirectVectorElementType::Primitive(primitive)
                             if primitive.primitive() == Primitive::Bool =>
                         {
-                            let bytes = Identifier::parse(format!("boltffi{name}Bytes"))?;
+                            let bytes = boltffi_local_identifier(&name, "Bytes")?;
                             lowered.proxy_setup.push(format!(
                                 "byte[] {bytes} = new byte[{name}.Length];\nfor (int boltffiIndex = 0; boltffiIndex < {name}.Length; boltffiIndex++) {bytes}[boltffiIndex] = {name}[boltffiIndex] ? (byte)1 : (byte)0;"
                             ));
