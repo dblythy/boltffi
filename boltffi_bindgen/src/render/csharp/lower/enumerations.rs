@@ -53,11 +53,13 @@ impl<'a> CSharpLowerer<'a> {
             .map(|abi_enum| abi_enum.variants.iter().map(|v| (&v.name).into()).collect())
             .unwrap_or_default();
         // Constructors/methods share one C# enclosing scope too (the sealed body for data
-        // enums, a methods-companion static class for C-style enums): a method decoding a type
-        // shadowed by a *sibling* constructor/method name needs the same qualification a
-        // self-collision would, same widening as `scope_shadow` gives classes/records/free
-        // functions. Union with the variant-name shadow above rather than replacing it — a
-        // method can be shadowed by either a sibling variant or a sibling member.
+        // enums, a methods-companion static class for C-style enums): a decode call — inside a
+        // METHOD's body, or inside a VARIANT's own field decode expression, both of which live
+        // in that same sealed body for a data enum — shadowed by a *sibling* constructor/method
+        // name needs the same qualification a self-collision would, same widening as
+        // `scope_shadow` gives classes/records/free functions. Union with the variant-name
+        // shadow above rather than replacing it — either a sibling variant or a sibling member
+        // can shadow, so both methods AND variant fields are qualified against the combined set.
         let member_names = enum_def
             .constructors
             .iter()
@@ -125,7 +127,7 @@ impl<'a> CSharpLowerer<'a> {
                             variant,
                             variant_docs.get(ordinal).cloned().flatten(),
                             ordinal,
-                            &shadowed_variant_names,
+                            &combined_method_shadow,
                             &mut size_locals,
                             &mut encode_locals,
                             &mut decode_locals,
@@ -412,5 +414,105 @@ impl<'a> CSharpLowerer<'a> {
             wire_writers,
             owner_is_blittable: false,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::Lowerer as IrLowerer;
+    use crate::ir::contract::{FfiContract, PackageInfo};
+    use crate::ir::definitions::{FieldDef, RecordDef, ReturnDef, VariantPayload};
+    use crate::ir::ids::{FieldName, MethodId, RecordId};
+    use crate::ir::types::PrimitiveType;
+    use boltffi_ffi_rules::callable::ExecutionKind;
+
+    use super::super::super::CSharpOptions;
+
+    /// Regression test for a gap the C# sibling-shadow widening (item 3 refinement) left open,
+    /// found by independent adversarial review: a data enum's own VARIANT field decode
+    /// expression lives in the identical sealed-class body as the enum's METHODS (both render
+    /// inside `sealed class {{ enumeration.name() }} { ... }`), but only methods were qualified
+    /// against the combined (variant-name ∪ sibling-member-name) shadow set — variant fields
+    /// still saw only the narrower variant-name-only set. A data enum with a variant field
+    /// decoding record `Point`, where the SAME enum also declares a method literally named
+    /// `point` (no variant is named `Point`, so the narrower set misses this), reproduces the
+    /// identical CS0119 shape everywhere else in this file already guards against.
+    #[test]
+    fn data_enum_variant_field_decode_is_qualified_when_shadowed_by_a_sibling_method_name() {
+        let mut contract = FfiContract {
+            package: PackageInfo {
+                name: "demo_lib".to_string(),
+                version: None,
+            },
+            functions: vec![],
+            catalog: Default::default(),
+        };
+        contract.catalog.insert_record(RecordDef {
+            id: RecordId::new("point"),
+            is_repr_c: false,
+            is_error: false,
+            fields: vec![FieldDef {
+                name: FieldName::new("x"),
+                type_expr: TypeExpr::Primitive(PrimitiveType::F64),
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let enum_def = EnumDef {
+            id: EnumId::new("container"),
+            repr: EnumRepr::Data {
+                tag_type: PrimitiveType::I32,
+                variants: vec![crate::ir::definitions::DataVariant {
+                    name: "Wrap".into(),
+                    discriminant: 0,
+                    payload: VariantPayload::Struct(vec![FieldDef {
+                        name: FieldName::new("point"),
+                        type_expr: TypeExpr::Record(RecordId::new("point")),
+                        doc: None,
+                        default: None,
+                    }]),
+                    doc: None,
+                }],
+            },
+            is_error: false,
+            constructors: vec![],
+            // No matching AbiCall is registered for this method -- `scope_shadow`'s input is the
+            // enum's own method NAMES (`enum_def.methods`), computed independently of whether
+            // the method itself renders, so this alone is enough to reproduce the shadow.
+            methods: vec![MethodDef {
+                id: MethodId::new("point"),
+                receiver: Receiver::Static,
+                params: vec![],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            doc: None,
+            deprecated: None,
+        };
+        contract.catalog.insert_enum(enum_def.clone());
+
+        let abi = IrLowerer::new(&contract).to_abi_contract();
+        let options = CSharpOptions::default();
+        let lowerer = CSharpLowerer::new(&contract, &abi, &options);
+
+        let plan = lowerer
+            .lower_enum(&enum_def)
+            .expect("container should be admitted: its only field is a supported record");
+
+        let decode_expr = plan.variants[0].fields[0].wire_decode_expr.to_string();
+        assert_eq!(
+            decode_expr, "global::DemoLib.Point.Decode(reader)",
+            "expecting the variant field's Point decode to be fully qualified because the \
+             enum's own sibling method `point` collides with it, same as a sibling method \
+             collision would for a class/record method body; got: {decode_expr}"
+        );
     }
 }
