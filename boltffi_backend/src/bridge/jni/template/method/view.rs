@@ -47,6 +47,7 @@ pub struct NativeMethodView {
     pub checks_error_buffer: bool,
     pub success_out: Option<SuccessOutReturn>,
     pub uses_continuations: bool,
+    pub takes_callback_handle: bool,
     pub has_error_label: bool,
 }
 
@@ -100,6 +101,10 @@ impl NativeMethodView {
                 .parameters()
                 .iter()
                 .any(|parameter| parameter.is_continuation()),
+            takes_callback_handle: method
+                .parameters()
+                .iter()
+                .any(|parameter| parameter.is_callback()),
         })
     }
 }

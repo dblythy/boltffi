@@ -126,6 +126,15 @@ impl NativeParameter {
     pub fn is_continuation(&self) -> bool {
         matches!(self.kind, NativeParameterKind::Continuation(_))
     }
+
+    /// Returns whether this parameter converts a Java callback handle through the
+    /// C callback constructor (`boltffi_jni_callback_parameter` et al. in
+    /// `bridge/jni/callback.c`) — an ordinary method taking a callback-typed
+    /// parameter needs that runtime fragment printed the same way a method
+    /// returning a callback handle does.
+    pub fn is_callback(&self) -> bool {
+        matches!(self.kind, NativeParameterKind::Callback(_))
+    }
 }
 
 /// JNI parameter shape selected from one or more C ABI parameters.
