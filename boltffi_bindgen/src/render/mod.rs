@@ -15,6 +15,20 @@
 //!   contain the actual target-language syntax with template placeholders.
 //!
 //! All backends implement the [`Renderer`] trait.
+//!
+//! No `csharp` module: the legacy C# backend was removed (upstream #654) in
+//! favor of the IR-based renderer at `boltffi_backend::target::csharp`. Any
+//! C#-renderer fix targeting this crate's old `render/csharp/**` — including
+//! this fork's own 193d3b82 (data-enum sibling-shadow), a998a75f (dropped-API
+//! diagnostics), and cb84e0e7 (class-handle param admission) — is
+//! structurally subsumed there and must not be re-applied here: the sibling-
+//! shadow gap is closed at `render/class.rs`/`render/mod.rs`'s
+//! `type_namespace` threading, dropped-API diagnostics fall out of each
+//! declaration renderer's own `collect_diagnostic` (e.g. `render/class.rs`),
+//! and a class-handle parameter is already accepted end to end (verified: a
+//! class method taking another exported class by value renders with zero
+//! diagnostics). Re-derive against `boltffi_backend` for any future C#
+//! renderer fix, never here.
 
 pub mod c;
 pub mod dart;
