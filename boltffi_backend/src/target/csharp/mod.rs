@@ -397,6 +397,22 @@ mod tests {
     }
 
     #[test]
+    fn csharp_target_derives_boltffi_locals_for_a_keyword_named_closure_parameter() {
+        let bindings = bindings(
+            r#"
+            #[export]
+            pub fn apply(event: impl Fn(i32) -> i32, value: i32) -> i32 {
+                event(value)
+            }
+            "#,
+        );
+        let output = target(CSharpHost::new())
+            .render(&bindings)
+            .expect("a closure parameter named after a C# keyword should still render");
+        assert!(output.diagnostics().is_empty(), "{:?}", output.diagnostics());
+    }
+
+    #[test]
     fn csharp_target_renders_callback_interfaces_and_handles() {
         let bindings = bindings(
             r#"

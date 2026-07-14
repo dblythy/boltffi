@@ -13,7 +13,7 @@ use super::super::{
     syntax::{Expression, Identifier, Statement, TypeFragment},
     type_name,
 };
-use super::{NativeParameter, Parameter, boltffi_local_identifier, direct_type};
+use super::{NativeParameter, Parameter, boltffi_local_identifier, direct_type, generated_identifier};
 
 pub(super) struct ClosureArgument {
     pub(super) parameter: Parameter,
@@ -238,7 +238,7 @@ impl ClosureArgument {
             },
             native_parameters: vec![
                 NativeParameter {
-                    name: Identifier::parse(format!("{name}Call"))?,
+                    name: generated_identifier(&name, "Call")?,
                     ty: TypeFragment::new(format!("NativeMethods.{call_delegate}")),
                     modifier: "",
                     marshal_i1: false,
@@ -247,7 +247,7 @@ impl ClosureArgument {
                     byte_array: false,
                 },
                 NativeParameter {
-                    name: Identifier::parse(format!("{name}Context"))?,
+                    name: generated_identifier(&name, "Context")?,
                     ty: TypeFragment::new("nint"),
                     modifier: "",
                     marshal_i1: false,
@@ -256,7 +256,7 @@ impl ClosureArgument {
                     byte_array: false,
                 },
                 NativeParameter {
-                    name: Identifier::parse(format!("{name}Release"))?,
+                    name: generated_identifier(&name, "Release")?,
                     ty: TypeFragment::new(format!("NativeMethods.{release_delegate}")),
                     modifier: "",
                     marshal_i1: false,
