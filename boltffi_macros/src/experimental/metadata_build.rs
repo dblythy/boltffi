@@ -7,7 +7,8 @@ use boltffi_ast::PackageInfo;
 use boltffi_binding::{
     BINDING_METADATA_BUILD_ENV, BINDING_METADATA_FEATURES_ENV, BINDING_METADATA_ROOT_ENV,
     BINDING_METADATA_SOURCE_ENV, BINDING_METADATA_SURFACE_ENV, BindingMetadataSurface, LowerError,
-    Native, SerializedBindings, Wasm32, lower_with_declarations,
+    NamingStyle, Native, SerializedBindings, Wasm32, lower_with_declarations,
+    lower_with_declarations_and_style,
 };
 use boltffi_scan::{ActiveCfg, ScanError, ScanInput};
 use proc_macro2::{Span, TokenStream};
@@ -72,8 +73,22 @@ impl Request {
         )?;
         let source = scan.root_with_support();
         match requested_surface()? {
+            // The `Native` surface's embedded metadata is read by every
+            // native-target renderer (Java, Kotlin, C#, ...) to describe a
+            // crate's real, compiled entry points. Those crates compile
+            // through the STABLE macro path (`legacy()`, not this
+            // `experimental` module) unless they opt into the experimental
+            // build the same way this metadata build itself is opted into
+            // (`boltffi_tests` is the only current example) — so the
+            // metadata must describe `legacy()`'s real ABI
+            // (`NamingStyle::LegacyCompatible`), not this module's own
+            // long-form scheme. Getting this wrong produced real, silent
+            // `EntryPointNotFoundException`s in parse-core-rs's C# packaging
+            // (every P/Invoke entry point compiled clean but didn't exist in
+            // the real dylib) — see `NamingStyle`'s doc for the evidence.
             BindingMetadataSurface::Native => {
-                let native = lower_with_declarations::<Native>(&source)?;
+                let native =
+                    lower_with_declarations_and_style::<Native>(&source, NamingStyle::LegacyCompatible)?;
                 metadata::render(SerializedBindings::native(native.into_bindings()))
                     .map_err(Into::into)
             }

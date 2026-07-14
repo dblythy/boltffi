@@ -63,6 +63,7 @@ mod lower;
 pub use ir::*;
 pub use ir::{ErrorChannel, ErrorPlacement};
 pub use lower::{
-    DeclarationFamily, DeclarationMap, LowerError, LowerErrorKind, LoweredBindings, SurfaceLower,
-    UnsupportedType, lower, lower_with_declarations,
+    DeclarationFamily, DeclarationMap, LowerError, LowerErrorKind, LoweredBindings, NamingStyle,
+    SurfaceLower, UnsupportedType, lower, lower_with_declarations,
+    lower_with_declarations_and_style,
 };

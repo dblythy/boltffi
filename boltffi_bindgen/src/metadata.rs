@@ -727,10 +727,11 @@ impl CargoMessage {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{BTreeMap, BTreeSet};
+    use std::collections::{BTreeMap, BTreeSet, HashSet};
     use std::ffi::{OsStr, OsString};
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::process::Command;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -742,7 +743,7 @@ mod tests {
 
     use super::{
         BindingMetadataBuild, BindingMetadataBuildError, CargoBuild, CargoManifest,
-        MetadataCargoArgs, MetadataFeatures, SourceRoot,
+        CargoProgram, MetadataCargoArgs, MetadataFeatures, SourceRoot,
     };
     use crate::artifact::BindingMetadataReadError;
     use crate::cargo::LibraryCargoArgsError;
@@ -965,6 +966,92 @@ mod tests {
         ));
     }
 
+    /// Regression test for the entry-point-naming bug that blocked
+    /// parse-core-rs's C# packaging (`docs/tracks/boltffi-fork.md`,
+    /// `EntryPointNotFoundException` at `ParseClient..ctor`): the `Native`
+    /// surface's `BindingMetadataBuild` — read by EVERY native-target
+    /// renderer, not just C# — must describe symbol names that actually
+    /// exist in a crate's real, plain-`cargo build`-compiled artifact. Before
+    /// the fix, the embedded metadata used the experimental macro path's
+    /// long-form, module-path-qualified naming
+    /// (`boltffi_init_class_metadata_fixture_counter_new`) while a plain
+    /// build (no crate opts into the experimental path without its own
+    /// build script) compiles the stable macro path's short form
+    /// (`boltffi_counter_new`) — every P/Invoke-style entry point a codegen
+    /// tool derived from the metadata was therefore unresolvable at runtime,
+    /// despite compiling cleanly (a bad symbol name is invisible to a
+    /// compile-only check).
+    #[test]
+    fn cargo_build_metadata_symbol_names_match_the_real_compiled_dylib() {
+        if cfg!(miri) {
+            return;
+        }
+        if Command::new("nm").arg("--help").output().is_err() {
+            // `nm` not on PATH (e.g. some minimal CI images) — skip, matching this
+            // crate's existing "run the real tool when available" convention
+            // (`boltffi_backend`'s `compile_csharp_with_dotnet_when_available`).
+            return;
+        }
+
+        let fixture = FixtureCrate::with_real_exported_class();
+        let dylib = fixture.build_cdylib_with_plain_cargo_build();
+        let real_symbols = exported_symbols(&dylib);
+        assert!(
+            !real_symbols.is_empty(),
+            "should have read at least one exported symbol from {}",
+            dylib.display()
+        );
+
+        let envelopes = BindingMetadataBuild::new(fixture.manifest())
+            .read()
+            .expect("cargo metadata build reads");
+        let SerializedBindings::Native(bindings) = envelopes[0].bindings() else {
+            panic!("expected native metadata");
+        };
+
+        let described_symbols = bindings
+            .symbols()
+            .symbols()
+            .iter()
+            .map(|symbol| symbol.name().as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !described_symbols.is_empty(),
+            "metadata should describe at least one native symbol"
+        );
+
+        for symbol in described_symbols {
+            assert!(
+                real_symbols.contains(symbol),
+                "metadata describes entry point `{symbol}`, which the real compiled dylib does \
+                 not export (real symbols: {real_symbols:?}) — a codegen tool would emit a \
+                 P/Invoke import that throws EntryPointNotFoundException at runtime"
+            );
+        }
+    }
+
+    /// The defined, external symbols a compiled native library exports —
+    /// `nm`-based (macOS Mach-O uses a leading-underscore convention that
+    /// Linux/ELF does not; stripped here so both platforms compare equal).
+    fn exported_symbols(dylib: &Path) -> HashSet<String> {
+        let output = if cfg!(target_os = "linux") {
+            Command::new("nm")
+                .arg("-D")
+                .arg("--defined-only")
+                .arg(dylib)
+                .output()
+        } else {
+            Command::new("nm").arg("-gU").arg(dylib).output()
+        }
+        .expect("nm should run");
+
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter_map(|line| line.split_whitespace().last())
+            .map(|symbol| symbol.strip_prefix('_').unwrap_or(symbol).to_owned())
+            .collect()
+    }
+
     #[test]
     fn metadata_cargo_args_keep_build_flags_without_owned_selectors() {
         let args = MetadataCargoArgs::new(
@@ -1089,6 +1176,82 @@ pub fn view() -> CoreFfi {
             )
             .expect("write metadata fixture ffi");
             Self { root, manifest }
+        }
+
+        /// A real `#[boltffi::export]` class (initializer + method), built as a
+        /// `cdylib` — for proving the metadata this crate's `BindingMetadataBuild`
+        /// derives (read by every native-target renderer: Java, Kotlin, C#, ...)
+        /// matches what a PLAIN `cargo build` (no `--cfg boltffi_metadata`, no
+        /// experimental-build env vars — exactly what ships) actually compiles.
+        /// Unlike the other fixtures above, this one is also built via
+        /// [`Self::build_cdylib_with_plain_cargo_build`].
+        fn with_real_exported_class() -> Self {
+            let root = temp_root("boltffi-bindgen-cargo-metadata");
+            let source_dir = root.join("src");
+            let manifest = root.join("Cargo.toml");
+            fs::create_dir_all(&source_dir).expect("create metadata fixture source dir");
+            fs::write(
+                &manifest,
+                format!(
+                    "[package]\nname = \"metadata_fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\ncrate-type = [\"cdylib\", \"rlib\"]\n\n[dependencies]\nboltffi = {{ path = \"{}\" }}\n",
+                    workspace_crate("boltffi").display()
+                ),
+            )
+            .expect("write metadata fixture manifest");
+            fs::write(
+                source_dir.join("lib.rs"),
+                r#"
+use boltffi::export;
+
+pub struct Counter {
+    value: u32,
+}
+
+#[export]
+impl Counter {
+    pub fn new(seed: u32) -> Self {
+        Self { value: seed }
+    }
+
+    pub fn get(&self) -> u32 {
+        self.value
+    }
+}
+"#,
+            )
+            .expect("write metadata fixture lib");
+            Self { root, manifest }
+        }
+
+        /// Compiles this fixture with a plain, unadorned `cargo build` — no
+        /// `--cfg boltffi_metadata`, no `BINDING_EXPANSION_BUILD_ENV` — the exact
+        /// build a real downstream crate (that hasn't opted into the experimental
+        /// macro path via its own build script) runs, and returns the resulting
+        /// `cdylib` artifact path.
+        fn build_cdylib_with_plain_cargo_build(&self) -> PathBuf {
+            let status = Command::new(CargoProgram::from_env().into_os_string())
+                .arg("build")
+                .arg("--manifest-path")
+                .arg(&self.manifest)
+                .status()
+                .expect("cargo build should spawn");
+            assert!(
+                status.success(),
+                "plain `cargo build` should succeed for the fixture crate"
+            );
+
+            let target_dir = self.root.join("target").join("debug");
+            fs::read_dir(&target_dir)
+                .expect("read target/debug")
+                .filter_map(Result::ok)
+                .map(|entry| entry.path())
+                .find(|path| {
+                    matches!(
+                        path.extension().and_then(OsStr::to_str),
+                        Some("dylib" | "so" | "dll")
+                    )
+                })
+                .expect("cdylib artifact should exist in target/debug")
         }
 
         fn with_metadata_dependency(

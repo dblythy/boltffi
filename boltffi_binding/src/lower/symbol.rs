@@ -1,10 +1,37 @@
 use boltffi_ast::SourceName;
+use boltffi_ffi_rules::naming as legacy_naming;
 
 use crate::{NativeSymbol, SymbolId, SymbolName};
 
 use super::LowerError;
 
 pub const FFI_PREFIX: &str = "boltffi";
+
+/// Which native-symbol naming scheme a lowering pass computes.
+///
+/// [`Experimental`](Self::Experimental) is the long-form, family- and
+/// module-path-qualified scheme `boltffi_macros::experimental` compiles
+/// when a crate opts in via its own build script (`boltffi_tests` is the
+/// only current example). [`LegacyCompatible`](Self::LegacyCompatible)
+/// mirrors `boltffi_ffi_rules::naming` exactly — the scheme the STABLE,
+/// default macro path (`boltffi_macros::exports`/`lowering`, i.e. every
+/// ordinary crate that does not opt into the experimental build) actually
+/// compiles. A metadata build describing such a crate's real ABI (the CLI's
+/// `boltffi_bindgen::metadata` probe, which every native-target renderer
+/// reads) must lower with `LegacyCompatible`, or the entry points it
+/// describes will not match the real compiled artifact — confirmed against
+/// parse-core-rs's real dylib, whose exported symbols
+/// (`_boltffi_parse_client_new`, `_boltffi_parse_client_become_user`, ...)
+/// have no family tag or module-path qualifier at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
+pub enum NamingStyle {
+    /// The in-progress macro rewrite's own long-form, collision-safe scheme.
+    #[default]
+    Experimental,
+    /// Matches `boltffi_ffi_rules::naming` — the stable macro path's real,
+    /// currently-shipping scheme.
+    LegacyCompatible,
+}
 
 #[derive(Clone, Copy)]
 pub enum SymbolOwner<'source> {
@@ -68,15 +95,58 @@ impl<'source> SymbolOwner<'source> {
             | Self::Callback(source_id) => source_id,
         }
     }
+
+    /// The owner's own short name, ignoring its module path — what
+    /// `boltffi_ffi_rules::naming`'s `class_name`/`callback_id` parameters
+    /// expect (legacy has no family tag or module-path qualifier to carry).
+    fn leaf_name(self) -> String {
+        leaf(self.source_id())
+    }
+
+    /// Legacy-compatible: no family tag, no module-path qualifier — matches
+    /// `boltffi_ffi_rules::naming::method_ffi_name`, the real symbol scheme
+    /// the stable macro path compiles (verified against parse-core-rs's
+    /// `_boltffi_parse_client_become_user`).
+    pub fn legacy_method_symbol_name(self, member: &SourceName) -> String {
+        legacy_naming::method_ffi_name(&self.leaf_name(), &source_member_name(member))
+            .into_string()
+    }
+
+    /// Legacy has no separate initializer lane: a class initializer compiles
+    /// to the exact same `boltffi_<leaf>_<member>` shape as any other method
+    /// (verified against parse-core-rs's real `_boltffi_parse_client_new`).
+    pub fn legacy_initializer_symbol_name(self, initializer: &SourceName) -> String {
+        self.legacy_method_symbol_name(initializer)
+    }
+}
+
+/// The trailing `::`-segment of a fully qualified source id, snake-cased via
+/// the same `boltffi_ffi_rules::naming::to_snake_case` the stable macro path
+/// uses — the module path itself carries no weight in the legacy scheme.
+fn leaf(source_id: &str) -> String {
+    legacy_naming::to_snake_case(source_id.rsplit("::").next().unwrap_or(source_id))
 }
 
 pub struct SymbolAllocator {
     next: u32,
+    style: NamingStyle,
 }
 
 impl SymbolAllocator {
     pub fn new() -> Self {
-        Self { next: 0 }
+        Self {
+            next: 0,
+            style: NamingStyle::Experimental,
+        }
+    }
+
+    /// Mints symbols matching the stable macro path's real compiled ABI —
+    /// see [`NamingStyle::LegacyCompatible`].
+    pub fn new_legacy_compatible() -> Self {
+        Self {
+            next: 0,
+            style: NamingStyle::LegacyCompatible,
+        }
     }
 
     pub fn mint(&mut self, name: String) -> Result<NativeSymbol, LowerError> {
@@ -86,13 +156,26 @@ impl SymbolAllocator {
     }
 
     pub fn mint_function(&mut self, function_id: &str) -> Result<NativeSymbol, LowerError> {
-        self.mint(format!(
-            "{}_function_{}",
-            FFI_PREFIX,
-            symbol_path(function_id)
-        ))
+        let name = match self.style {
+            NamingStyle::Experimental => format!(
+                "{}_function_{}",
+                FFI_PREFIX,
+                symbol_path(function_id)
+            ),
+            // matches parse-core-rs's real `_boltffi_fire_timer` etc: no
+            // "function" tag, no module-path qualifier.
+            NamingStyle::LegacyCompatible => {
+                legacy_naming::function_ffi_name(&leaf(function_id)).into_string()
+            }
+        };
+        self.mint(name)
     }
 
+    /// Legacy has no constant-accessor lane at all (`boltffi_macros::exports`
+    /// does not implement `#[export] const`) — a legacy-compiled crate can
+    /// never reach this, so [`NamingStyle::LegacyCompatible`] mints the same
+    /// experimental-style name as a harmless default rather than adding an
+    /// unreachable branch.
     pub fn mint_constant_accessor(
         &mut self,
         constant_id: &str,
@@ -101,11 +184,18 @@ impl SymbolAllocator {
     }
 
     pub fn mint_class_release(&mut self, class_id: &str) -> Result<NativeSymbol, LowerError> {
-        self.mint(format!(
-            "{}_release_class_{}",
-            FFI_PREFIX,
-            symbol_path(class_id)
-        ))
+        let name = match self.style {
+            NamingStyle::Experimental => format!(
+                "{}_release_class_{}",
+                FFI_PREFIX,
+                symbol_path(class_id)
+            ),
+            // matches parse-core-rs's real `_boltffi_parse_client_free`.
+            NamingStyle::LegacyCompatible => {
+                legacy_naming::class_ffi_free(&leaf(class_id)).into_string()
+            }
+        };
+        self.mint(name)
     }
 
     pub fn mint_method(
@@ -113,7 +203,11 @@ impl SymbolAllocator {
         owner: SymbolOwner,
         member: &SourceName,
     ) -> Result<NativeSymbol, LowerError> {
-        self.mint(owner.method_symbol_name(member))
+        let name = match self.style {
+            NamingStyle::Experimental => owner.method_symbol_name(member),
+            NamingStyle::LegacyCompatible => owner.legacy_method_symbol_name(member),
+        };
+        self.mint(name)
     }
 
     pub fn mint_initializer(
@@ -121,31 +215,56 @@ impl SymbolAllocator {
         owner: SymbolOwner,
         initializer: &SourceName,
     ) -> Result<NativeSymbol, LowerError> {
-        self.mint(owner.initializer_symbol_name(initializer))
+        let name = match self.style {
+            NamingStyle::Experimental => owner.initializer_symbol_name(initializer),
+            NamingStyle::LegacyCompatible => owner.legacy_initializer_symbol_name(initializer),
+        };
+        self.mint(name)
     }
 
     pub fn mint_callback_register(
         &mut self,
         callback_id: &str,
     ) -> Result<NativeSymbol, LowerError> {
-        self.mint(format!(
-            "{}_register_callback_{}",
-            FFI_PREFIX,
-            symbol_path(callback_id)
-        ))
+        let name = match self.style {
+            NamingStyle::Experimental => format!(
+                "{}_register_callback_{}",
+                FFI_PREFIX,
+                symbol_path(callback_id)
+            ),
+            // matches parse-core-rs's real `_boltffi_register_clock_vtable`.
+            NamingStyle::LegacyCompatible => {
+                legacy_naming::callback_register_fn(&leaf(callback_id)).into_string()
+            }
+        };
+        self.mint(name)
     }
 
     pub fn mint_callback_create_handle(
         &mut self,
         callback_id: &str,
     ) -> Result<NativeSymbol, LowerError> {
-        self.mint(format!(
-            "{}_create_callback_{}",
-            FFI_PREFIX,
-            symbol_path(callback_id)
-        ))
+        let name = match self.style {
+            NamingStyle::Experimental => format!(
+                "{}_create_callback_{}",
+                FFI_PREFIX,
+                symbol_path(callback_id)
+            ),
+            // matches parse-core-rs's real `_boltffi_create_clock_handle`.
+            NamingStyle::LegacyCompatible => {
+                legacy_naming::callback_create_fn(&leaf(callback_id)).into_string()
+            }
+        };
+        self.mint(name)
     }
 
+    /// Not yet mapped for [`NamingStyle::LegacyCompatible`] — no confirmed
+    /// legacy-compiled crate reaches an async callback completion lane
+    /// today (unlike `mint_class_release`/`mint_method`/`mint_callback_register`,
+    /// all confirmed against parse-core-rs's real dylib). Mints the
+    /// experimental-style name unconditionally; widen this once a
+    /// legacy-compatible caller needs it, verified against a real build the
+    /// same way the mapped lanes were.
     pub fn mint_callback_complete(
         &mut self,
         callback_id: &str,
@@ -159,6 +278,9 @@ impl SymbolAllocator {
         ))
     }
 
+    /// Not yet mapped for [`NamingStyle::LegacyCompatible`] — same caveat as
+    /// [`Self::mint_callback_complete`]; no stream reaches a
+    /// `LegacyCompatible` metadata build in this repo today.
     pub fn mint_stream(
         &mut self,
         stream_id: &str,
@@ -180,12 +302,21 @@ impl SymbolAllocator {
         let start_without_prefix = start_symbol_name
             .strip_prefix(&format!("{FFI_PREFIX}_"))
             .unwrap_or(start_symbol_name);
-        self.mint(format!(
-            "{}_async_{}_{}",
-            FFI_PREFIX,
-            start_without_prefix,
-            action.suffix()
-        ))
+        let name = match self.style {
+            NamingStyle::Experimental => format!(
+                "{}_async_{}_{}",
+                FFI_PREFIX,
+                start_without_prefix,
+                action.suffix()
+            ),
+            // legacy has no "async" infix: `_boltffi_parse_client_become_user_poll`,
+            // not `_boltffi_async_parse_client_become_user_poll` — the suffix lands
+            // directly on the base method/initializer name.
+            NamingStyle::LegacyCompatible => {
+                format!("{}_{}_{}", FFI_PREFIX, start_without_prefix, action.suffix())
+            }
+        };
+        self.mint(name)
     }
 
     pub const fn next_group_id(&self) -> u32 {
@@ -549,6 +680,116 @@ mod tests {
                 .name()
                 .as_str(),
             "boltffi_callback_demo_listener_on_event_complete"
+        );
+    }
+
+    // `NamingStyle::LegacyCompatible` — every expected string below is the
+    // REAL symbol observed via `nm` on parse-core-rs's dylib
+    // (`_boltffi_parse_client_new`, `_boltffi_parse_client_become_user`,
+    // `_boltffi_parse_client_free`, `_boltffi_fire_timer`,
+    // `_boltffi_register_clock_vtable`, `_boltffi_create_clock_handle`), not
+    // a value invented to match the implementation.
+
+    #[test]
+    fn legacy_initializer_symbol_name_has_no_family_tag_or_module_path() {
+        let initializer = SourceName::from_canonical(boltffi_ast::CanonicalName::new(vec![
+            boltffi_ast::NamePart::new("new"),
+        ]));
+
+        assert_eq!(
+            SymbolOwner::class("parse_core::ffi::client::ParseClient")
+                .legacy_initializer_symbol_name(&initializer),
+            "boltffi_parse_client_new"
+        );
+    }
+
+    #[test]
+    fn legacy_method_symbol_name_has_no_family_tag_or_module_path() {
+        let member = SourceName::from_canonical(boltffi_ast::CanonicalName::new(vec![
+            boltffi_ast::NamePart::new("become_user"),
+        ]));
+
+        assert_eq!(
+            SymbolOwner::class("parse_core::ffi::client::ParseClient")
+                .legacy_method_symbol_name(&member),
+            "boltffi_parse_client_become_user"
+        );
+    }
+
+    #[test]
+    fn legacy_method_symbol_name_applies_uniformly_to_record_owners_too() {
+        let member = SourceName::from_canonical(boltffi_ast::CanonicalName::new(vec![
+            boltffi_ast::NamePart::new("get_public_read_access"),
+        ]));
+
+        assert_eq!(
+            SymbolOwner::record("parse_core::ffi::acl::Acl").legacy_method_symbol_name(&member),
+            "boltffi_acl_get_public_read_access"
+        );
+    }
+
+    #[test]
+    fn legacy_style_allocator_mints_class_release_without_release_class_tag() {
+        let mut allocator = SymbolAllocator::new_legacy_compatible();
+        let symbol = allocator
+            .mint_class_release("parse_core::ffi::client::ParseClient")
+            .expect("valid symbol");
+
+        assert_eq!(symbol.name().as_str(), "boltffi_parse_client_free");
+    }
+
+    #[test]
+    fn legacy_style_allocator_mints_functions_without_function_tag_or_path() {
+        let mut allocator = SymbolAllocator::new_legacy_compatible();
+        let symbol = allocator
+            .mint_function("parse_core::ffi::transport::fire_timer")
+            .expect("valid symbol");
+
+        assert_eq!(symbol.name().as_str(), "boltffi_fire_timer");
+    }
+
+    #[test]
+    fn legacy_style_allocator_mints_callback_register_and_create_as_vtable_and_handle() {
+        let mut allocator = SymbolAllocator::new_legacy_compatible();
+
+        let register = allocator
+            .mint_callback_register("parse_core::ffi::transport::Clock")
+            .expect("valid symbol");
+        let create = allocator
+            .mint_callback_create_handle("parse_core::ffi::transport::Clock")
+            .expect("valid symbol");
+
+        assert_eq!(register.name().as_str(), "boltffi_register_clock_vtable");
+        assert_eq!(create.name().as_str(), "boltffi_create_clock_handle");
+    }
+
+    #[test]
+    fn legacy_style_allocator_mints_methods_via_the_shared_allocator_entry_point() {
+        let member = SourceName::from_canonical(boltffi_ast::CanonicalName::new(vec![
+            boltffi_ast::NamePart::new("become_user"),
+        ]));
+        let mut allocator = SymbolAllocator::new_legacy_compatible();
+
+        let symbol = allocator
+            .mint_method(
+                SymbolOwner::class("parse_core::ffi::client::ParseClient"),
+                &member,
+            )
+            .expect("valid symbol");
+
+        assert_eq!(symbol.name().as_str(), "boltffi_parse_client_become_user");
+    }
+
+    #[test]
+    fn legacy_style_async_lifecycle_suffixes_stay_correct_on_a_short_base_name() {
+        let mut allocator = SymbolAllocator::new_legacy_compatible();
+        let symbol = allocator
+            .mint_async_lifecycle("boltffi_parse_client_become_user", AsyncLifecycle::Poll)
+            .expect("valid symbol");
+
+        assert_eq!(
+            symbol.name().as_str(),
+            "boltffi_parse_client_become_user_poll"
         );
     }
 }

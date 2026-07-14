@@ -70,6 +70,8 @@ pub use self::surface::SurfaceLower;
 
 use self::{ids::DeclarationIds, index::Index, symbol::SymbolAllocator};
 
+pub use self::symbol::NamingStyle;
+
 pub use self::ids::DeclarationMap;
 
 /// Binding contract plus the source declaration ids that produced it.
@@ -106,17 +108,33 @@ impl<S: crate::Surface> LoweredBindings<S> {
 
 /// Lowers a source contract into a binding contract for surface `S`.
 ///
-/// See the module-level docs for the steps each call runs through.
+/// See the module-level docs for the steps each call runs through. Native
+/// symbol names use [`NamingStyle::Experimental`]; use
+/// [`lower_with_declarations_and_style`] for a crate whose real ABI must
+/// match instead (see [`NamingStyle`]).
 pub fn lower<S: SurfaceLower>(source: &SourceContract) -> Result<Bindings<S>, LowerError> {
     lower_with_declarations(source).map(LoweredBindings::into_bindings)
 }
 
 /// Lowers a source contract and keeps the source-to-binding declaration map.
+///
+/// Native symbol names use [`NamingStyle::Experimental`]; use
+/// [`lower_with_declarations_and_style`] for a crate whose real ABI must
+/// match instead (see [`NamingStyle`]).
 pub fn lower_with_declarations<S: SurfaceLower>(
     source: &SourceContract,
 ) -> Result<LoweredBindings<S>, LowerError> {
+    lower_with_declarations_and_style(source, NamingStyle::Experimental)
+}
+
+/// Lowers a source contract, keeping the source-to-binding declaration map,
+/// with the requested native-symbol [`NamingStyle`].
+pub fn lower_with_declarations_and_style<S: SurfaceLower>(
+    source: &SourceContract,
+    style: NamingStyle,
+) -> Result<LoweredBindings<S>, LowerError> {
     let ids = DeclarationIds::from_source(source)?;
-    let bindings = lower_with_ids::<S>(source, &ids)?;
+    let bindings = lower_with_ids::<S>(source, &ids, style)?;
     let declarations = ids.declaration_map();
     Ok(LoweredBindings::new(bindings, declarations))
 }
@@ -124,9 +142,13 @@ pub fn lower_with_declarations<S: SurfaceLower>(
 fn lower_with_ids<S: SurfaceLower>(
     source: &SourceContract,
     ids: &DeclarationIds,
+    style: NamingStyle,
 ) -> Result<Bindings<S>, LowerError> {
     let index = Index::new(source);
-    let mut allocator = SymbolAllocator::new();
+    let mut allocator = match style {
+        NamingStyle::Experimental => SymbolAllocator::new(),
+        NamingStyle::LegacyCompatible => SymbolAllocator::new_legacy_compatible(),
+    };
 
     let records = records::lower::<S>(&index, ids, &mut allocator)?;
     let enums = enums::lower::<S>(&index, ids, &mut allocator)?;
