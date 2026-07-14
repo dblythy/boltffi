@@ -156,7 +156,10 @@ impl<'a> CSharpLowerer<'a> {
     /// `RefSelf` and `RefMutSelf` both lift to
     /// [`CSharpReceiver::ClassInstance`]; `OwnedSelf` is filtered out
     /// upstream. Returns `None` if any param fails to lower.
-    fn lower_class_method(
+    ///
+    /// `pub(super)`: also called directly by `support_report`'s `dropped_apis` to check whether
+    /// a method renders, without duplicating this method's own admission logic.
+    pub(super) fn lower_class_method(
         &self,
         method_def: &MethodDef,
         call: &AbiCall,

@@ -45,7 +45,8 @@ mod lower;
 mod plan;
 mod templates;
 
-pub use emit::CSharpEmitter;
+pub use emit::{CSharpEmitter, CSharpFile, CSharpOutput};
+pub use lower::CSharpDroppedApi;
 
 use boltffi_ffi_rules::naming::{LibraryName, Name};
 

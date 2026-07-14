@@ -17,6 +17,7 @@ mod prefix;
 mod records;
 mod result;
 mod size;
+mod support_report;
 #[cfg(test)]
 mod test_support;
 mod types;
@@ -24,6 +25,7 @@ mod value;
 mod wire_writers;
 
 pub use lowerer::CSharpLowerer;
+pub use support_report::CSharpDroppedApi;
 
 #[cfg(test)]
 pub(super) use wire_writers::self_wire_writer;

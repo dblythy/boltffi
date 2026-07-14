@@ -62,9 +62,36 @@ impl LanguageGenerator for CSharpGenerator {
             &Self::csharp_options(request),
         );
 
+        warn_about_dropped_csharp_apis(&output.dropped_apis);
+
         output.files.iter().try_for_each(|file| {
             request.write_output(&output_directory.join(&file.file_name), &file.source)
         })
+    }
+}
+
+/// Prints a loud, itemized warning for every method/function the C# backend's admission gate
+/// silently excluded (most commonly a param or return type touching a bare recursive `#[data]`
+/// enum the backend can't render yet — see issue #186). Before this, a pruned method just
+/// vanished from the generated `.cs` with zero signal: a consumer's C# API surface could narrow
+/// on every regeneration with nothing pointing at why. No-op when nothing was dropped, which is
+/// the common case.
+fn warn_about_dropped_csharp_apis(dropped: &[boltffi_bindgen::render::csharp::CSharpDroppedApi]) {
+    if dropped.is_empty() {
+        return;
+    }
+    eprintln!(
+        "warning: the C# backend silently dropped {} API{} from the generated bindings (an \
+         unsupported param or return type on each — the Rust source declares more than this \
+         pack renders):",
+        dropped.len(),
+        if dropped.len() == 1 { "" } else { "s" }
+    );
+    for api in dropped {
+        match &api.owner {
+            Some(owner) => eprintln!("  - {} {owner}::{} — {}", api.kind, api.name, api.reason),
+            None => eprintln!("  - {} {} — {}", api.kind, api.name, api.reason),
+        }
     }
 }
 

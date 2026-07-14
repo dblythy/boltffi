@@ -10,7 +10,7 @@ use crate::ir::{AbiContract, FfiContract};
 
 use super::{
     CSharpOptions,
-    lower::CSharpLowerer,
+    lower::{CSharpDroppedApi, CSharpLowerer},
     plan::CSharpEnumKind,
     templates::{
         CallbackBridgeTemplate, CallbackInterfaceTemplate, CallbackProxyTemplate, ClassTemplate,
@@ -32,6 +32,11 @@ pub struct CSharpFile {
 #[derive(Debug, Clone)]
 pub struct CSharpOutput {
     pub files: Vec<CSharpFile>,
+    /// Every free function/class method the admission gate silently excluded from `files`
+    /// (see `lower::support_report`). Empty in the common case where every callable renders —
+    /// callers should treat a non-empty list as loud, not swallow it: it means this pack's C#
+    /// API surface is narrower than the Rust source, with no other signal that happened.
+    pub dropped_apis: Vec<CSharpDroppedApi>,
 }
 
 impl CSharpOutput {
@@ -54,6 +59,7 @@ pub struct CSharpEmitter;
 impl CSharpEmitter {
     pub fn emit(ffi: &FfiContract, abi: &AbiContract, options: &CSharpOptions) -> CSharpOutput {
         let lowerer = CSharpLowerer::new(ffi, abi, options);
+        let dropped_apis = lowerer.dropped_apis();
         let module = lowerer.lower();
 
         let mut files: Vec<CSharpFile> = module
@@ -135,7 +141,10 @@ impl CSharpEmitter {
             source: main_source,
         });
 
-        CSharpOutput { files }
+        CSharpOutput {
+            files,
+            dropped_apis,
+        }
     }
 }
 
