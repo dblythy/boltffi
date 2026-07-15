@@ -26,7 +26,6 @@ pub enum FunctionShape {
     HandleParameter,
     PrimitiveReturn,
     OutPointerPrimitiveReturn,
-    DirectEnumReturn,
     UnknownDirectReturn,
     HandleReturn,
     ScalarOptionReturn,
@@ -145,7 +144,6 @@ impl FunctionShape {
             Self::HandleParameter => Some("handle function parameter"),
             Self::PrimitiveReturn => Some("primitive Java representation"),
             Self::OutPointerPrimitiveReturn => Some("out-pointer primitive function return"),
-            Self::DirectEnumReturn => Some("direct enum function return"),
             Self::UnknownDirectReturn => Some("unknown direct function return"),
             Self::HandleReturn => Some("handle function return"),
             Self::ScalarOptionReturn => Some("scalar option function return"),
@@ -248,10 +246,19 @@ impl<'plan> ReturnPlanRender<'plan, Native, OutOfRust> for ReturnShape {
             }
             (ReturnValueSlot::ReturnSlot, DirectValueType::Record(_)) => FunctionShape::Supported,
             (ReturnValueSlot::OutPointer, DirectValueType::Record(_)) => FunctionShape::Supported,
-            (ReturnValueSlot::ReturnSlot, DirectValueType::Enum(_)) => FunctionShape::Supported,
-            (ReturnValueSlot::OutPointer, DirectValueType::Enum(_)) => {
-                FunctionShape::DirectEnumReturn
-            }
+            // Both slots render identically below (`CallReturnRender::direct` ignores `slot` for
+            // the `Enum` arm, same as every other return shape here — `Record`/`handle`/
+            // `scalar_option`/`encoded` all already treat `ReturnSlot`/`OutPointer` alike). A
+            // fallible method returning a plain `#[data]` enum (`Result<Mode, E>`) lowers to
+            // `OutPointer` (the return slot carries the Ok/Err status) and is just as supported
+            // as the non-fallible `ReturnSlot` case — this arm used to reject it as
+            // `DirectEnumReturn`, an inconsistency with every sibling variant (not a real
+            // limitation of the renderer), which skipped the ENTIRE class a fallible enum-typed
+            // accessor lived on.
+            (
+                ReturnValueSlot::ReturnSlot | ReturnValueSlot::OutPointer,
+                DirectValueType::Enum(_),
+            ) => FunctionShape::Supported,
             _ => FunctionShape::UnknownDirectReturn,
         }
     }

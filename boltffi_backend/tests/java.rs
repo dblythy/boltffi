@@ -2016,6 +2016,59 @@ fn java_partial_target_retains_dependency_closed_direct_records() {
     assert!(coverage.is_empty());
 }
 
+// A fallible method returning a plain c-style `#[data]` enum (`Result<Mode, ModeError>`) lowers
+// to `ReturnPlan::DirectViaOutPointer { ty: Enum(_) }` — the return slot carries the Ok/Err
+// status, the enum's ordinal is written through a caller-supplied out-pointer (see
+// `boltffi_binding::ir::callable::ReturnPlan`'s doc comment: "return slot carries the error
+// status"). This is the exact shape `parse-core-rs`'s real `ParseClient::network_state(&self) ->
+// Result<NetworkState, ParseError>` has (parse-core-sdks' docs/tracks/java.md Phase 1 "noted, not
+// fixed" skip: `class parse::client / direct enum function return`) — reproduced here with a
+// minimal fixture, not assumed from the coverage message alone.
+const FALLIBLE_ENUM_METHOD: &str = r#"
+    #[repr(u8)]
+    #[data]
+    pub enum Mode {
+        Fast = 1,
+        Slow = 2,
+    }
+
+    #[error]
+    pub enum ModeError {
+        Unavailable,
+    }
+
+    pub struct Engine {
+        value: i32,
+    }
+
+    #[export]
+    impl Engine {
+        pub fn new(value: i32) -> Self { Self { value } }
+
+        pub fn mode(&self) -> Result<Mode, ModeError> {
+            if self.value > 0 { Ok(Mode::Fast) } else { Err(ModeError::Unavailable) }
+        }
+    }
+"#;
+
+#[test]
+fn java_target_generates_class_methods_returning_a_fallible_data_enum() {
+    let bindings = bindings(FALLIBLE_ENUM_METHOD);
+    let output = host()
+        .render_with_coverage(&bindings, CoverageMode::Partial)
+        .expect("fallible-enum-return Java target should render");
+    let coverage = output.coverage().unsupported();
+    assert!(
+        coverage.is_empty(),
+        "Engine's fallible enum-returning method should not be skipped: {coverage:?}"
+    );
+    let java = java_source(&output, "com.boltffi.demo", "Engine");
+    assert!(
+        java.contains("public Mode mode()"),
+        "expected a generated `mode()` accessor, got:\n{java}"
+    );
+}
+
 #[test]
 fn java_partial_target_rejects_async_closure_returns_before_building_the_bridge() {
     let source = r#"
