@@ -111,7 +111,7 @@ package {{ package }};
 {% endfor %}{% endfor %}        }
 
         @Override
-        public boolean equals(Object value) {
+        public boolean equals(java.lang.Object value) {
 {% if variant.unit() %}            return value instanceof {{ variant.name() }};
 {% else %}            if (this == value) return true;
             if (!(value instanceof {{ variant.name() }})) return false;

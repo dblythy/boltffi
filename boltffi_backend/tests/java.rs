@@ -298,6 +298,22 @@ const ERROR_ENUMS: &str = r#"
     }
 "#;
 
+// A data-enum variant literally named `Object` collides with `java.lang.Object` when it's
+// declared as a nested sibling class inside the enum's own body (parse-core-sdks' real
+// `ParseValue` enum has exactly this shape: a `Object(IncludedObject)` variant). Every sibling
+// variant's `public boolean equals(Object value)` override then resolves the unqualified
+// `Object` parameter type to the nested `Wrapper.Object` class instead of `java.lang.Object`.
+const ENUM_WITH_OBJECT_VARIANT: &str = r#"
+    #[data]
+    pub enum Wrapper {
+        Empty,
+        Object(String),
+    }
+
+    #[export]
+    pub fn echo_wrapper(value: Wrapper) -> Wrapper { value }
+"#;
+
 const CLASSES: &str = r#"
     pub struct Counter {
         value: i32,
@@ -2494,6 +2510,20 @@ fn generated_enum_errors_compile_for_java_eight_when_available() {
         JavaHost::new("com.boltffi.demo", "Demo").expect("Java host"),
     );
     compile_generated_java(&compiler, &output, "boltffi-java-enum-errors");
+}
+
+#[test]
+fn generated_enum_with_object_variant_compiles_for_java_eight_when_available() {
+    let Some(compiler) = JavaCompiler::discover() else {
+        return;
+    };
+
+    let output = render_with_host(
+        ENUM_WITH_OBJECT_VARIANT,
+        CoverageMode::Complete,
+        JavaHost::new("com.boltffi.demo", "Demo").expect("Java host"),
+    );
+    compile_generated_java(&compiler, &output, "boltffi-java-enum-object-variant");
 }
 
 #[test]

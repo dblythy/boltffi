@@ -32,7 +32,7 @@ package {{ package }};
     }
 {% endif %}
     @Override
-    public boolean equals(Object value) {
+    public boolean equals(java.lang.Object value) {
         if (this == value) return true;
         if (value == null || getClass() != value.getClass()) return false;
         {{ record.name() }} other = ({{ record.name() }}) value;
