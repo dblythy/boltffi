@@ -108,14 +108,13 @@ impl Primitive {
     pub fn equals(self, left: Expression, right: Expression) -> Expression {
         match self {
             Self::Float | Self::Double => Expression::static_call(
-                TypeName::named(TypeIdentifier::known(
+                Self::boxed_java_lang_type(
                     match self {
                         Self::Float => "Float",
                         Self::Double => "Double",
                         _ => unreachable!(),
                     },
-                    crate::target::java::JavaVersion::JAVA_8,
-                )),
+                ),
                 Identifier::known("compare"),
                 [left, right].into_iter().collect(),
             )
@@ -126,20 +125,28 @@ impl Primitive {
 
     pub fn hash(self, value: Expression) -> Expression {
         Expression::static_call(
-            TypeName::named(TypeIdentifier::known(
-                match self {
-                    Self::Boolean => "Boolean",
-                    Self::Byte => "Byte",
-                    Self::Short => "Short",
-                    Self::Int => "Integer",
-                    Self::Long => "Long",
-                    Self::Float => "Float",
-                    Self::Double => "Double",
-                },
-                crate::target::java::JavaVersion::JAVA_8,
-            )),
+            Self::boxed_java_lang_type(match self {
+                Self::Boolean => "Boolean",
+                Self::Byte => "Byte",
+                Self::Short => "Short",
+                Self::Int => "Integer",
+                Self::Long => "Long",
+                Self::Float => "Float",
+                Self::Double => "Double",
+            }),
             Identifier::known("hashCode"),
             [value].into_iter().collect(),
+        )
+    }
+
+    // Fully qualified: a #[data] enum variant can be named after any of these boxed types
+    // (parse-core-sdks' own `ParseValue` has a `Double` variant) and, unqualified, the boxed
+    // type name would resolve to that nested sibling class instead of `java.lang.*` inside the
+    // variant's own generated body.
+    fn boxed_java_lang_type(name: &'static str) -> TypeName {
+        TypeName::qualified(
+            ["java", "lang"].into_iter().map(Identifier::known).collect(),
+            TypeIdentifier::known(name, crate::target::java::JavaVersion::JAVA_8),
         )
     }
 

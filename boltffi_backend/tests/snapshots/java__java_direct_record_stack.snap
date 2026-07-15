@@ -67,16 +67,16 @@ public final class Point {
         if (this == value) return true;
         if (value == null || getClass() != value.getClass()) return false;
         Point other = (Point) value;
-        return Double.compare(this.x, other.x) == 0 && Double.compare(this.y, other.y) == 0 && this.visible == other.visible && this.color == other.color;
+        return java.lang.Double.compare(this.x, other.x) == 0 && java.lang.Double.compare(this.y, other.y) == 0 && this.visible == other.visible && this.color == other.color;
     }
 
     @Override
     public int hashCode() {
         int result = 1;
-        result = 31 * result + Double.hashCode(this.x);
-        result = 31 * result + Double.hashCode(this.y);
-        result = 31 * result + Boolean.hashCode(this.visible);
-        result = 31 * result + Integer.hashCode(this.color);
+        result = 31 * result + java.lang.Double.hashCode(this.x);
+        result = 31 * result + java.lang.Double.hashCode(this.y);
+        result = 31 * result + java.lang.Boolean.hashCode(this.visible);
+        result = 31 * result + java.lang.Integer.hashCode(this.color);
         return result;
     }
 

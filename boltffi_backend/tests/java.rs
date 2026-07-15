@@ -314,6 +314,23 @@ const ENUM_WITH_OBJECT_VARIANT: &str = r#"
     pub fn echo_wrapper(value: Wrapper) -> Wrapper { value }
 "#;
 
+// Same shadowing family, hit through the generated equals()/hashCode() bodies instead of the
+// equals() *signature*: a variant named after a boxed primitive wrapper (`Double`/`Float`/
+// `Integer`/`Long`/`Short`/`Byte`/`Boolean`) makes the unqualified `Double.compare(...)`/
+// `Double.hashCode(...)` calls the primitive equals/hash renderer emits resolve to the nested
+// sibling class instead of `java.lang.Double` (parse-core-sdks' real `ParseValue` has exactly
+// this: a `Double(f64)` variant alongside others).
+const ENUM_WITH_BOXED_PRIMITIVE_VARIANT: &str = r#"
+    #[data]
+    pub enum Number {
+        Empty,
+        Double(f64),
+    }
+
+    #[export]
+    pub fn echo_number(value: Number) -> Number { value }
+"#;
+
 const CLASSES: &str = r#"
     pub struct Counter {
         value: i32,
@@ -2524,6 +2541,20 @@ fn generated_enum_with_object_variant_compiles_for_java_eight_when_available() {
         JavaHost::new("com.boltffi.demo", "Demo").expect("Java host"),
     );
     compile_generated_java(&compiler, &output, "boltffi-java-enum-object-variant");
+}
+
+#[test]
+fn generated_enum_with_boxed_primitive_variant_compiles_for_java_eight_when_available() {
+    let Some(compiler) = JavaCompiler::discover() else {
+        return;
+    };
+
+    let output = render_with_host(
+        ENUM_WITH_BOXED_PRIMITIVE_VARIANT,
+        CoverageMode::Complete,
+        JavaHost::new("com.boltffi.demo", "Demo").expect("Java host"),
+    );
+    compile_generated_java(&compiler, &output, "boltffi-java-enum-boxed-primitive-variant");
 }
 
 #[test]
