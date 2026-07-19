@@ -57,6 +57,26 @@ final class _$$FFIException implements Exception {
   }
 }
 
+/// Reads, decodes, and frees the thread-local last-error message the native
+/// side sets before signaling failure through a null handle or non-zero
+/// status code (`boltffi_last_error_message`/`boltffi_free_string`, declared
+/// alongside the rest of the crate's free functions).
+String _$$takeLastErrorMessage() {
+  final out = $$extffi.calloc<_$$FFIString>();
+  try {
+    _f$boltffi_last_error_message(out);
+    final str = out.ref;
+    if (str.ptr == $$ffi.nullptr) {
+      return "unknown error";
+    }
+    final message = $$convert.utf8.decode(str.ptr.asTypedList(str.len));
+    _f$boltffi_free_string(str);
+    return message;
+  } finally {
+    $$extffi.calloc.free(out);
+  }
+}
+
 sealed class BoltFFIResult<Ok, Err extends Exception> {
   const BoltFFIResult();
 
@@ -223,6 +243,9 @@ final class _$$WireWriter {
   void writeUri(Uri v) => writeString(v.toString());
 
   @pragma('vm:prefer-inline')
+  void writeUuid(String v) => writeString(v);
+
+  @pragma('vm:prefer-inline')
   void writeDuration(Duration v) {
     final micros = v.inMicroseconds;
     final seconds = micros ~/ 1000000;
@@ -232,7 +255,13 @@ final class _$$WireWriter {
   }
 
   @pragma('vm:prefer-inline')
-  void writeInstant(DateTime v) {}
+  void writeInstant(DateTime v) {
+    final micros = v.toUtc().microsecondsSinceEpoch;
+    final seconds = micros ~/ 1000000;
+    final nanos = (micros % 1000000) * 1000;
+    writeI64(seconds);
+    writeU32(nanos);
+  }
 
   @pragma('vm:prefer-inline')
   void writeOptional<T>(
@@ -496,6 +525,29 @@ class _$$WireReader {
 
   @pragma('vm:prefer-inline')
   String readString() => $$convert.utf8.decode(readUint8List());
+
+  @pragma('vm:prefer-inline')
+  Duration readDuration() {
+    final seconds = readU64();
+    final nanos = readU32();
+    return Duration(microseconds: seconds * 1000000 + nanos ~/ 1000);
+  }
+
+  @pragma('vm:prefer-inline')
+  DateTime readInstant() {
+    final seconds = readI64();
+    final nanos = readU32();
+    return DateTime.fromMicrosecondsSinceEpoch(
+      seconds * 1000000 + nanos ~/ 1000,
+      isUtc: true,
+    );
+  }
+
+  @pragma('vm:prefer-inline')
+  String readUuid() => readString();
+
+  @pragma('vm:prefer-inline')
+  Uri readUri() => Uri.parse(readString());
 
   @pragma('vm:prefer-inline')
   T? readOptional<T>(T Function(_$$WireReader) onSome) {

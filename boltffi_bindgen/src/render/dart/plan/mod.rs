@@ -28,6 +28,13 @@ pub struct DartConstructor {
     pub kind: DartConstructorKind,
     pub params: Vec<DartFunctionParam>,
     pub is_fallible: bool,
+    /// Whether the native call this constructor drives is async. Dart
+    /// `factory` constructors cannot be `async`/return a `Future`, so this
+    /// currently only gates a clear "unsupported" body — see `body`.
+    pub is_async: bool,
+    /// The full Dart source of the constructor body (the statements between
+    /// its braces), already assembled by the lowerer's call-body renderer.
+    pub body: String,
 }
 
 #[derive(Debug, Clone)]

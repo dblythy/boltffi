@@ -41,10 +41,19 @@ pub struct DartFunctionParam {
 #[derive(Debug, Clone)]
 pub struct DartFunction {
     pub name: String,
-    pub ffi_name: String,
+    /// The `@Native`-declared binding this method calls through (and, for
+    /// async methods, its poll/complete/cancel/free siblings) — rendered via
+    /// `native_function.txt`, the same template constructors and streams use.
+    pub native: DartNativeFunction,
     pub params: Vec<DartFunctionParam>,
     pub ret_ty: super::DartType,
     pub receiver: Receiver,
+    /// Whether the native call this method drives is async; the template
+    /// wraps `ret_ty` in `Future<...>` when set.
+    pub is_async: bool,
+    /// The full Dart source of the method body (the statements between its
+    /// braces), already assembled by the lowerer's call-body renderer.
+    pub body: String,
 }
 
 impl DartFunction {

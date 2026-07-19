@@ -81,26 +81,40 @@ final class {{ record.name }}{% if record.is_error %} implements Exception{% end
   }
 {% endmatch -%}
 {%- for ctor in record.constructors %}
+{% let cfunc = ctor.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
+{%- for meth in record.methods %}
+{% let cfunc = meth.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
+{%- for ctor in record.constructors %}
 {%- match ctor.kind %}
 {% when super::DartConstructorKind::Default %}
   factory {{ record.name }}(
 {%- for param in ctor.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ ctor.body }}
+  }
 {% when super::DartConstructorKind::Named with { name: ctor_name } %}
   factory {{ record.name }}.{{ ctor_name }}(
 {%- for param in ctor.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ ctor.body }}
+  }
 {% endmatch -%}
 {% endfor -%}
 {%- for meth in record.methods %}
-  {% if meth.is_static() %}static {% endif %}{{ meth.ret_ty.dart_type() }} {{ meth.name }}(
+  {% if meth.is_static() %}static {% endif %}{% if meth.is_async %}Future<{{ meth.ret_ty.dart_type() }}>{% else %}{{ meth.ret_ty.dart_type() }}{% endif %} {{ meth.name }}(
 {%- for param in meth.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ meth.body }}
+  }
 {% endfor -%}
 }
