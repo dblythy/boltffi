@@ -69,6 +69,11 @@ export const {{ name }} = {
 {%- for method in methods %}
 
 {{ crate::render::typescript::templates::ts_doc_block(method.doc, "  ") }}  {% if method.is_async() %}async {% endif %}{{ method.ts_name }}({% for param in method.params %}{{ param.name }}: {{ param.ts_type }}{% if !loop.last %}, {% endif %}{% endfor %}): {% if method.is_async() %}Promise<{% match method.return_type %}{% when Some with (t) %}{{ t }}{% when None %}void{% endmatch %}>{% else %}{% match method.return_type %}{% when Some with (t) %}{{ t }}{% when None %}void{% endmatch %}{% endif %} {
+{%- if method.native_async_wrapper_unsupported() %}
+    throw new Error(
+      "native async mode does not yet support parameters requiring wasm-linear-memory allocation ({{ method.ts_name }})"
+    );
+{%- else %}
 {%- if !method.wrapper_code().is_empty() %}
     {{ method.wrapper_code() }}
 {%- endif %}
@@ -121,6 +126,40 @@ export const {{ name }} = {
 {%- endif %}
 {%- when TsValueTypeMethodMode::Async with (async_method) %}
     const handle = (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }});
+{%- if async_method.native_async %}
+    const awaitedHandle = await _module.asyncManager.pollAsyncNative(
+      handle,
+      (h: bigint, callbackData: bigint, callback: unknown) =>
+        (_exports.{{ async_method.poll_ffi_name }} as Function)(h, callbackData, callback)
+    );
+{%- if async_method.return_route.is_void() %}
+    try {
+      const statusBuf = new Uint8Array(4);
+      (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
+      const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+      if (statusCode !== 0) {
+        throw new Error(`native async call failed with status ${statusCode}`);
+      }
+    } finally {
+      (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+    }
+{%- elif async_method.return_route.is_async_scalar() %}
+    try {
+      const statusBuf = new Uint8Array(4);
+      const result = (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ async_method.return_route.ts_cast() }};
+      const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+      if (statusCode !== 0) {
+        throw new Error(`native async call failed with status ${statusCode}`);
+      }
+      return result;
+    } finally {
+      (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+    }
+{%- else %}
+    (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+    throw new Error("native async mode does not yet support buffer-encoded return routes");
+{%- endif %}
+{%- else %}
     const awaitedHandle = await _module.asyncManager.pollAsync(
       handle,
       (futureHandle: number) => (_exports.{{ async_method.poll_sync_ffi_name }} as Function)(futureHandle),
@@ -189,6 +228,7 @@ export const {{ name }} = {
     (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
     throw new Error("Unsupported async return route: RawPacked {{ async_method.return_route.decode_expr() }}");
 {%- endif %}
+{%- endif %}
 {%- endmatch %}
 {%- else %}
 {%- match method.mode %}
@@ -244,6 +284,40 @@ export const {{ name }} = {
 {%- when TsValueTypeMethodMode::Async with (async_method) %}
     try {
       const handle = (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }});
+{%- if async_method.native_async %}
+      const awaitedHandle = await _module.asyncManager.pollAsyncNative(
+        handle,
+        (h: bigint, callbackData: bigint, callback: unknown) =>
+          (_exports.{{ async_method.poll_ffi_name }} as Function)(h, callbackData, callback)
+      );
+{%- if async_method.return_route.is_void() %}
+      try {
+        const statusBuf = new Uint8Array(4);
+        (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
+        const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+        if (statusCode !== 0) {
+          throw new Error(`native async call failed with status ${statusCode}`);
+        }
+      } finally {
+        (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+      }
+{%- elif async_method.return_route.is_async_scalar() %}
+      try {
+        const statusBuf = new Uint8Array(4);
+        const result = (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ async_method.return_route.ts_cast() }};
+        const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+        if (statusCode !== 0) {
+          throw new Error(`native async call failed with status ${statusCode}`);
+        }
+        return result;
+      } finally {
+        (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+      }
+{%- else %}
+      (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+      throw new Error("native async mode does not yet support buffer-encoded return routes");
+{%- endif %}
+{%- else %}
       const awaitedHandle = await _module.asyncManager.pollAsync(
         handle,
         (futureHandle: number) => (_exports.{{ async_method.poll_sync_ffi_name }} as Function)(futureHandle),
@@ -312,10 +386,12 @@ export const {{ name }} = {
       (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
       throw new Error("Unsupported async return route: RawPacked {{ async_method.return_route.decode_expr() }}");
 {%- endif %}
+{%- endif %}
     } finally {
       {{ method.cleanup_code() }}
     }
 {%- endmatch %}
+{%- endif %}
 {%- endif %}
   },
 {%- endfor %}

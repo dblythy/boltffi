@@ -1299,11 +1299,13 @@ mod tests {
                     return_callback: None,
                     mode: TsClassMethodMode::Async(TsClassAsyncMethod {
                         poll_sync_ffi_name: "boltffi_counter_next_value_poll_sync".to_string(),
+                        poll_ffi_name: "boltffi_counter_next_value_poll".to_string(),
                         complete_ffi_name: "boltffi_counter_next_value_complete".to_string(),
                         panic_message_ffi_name: "boltffi_counter_next_value_panic_message"
                             .to_string(),
                         cancel_ffi_name: "boltffi_counter_next_value_cancel".to_string(),
                         free_ffi_name: "boltffi_counter_next_value_free".to_string(),
+                        native_async: false,
                         return_route: TsOutputRoute::packed("reader.readI32()".to_string()),
                     }),
                     throws: false,
@@ -1398,10 +1400,12 @@ mod tests {
                 return_callback: None,
                 mode: TsClassMethodMode::Async(TsClassAsyncMethod {
                     poll_sync_ffi_name: "boltffi_counter_next_value_poll_sync".to_string(),
+                    poll_ffi_name: "boltffi_counter_next_value_poll".to_string(),
                     complete_ffi_name: "boltffi_counter_next_value_complete".to_string(),
                     panic_message_ffi_name: "boltffi_counter_next_value_panic_message".to_string(),
                     cancel_ffi_name: "boltffi_counter_next_value_cancel".to_string(),
                     free_ffi_name: "boltffi_counter_next_value_free".to_string(),
+                    native_async: false,
                     return_route: TsOutputRoute::packed("reader.readI32()".to_string()),
                 }),
                 throws: false,
@@ -1440,10 +1444,12 @@ mod tests {
                 return_callback: None,
                 mode: TsClassMethodMode::Async(TsClassAsyncMethod {
                     poll_sync_ffi_name: "boltffi_database_query_poll_sync".to_string(),
+                    poll_ffi_name: "boltffi_database_query_poll".to_string(),
                     complete_ffi_name: "boltffi_database_query_complete".to_string(),
                     panic_message_ffi_name: "boltffi_database_query_panic_message".to_string(),
                     cancel_ffi_name: "boltffi_database_query_cancel".to_string(),
                     free_ffi_name: "boltffi_database_query_free".to_string(),
+                    native_async: false,
                     return_route: TsOutputRoute::packed(
                         "QueryResultCodec.decode(reader)".to_string(),
                     ),
@@ -1698,10 +1704,12 @@ mod tests {
                 return_callback: None,
                 mode: TsClassMethodMode::Async(TsClassAsyncMethod {
                     poll_sync_ffi_name: "boltffi_database_query_poll_sync".to_string(),
+                    poll_ffi_name: "boltffi_database_query_poll".to_string(),
                     complete_ffi_name: "boltffi_database_query_complete".to_string(),
                     panic_message_ffi_name: "boltffi_database_query_panic_message".to_string(),
                     cancel_ffi_name: "boltffi_database_query_cancel".to_string(),
                     free_ffi_name: "boltffi_database_query_free".to_string(),
+                    native_async: false,
                     return_route: TsOutputRoute::packed(
                         "QueryResultCodec.decode(reader)".to_string(),
                     ),
@@ -1777,11 +1785,13 @@ mod tests {
                 return_callback: None,
                 mode: TsClassMethodMode::Async(TsClassAsyncMethod {
                     poll_sync_ffi_name: "boltffi_map_try_clone_async_poll_sync".to_string(),
+                    poll_ffi_name: "boltffi_map_try_clone_async_poll".to_string(),
                     complete_ffi_name: "boltffi_map_try_clone_async_complete".to_string(),
                     panic_message_ffi_name: "boltffi_map_try_clone_async_panic_message"
                         .to_string(),
                     cancel_ffi_name: "boltffi_map_try_clone_async_cancel".to_string(),
                     free_ffi_name: "boltffi_map_try_clone_async_free".to_string(),
+                    native_async: false,
                     return_route: TsOutputRoute::packed("reader.readU64()".to_string()),
                 }),
                 throws: true,
@@ -1803,5 +1813,264 @@ mod tests {
             !rendered.contains("return null;"),
             "a throwing async method must never silently return null; got:\n{rendered}"
         );
+    }
+
+    // react-native track (docs/tracks/react-native.md), stage 3 -- class methods are the
+    // remaining native_async gap async_function.txt already closed for top-level functions
+    // (ParseClient IS a class, so class-method dispatch must support native_async too, not just
+    // free functions). Mirrors the `native_async_scalar_template` free-function coverage above,
+    // one test per return-route branch class.txt's new native_async arm can take.
+
+    fn class_with_native_async_method(
+        native_async: bool,
+        return_route: TsOutputRoute,
+        params: Vec<TsParam>,
+        cleanup_code_param: Option<TsParam>,
+    ) -> TsClass {
+        let mut method_params = params;
+        if let Some(p) = cleanup_code_param {
+            method_params.push(p);
+        }
+        TsClass {
+            class_name: "Counter".to_string(),
+            ffi_free: "boltffi_counter_free".to_string(),
+            constructors: vec![],
+            methods: vec![TsClassMethod {
+                ts_name: "delayedAdd".to_string(),
+                ffi_name: "boltffi_method_class_counter_delayed_add".to_string(),
+                is_static: false,
+                params: method_params,
+                return_type: Some("number".to_string()),
+                return_handle: None,
+                return_callback: None,
+                mode: TsClassMethodMode::Async(TsClassAsyncMethod {
+                    poll_sync_ffi_name: "boltffi_async_method_class_counter_delayed_add_poll_sync"
+                        .to_string(),
+                    poll_ffi_name: "boltffi_async_method_class_counter_delayed_add_poll"
+                        .to_string(),
+                    complete_ffi_name: "boltffi_async_method_class_counter_delayed_add_complete"
+                        .to_string(),
+                    panic_message_ffi_name:
+                        "boltffi_async_method_class_counter_delayed_add_panic_message"
+                            .to_string(),
+                    cancel_ffi_name: "boltffi_async_method_class_counter_delayed_add_cancel"
+                        .to_string(),
+                    free_ffi_name: "boltffi_async_method_class_counter_delayed_add_free"
+                        .to_string(),
+                    native_async,
+                    return_route,
+                }),
+                throws: false,
+                doc: None,
+            }],
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn class_native_async_scalar_return_dispatches_through_poll_async_native() {
+        let class = class_with_native_async_method(
+            true,
+            TsOutputRoute::async_scalar(String::new()),
+            vec![],
+            None,
+        );
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains("_module.asyncManager.pollAsyncNative("));
+        assert!(rendered.contains("boltffi_async_method_class_counter_delayed_add_poll"));
+        assert!(rendered.contains("boltffi_async_method_class_counter_delayed_add_complete"));
+        assert!(rendered.contains("boltffi_async_method_class_counter_delayed_add_free"));
+        assert!(!rendered.contains("poll_sync"));
+        assert!(!rendered.contains("panic_message"));
+        assert!(!rendered.contains("_module.completeAsync"));
+        assert!(rendered.contains("new DataView(statusBuf.buffer).getInt32(0, true)"));
+    }
+
+    #[test]
+    fn class_native_async_void_return_completes_and_frees() {
+        let class =
+            class_with_native_async_method(true, TsOutputRoute::void(), vec![], None);
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains("_module.asyncManager.pollAsyncNative("));
+        assert!(
+            rendered.contains(
+                "(_exports.boltffi_async_method_class_counter_delayed_add_complete as Function)(awaitedHandle, statusBuf);"
+            )
+        );
+        assert!(
+            rendered.contains(
+                "(_exports.boltffi_async_method_class_counter_delayed_add_free as Function)(awaitedHandle);"
+            )
+        );
+    }
+
+    #[test]
+    fn class_native_async_buffer_encoded_return_is_a_loud_unsupported_error() {
+        let class = class_with_native_async_method(
+            true,
+            TsOutputRoute::packed("reader.readI32()".to_string()),
+            vec![],
+            None,
+        );
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains("does not yet support buffer-encoded return routes"));
+    }
+
+    #[test]
+    fn class_native_async_wrapper_code_param_is_a_loud_unsupported_error() {
+        let class = class_with_native_async_method(
+            true,
+            TsOutputRoute::async_scalar(String::new()),
+            vec![TsParam {
+                name: "sql".to_string(),
+                ts_type: "string".to_string(),
+                input_route: TsInputRoute::String,
+            }],
+            None,
+        );
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains(
+            "native async mode does not yet support parameters requiring wasm-linear-memory allocation"
+        ));
+        assert!(!rendered.contains("pollAsyncNative("));
+        assert!(!rendered.contains("_module.allocString"));
+    }
+
+    #[test]
+    fn class_native_async_method_with_cleanup_needing_param_hits_the_wrapper_guard_not_a_crash() {
+        // Unlike a free function's `AsyncFunctionTemplate` (where `wrapper_code`/`cleanup_code`
+        // are independent raw-string template fields a test can set separately), a class
+        // method's `wrapper_code()`/`cleanup_code()` are both DERIVED from the same `TsParam`
+        // list: every `TsInputRoute` that produces cleanup code (`String`, `Bytes`,
+        // `PrimitiveBuffer`, ...) also produces wrapper code for that same param. So the
+        // `cleanup_code().is_empty() == false` Async arm's native_async branch (mirrored into
+        // class.txt/value_type_companion.txt for structural symmetry with the wasm arm) can
+        // never actually be reached by real lowered output today -- any param that would need
+        // it trips `native_async_wrapper_unsupported()` first, which is the safe direction to
+        // fail in (a clear error beats silently ignoring the wasm-only allocation).
+        let class = class_with_native_async_method(
+            true,
+            TsOutputRoute::async_scalar(String::new()),
+            vec![],
+            Some(TsParam {
+                name: "sql".to_string(),
+                ts_type: "string".to_string(),
+                input_route: TsInputRoute::String,
+            }),
+        );
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains(
+            "native async mode does not yet support parameters requiring wasm-linear-memory allocation"
+        ));
+        assert!(!rendered.contains("pollAsyncNative("));
+    }
+
+    #[test]
+    fn class_default_native_async_false_keeps_wasm_dispatch_unchanged() {
+        let class = class_with_native_async_method(
+            false,
+            TsOutputRoute::async_scalar(String::new()),
+            vec![],
+            None,
+        );
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains("_module.asyncManager.pollAsync("));
+        assert!(!rendered.contains("pollAsyncNative"));
+    }
+
+    fn record_with_native_async_method(
+        native_async: bool,
+        return_route: TsOutputRoute,
+    ) -> (String, Vec<TsValueTypeMethod>) {
+        (
+            "Point".to_string(),
+            vec![TsValueTypeMethod {
+                ts_name: "delayedScale".to_string(),
+                ffi_name: "boltffi_method_value_type_point_delayed_scale".to_string(),
+                is_static: false,
+                params: vec![],
+                return_type: Some("number".to_string()),
+                return_handle: None,
+                return_callback: None,
+                mode: TsValueTypeMethodMode::Async(TsValueTypeAsyncMethod {
+                    poll_sync_ffi_name:
+                        "boltffi_method_value_type_point_delayed_scale_poll_sync".to_string(),
+                    poll_ffi_name: "boltffi_method_value_type_point_delayed_scale_poll"
+                        .to_string(),
+                    complete_ffi_name: "boltffi_method_value_type_point_delayed_scale_complete"
+                        .to_string(),
+                    panic_message_ffi_name:
+                        "boltffi_method_value_type_point_delayed_scale_panic_message".to_string(),
+                    cancel_ffi_name: "boltffi_method_value_type_point_delayed_scale_cancel"
+                        .to_string(),
+                    free_ffi_name: "boltffi_method_value_type_point_delayed_scale_free"
+                        .to_string(),
+                    native_async,
+                    return_route,
+                }),
+                doc: None,
+            }],
+        )
+    }
+
+    #[test]
+    fn value_type_native_async_scalar_return_dispatches_through_poll_async_native() {
+        let (name, methods) =
+            record_with_native_async_method(true, TsOutputRoute::async_scalar(String::new()));
+        let rendered = ValueTypeCompanionTemplate {
+            name: &name,
+            constructors: &[],
+            methods: &methods,
+        }
+        .render()
+        .unwrap();
+
+        assert!(rendered.contains("_module.asyncManager.pollAsyncNative("));
+        assert!(rendered.contains("boltffi_method_value_type_point_delayed_scale_poll"));
+        assert!(rendered.contains("boltffi_method_value_type_point_delayed_scale_complete"));
+        assert!(rendered.contains("boltffi_method_value_type_point_delayed_scale_free"));
+        assert!(!rendered.contains("poll_sync"));
+        assert!(!rendered.contains("_module.completeAsync"));
+    }
+
+    #[test]
+    fn value_type_native_async_void_return_completes_and_frees() {
+        let (name, methods) = record_with_native_async_method(true, TsOutputRoute::void());
+        let rendered = ValueTypeCompanionTemplate {
+            name: &name,
+            constructors: &[],
+            methods: &methods,
+        }
+        .render()
+        .unwrap();
+
+        assert!(rendered.contains("_module.asyncManager.pollAsyncNative("));
+        assert!(
+            rendered.contains(
+                "(_exports.boltffi_method_value_type_point_delayed_scale_free as Function)(awaitedHandle);"
+            )
+        );
+    }
+
+    #[test]
+    fn value_type_default_native_async_false_keeps_wasm_dispatch_unchanged() {
+        let (name, methods) =
+            record_with_native_async_method(false, TsOutputRoute::async_scalar(String::new()));
+        let rendered = ValueTypeCompanionTemplate {
+            name: &name,
+            constructors: &[],
+            methods: &methods,
+        }
+        .render()
+        .unwrap();
+
+        assert!(rendered.contains("_module.asyncManager.pollAsync("));
+        assert!(!rendered.contains("pollAsyncNative"));
     }
 }

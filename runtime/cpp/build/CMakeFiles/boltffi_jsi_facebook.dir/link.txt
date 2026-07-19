@@ -1,0 +1,2 @@
+/usr/bin/ar qc libboltffi_jsi_facebook.a "CMakeFiles/boltffi_jsi_facebook.dir/private/tmp/claude-501/-Users-daniel-Documents-GitHub-parse-core-sdks/7cff2f59-a8d7-4c49-bcc8-0c1f12d8aa7a/scratchpad/rn-jsi-headers/package/ReactCommon/jsi/jsi/jsi.cpp.o" "CMakeFiles/boltffi_jsi_facebook.dir/private/tmp/claude-501/-Users-daniel-Documents-GitHub-parse-core-sdks/7cff2f59-a8d7-4c49-bcc8-0c1f12d8aa7a/scratchpad/rn-jsi-headers/package/ReactCommon/jsi/jsi/jsilib-posix.cpp.o"
+/usr/bin/ranlib libboltffi_jsi_facebook.a
