@@ -1,6 +1,7 @@
 use crate::{
     ir::{
-        AbiCall, AbiContract, CallId, ConstructorDef, FfiContract, FunctionId, MethodDef, ParamDef,
+        AbiCall, AbiContract, CallId, ConstructorDef, FfiContract, FunctionDef, FunctionId,
+        MethodDef, ParamDef, Receiver,
     },
     render::dart::{
         DartConstructor, DartConstructorKind, DartFunction, DartFunctionParam, DartLibrary,
@@ -111,6 +112,42 @@ impl<'a> DartLowerer<'a> {
         }
     }
 
+    /// Lowers one top-level free function (e.g. `set_http_transport`) into its
+    /// public Dart wrapper — the `DartFunction`'s `body` marshals into/out of
+    /// the `_f$<symbol>` native declaration `lower_native_functions` already
+    /// emits for it, via the exact same `call::render_body` a static class
+    /// method's body is built from (`lower_method`, above). A free function
+    /// has no receiver to marshal, so `plan_call` never sees a "self" param —
+    /// `Receiver::Static` here only feeds `DartFunction::is_static`, which the
+    /// top-level function template never consults.
+    fn lower_function(&self, def: &FunctionDef) -> DartFunction {
+        let call_id = CallId::Function(def.id.clone());
+        let abi_call = self.abi_call_for_call_id(&call_id);
+
+        let native = self.lower_one_native_function(abi_call);
+        let return_info = call::DartReturnInfo::for_method(&def.returns);
+        let is_async = matches!(abi_call.mode, crate::ir::CallMode::Async(_));
+        let body = call::render_body(abi_call, &native.return_type, &return_info, false);
+
+        DartFunction {
+            name: NamingConvention::function_name(def.id.as_str()),
+            native,
+            params: def.params.iter().map(|p| self.lower_param(p)).collect(),
+            ret_ty: DartType::from_return_def(&def.returns, &self.ffi.catalog),
+            receiver: Receiver::Static,
+            is_async,
+            body,
+        }
+    }
+
+    fn lower_functions(&self) -> Vec<DartFunction> {
+        self.ffi
+            .functions
+            .iter()
+            .map(|f| self.lower_function(f))
+            .collect()
+    }
+
     pub fn library(&self) -> DartLibrary {
         let custom_types = self.lower_custom_types();
         let records = self.lower_records();
@@ -118,6 +155,7 @@ impl<'a> DartLowerer<'a> {
         let enums = self.lower_enums();
         let callbacks = self.lower_callbacks();
         let classes = self.lower_classes();
+        let functions = self.lower_functions();
 
         DartLibrary {
             custom_types,
@@ -128,6 +166,281 @@ impl<'a> DartLowerer<'a> {
             enums,
             callbacks,
             classes,
+            functions,
         }
+    }
+}
+
+/// One test per shape of top-level free function the ABI contract can
+/// express — parse-core-rs's global setters (`set_http_transport`,
+/// `set_client_platform`, `sdk_version`, `validate_role_name`, ...) exercise
+/// void/scalar/encoded returns, fallible (encoded-error) returns, string and
+/// `BoxedDyn` callback params, and async — the exact matrix that previously
+/// got only a raw `@Native` declaration with no public wrapper.
+#[cfg(test)]
+mod tests {
+    use boltffi_ffi_rules::callable::ExecutionKind;
+
+    use crate::{
+        ir::{
+            CallbackId, CallbackKind, CallbackMethodDef, CallbackTraitDef, FieldDef, FieldName,
+            FunctionDef, FunctionId, MethodId, ParamDef, ParamName, ParamPassing, PrimitiveType,
+            RecordDef, RecordId, ReturnDef, TypeExpr,
+        },
+        render::dart::test,
+    };
+
+    fn string_param(name: &str) -> ParamDef {
+        ParamDef {
+            name: ParamName::new(name),
+            type_expr: TypeExpr::String,
+            passing: ParamPassing::Value,
+            doc: None,
+        }
+    }
+
+    fn parse_error_record() -> RecordDef {
+        RecordDef {
+            id: RecordId::new("ParseError"),
+            is_repr_c: false,
+            is_error: true,
+            fields: vec![FieldDef {
+                name: FieldName::new("message"),
+                type_expr: TypeExpr::String,
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        }
+    }
+
+    #[test]
+    fn free_function_sync_void_renders_top_level_with_no_receiver() {
+        let mut ffi = test::empty_contract();
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("set_client_platform"),
+            params: vec![string_param("tag")],
+            returns: ReturnDef::Void,
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert_eq!(function.name, "setClientPlatform");
+        assert!(!function.is_async);
+        // A free function has no receiver — `plan_call` never substitutes a
+        // "this" the way a class method's `self` param does.
+        assert!(!function.body.contains("this"), "body: {}", function.body);
+        assert!(function.params.iter().any(|p| p.name == "tag"));
+    }
+
+    #[test]
+    fn free_function_sync_scalar_in_and_out() {
+        let mut ffi = test::empty_contract();
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("live_query_reconnect_delay_ms"),
+            params: vec![ParamDef {
+                name: ParamName::new("attempt"),
+                type_expr: TypeExpr::Primitive(PrimitiveType::U32),
+                passing: ParamPassing::Value,
+                doc: None,
+            }],
+            returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::U64)),
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert_eq!(function.ret_ty.dart_type(), "int");
+        assert!(!function.is_async);
+        assert!(
+            function.body.contains("return _p$result;"),
+            "body: {}",
+            function.body
+        );
+    }
+
+    #[test]
+    fn free_function_encoded_string_return_frees_the_wire_buffer() {
+        let mut ffi = test::empty_contract();
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("sdk_version"),
+            params: vec![],
+            returns: ReturnDef::Value(TypeExpr::String),
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert_eq!(function.ret_ty.dart_type(), "String");
+        assert!(
+            function.body.contains("_f$boltffi_free_buf(_p$result);"),
+            "body: {}",
+            function.body
+        );
+    }
+
+    #[test]
+    fn free_function_fallible_encoded_error_returns_bolt_ffi_result_not_a_throw() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_record(parse_error_record());
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("validate_role_name"),
+            params: vec![string_param("name")],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::Void,
+                err: TypeExpr::Record(RecordId::new("ParseError")),
+            },
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert_eq!(
+            function.ret_ty.dart_type(),
+            "BoltFFIResult<void, ParseError>"
+        );
+        // Exactly one `readResult` (the whole tag+ok+err decode is one unit —
+        // see the regression note on `call::decode_return`), and a free
+        // function's declared return type is the `BoltFFIResult` itself
+        // (never unwrap-or-throw — that's constructor-only).
+        assert_eq!(
+            function.body.matches("readResult").count(),
+            1,
+            "body: {}",
+            function.body
+        );
+        assert!(
+            !function.body.contains("okOrThrow"),
+            "body: {}",
+            function.body
+        );
+    }
+
+    fn boxed_dyn_callback(id: &str) -> CallbackTraitDef {
+        CallbackTraitDef {
+            id: CallbackId::new(id),
+            methods: vec![CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: MethodId::new("fetch"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: CallbackKind::Trait,
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn free_function_boxed_dyn_callback_param_boxes_through_the_handle_map() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog
+            .insert_callback(boxed_dyn_callback("HttpTransport"));
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("set_http_transport"),
+            params: vec![ParamDef {
+                name: ParamName::new("transport"),
+                type_expr: TypeExpr::Callback(CallbackId::new("HttpTransport")),
+                passing: ParamPassing::BoxedDyn,
+                doc: None,
+            }],
+            returns: ReturnDef::Void,
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert_eq!(function.name, "setHttpTransport");
+        assert!(
+            function
+                .body
+                .contains("HttpTransportHandleMap.createHandle(transport)"),
+            "body: {}",
+            function.body
+        );
+        assert!(
+            !function.body.contains("UnsupportedError"),
+            "body: {}",
+            function.body
+        );
+    }
+
+    #[test]
+    fn free_function_async_drives_bolt_ffi_async_create() {
+        let mut ffi = test::empty_contract();
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("fetch_remote_config"),
+            params: vec![],
+            returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::U32)),
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert!(function.is_async);
+        assert_eq!(function.ret_ty.dart_type(), "int");
+        assert!(
+            function.body.contains("_$$BoltFFIAsync.create("),
+            "body: {}",
+            function.body
+        );
+        assert!(
+            function.body.contains("completeFuture: (handle)"),
+            "body: {}",
+            function.body
+        );
+    }
+
+    #[test]
+    fn free_function_async_fallible_wraps_bolt_ffi_result() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_record(parse_error_record());
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("fetch_session"),
+            params: vec![],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::String,
+                err: TypeExpr::Record(RecordId::new("ParseError")),
+            },
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let function = &library.functions[0];
+
+        assert!(function.is_async);
+        assert_eq!(
+            function.ret_ty.dart_type(),
+            "BoltFFIResult<String, ParseError>"
+        );
+        assert!(
+            function.body.contains("_$$BoltFFIAsync.create("),
+            "body: {}",
+            function.body
+        );
     }
 }

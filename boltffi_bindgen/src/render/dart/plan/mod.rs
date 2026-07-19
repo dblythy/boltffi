@@ -45,4 +45,8 @@ pub struct DartLibrary {
     pub enums: Vec<DartEnum>,
     pub callbacks: Vec<DartCallback>,
     pub classes: Vec<DartClass>,
+    /// Top-level free functions (e.g. `set_http_transport`-style global
+    /// setters) — public wrappers over the `@Native` declarations already
+    /// emitted for `native.functions`. Not part of any class.
+    pub functions: Vec<DartFunction>,
 }

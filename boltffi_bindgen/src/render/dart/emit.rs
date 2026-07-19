@@ -10,7 +10,7 @@ use crate::{
         templates::{
             BuildHookTemplate, CallbackTemplate, ClassTemplate, CustomTypesTemplate,
             EnhancedEnumTemplate, NativeFunctionsTemplate, PreludeTemplate, PubspecTemplate,
-            RecordTemplate, SealedClassEnumTemplate,
+            RecordTemplate, SealedClassEnumTemplate, TopLevelFunctionsTemplate,
         },
     },
 };
@@ -71,6 +71,16 @@ impl DartEmitter {
         output.push_str(
             NativeFunctionsTemplate {
                 cfuncs: &library.native.functions,
+            }
+            .render()
+            .unwrap()
+            .as_str(),
+        );
+
+        output.push_str("\n\n");
+        output.push_str(
+            TopLevelFunctionsTemplate {
+                functions: &library.functions,
             }
             .render()
             .unwrap()
