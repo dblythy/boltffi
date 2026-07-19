@@ -8,6 +8,7 @@ use crate::{
     },
 };
 
+mod call;
 mod callback;
 mod class;
 mod custom_type;
@@ -57,6 +58,20 @@ impl<'a> DartLowerer<'a> {
 
         let native = self.lower_one_native_function(abi_call);
 
+        let self_type_name = match &id {
+            CallId::Constructor { class_id, .. } => NamingConvention::class_name(class_id.as_str()),
+            CallId::RecordConstructor { record_id, .. } => {
+                NamingConvention::class_name(record_id.as_str())
+            }
+            CallId::EnumConstructor { enum_id, .. } => {
+                NamingConvention::class_name(enum_id.as_str())
+            }
+            _ => unreachable!("constructor CallId is always a *Constructor variant"),
+        };
+        let return_info = call::DartReturnInfo::for_constructor(ctor.is_fallible(), self_type_name);
+        let is_async = matches!(abi_call.mode, crate::ir::CallMode::Async(_));
+        let body = call::render_body(abi_call, &native.return_type, &return_info, true);
+
         DartConstructor {
             native,
             params: ctor
@@ -72,18 +87,27 @@ impl<'a> DartLowerer<'a> {
                 },
             },
             is_fallible: ctor.is_fallible(),
+            is_async,
+            body,
         }
     }
 
     fn lower_method(&self, meth: &MethodDef, id: CallId) -> DartFunction {
         let abi_call = self.abi_call_for_call_id(&id);
 
+        let native = self.lower_one_native_function(abi_call);
+        let return_info = call::DartReturnInfo::for_method(&meth.returns);
+        let is_async = matches!(abi_call.mode, crate::ir::CallMode::Async(_));
+        let body = call::render_body(abi_call, &native.return_type, &return_info, false);
+
         DartFunction {
             name: NamingConvention::function_name(meth.id.as_str()),
-            ffi_name: abi_call.symbol.to_string(),
+            native,
             params: meth.params.iter().map(|p| self.lower_param(p)).collect(),
             ret_ty: DartType::from_return_def(&meth.returns, &self.ffi.catalog),
             receiver: meth.receiver,
+            is_async,
+            body,
         }
     }
 

@@ -3,18 +3,12 @@
 >(symbol: '{{ class.free_symbol }}', isLeaf: true)
 external void _f${{ class.free_symbol }}($$ffi.Pointer<$$ffi.Void> handle);
 {% for ctor in class.constructors %}
-@$$ffi.Native<
-  {{ ctor.native.return_type.native_type() }} Function(
-{%- for param in ctor.native.params %}
-    {{ param.native_type.native_type() }},
+{% let cfunc = ctor.native %}
+{% include "native_function.txt" %}
 {%- endfor %}
-  )
->(symbol: '{{ ctor.native.symbol }}'{%if ctor.native.is_leaf %}, isLeaf: true{% endif %})
-external {{ ctor.native.return_type.dart_sub_type() }} _f${{ ctor.native.symbol }}(
-{%- for param in ctor.native.params %}
-  {{ param.native_type.dart_sub_type() }} {{ param.name }},
-{%- endfor %}
-);
+{%- for meth in class.methods %}
+{% let cfunc = meth.native %}
+{% include "native_function.txt" %}
 {%- endfor %}
 {%- for stream in class.streams %}
 {% let cfunc = stream.subscribe_fn %}
@@ -47,21 +41,27 @@ final class {{ class.name }} implements $$ffi.Finalizable {
 {%- for param in ctor.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ ctor.body }}
+  }
 {% when super::DartConstructorKind::Named with { name: ctor_name } %}
   factory {{ class.name }}.{{ ctor_name }}(
 {%- for param in ctor.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ ctor.body }}
+  }
 {% endmatch -%}
 {% endfor -%}
 {%- for meth in class.methods %}
-  {% if meth.is_static() %}static {% endif %}{{ meth.ret_ty.dart_type() }} {{ meth.name }}(
+  {% if meth.is_static() %}static {% endif %}{% if meth.is_async %}Future<{{ meth.ret_ty.dart_type() }}>{% else %}{{ meth.ret_ty.dart_type() }}{% endif %} {{ meth.name }}(
 {%- for param in meth.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ meth.body }}
+  }
 {% endfor -%}
 {% for stream in class.streams %}
 {%- match stream.mode %}

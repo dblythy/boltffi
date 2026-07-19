@@ -181,7 +181,7 @@ pub fn type_expr_dart_type(ty: &TypeExpr) -> String {
         TypeExpr::Custom(id) => render_type_name(id.as_str()),
         TypeExpr::Builtin(id) => match id.as_str() {
             "Duration" => "Duration".to_string(),
-            "SystemTime" => "Datetime".to_string(),
+            "SystemTime" => "DateTime".to_string(),
             "Uuid" => "String".to_string(),
             "Url" => "Uri".to_string(),
             _ => "String".to_string(),
@@ -383,7 +383,13 @@ fn emit_writer_vec(
 ) -> String {
     match layout {
         VecLayout::Blittable { .. } => match element_type {
-            TypeExpr::Primitive(..) => format!("{writer_name}.writeTypedList({value});"),
+            // The reader side (`readUint8List`/`readInt32List`/...) always
+            // reads a `u32` element count before the raw bytes; write it
+            // here too, or every blittable-vec field/param decodes with its
+            // first 4 data bytes misread as the length.
+            TypeExpr::Primitive(..) => format!(
+                "{writer_name}.writeU32({value}.length);\n{writer_name}.writeTypedList({value});"
+            ),
             _ => {
                 let inner_write_expr = emit_writer_write(element, writer_name, "item");
                 format!(
@@ -563,11 +569,11 @@ pub fn emit_reader_read(seq: &ReadSeq, reader_name: &str) -> String {
             )
         }
         ReadOp::Builtin { id, .. } => match id.as_str() {
-            "Duration" => "reader.readDuration()".to_string(),
-            "SystemTime" => "reader.readInstant()".to_string(),
-            "Uuid" => "reader.readUuid()".to_string(),
-            "Url" => "reader.readUri()".to_string(),
-            _ => "reader.readString()".to_string(),
+            "Duration" => format!("{reader_name}.readDuration()"),
+            "SystemTime" => format!("{reader_name}.readInstant()"),
+            "Uuid" => format!("{reader_name}.readUuid()"),
+            "Url" => format!("{reader_name}.readUri()"),
+            _ => format!("{reader_name}.readString()"),
         },
         ReadOp::Custom { underlying, .. } => emit_reader_read(underlying, reader_name),
     }
@@ -627,10 +633,12 @@ fn emit_vec_size(value: &str, inner: &SizeExpr, layout: &VecLayout) -> String {
 }
 
 fn emit_builtin_size(id: &BuiltinId, value: &str) -> String {
-    if id.as_str() == "Url" {
-        format!("{}.toString().length * 3", value)
-    } else {
-        format!("{}._m$wireEncodedSize()", value)
+    match id.as_str() {
+        // 8-byte seconds + 4-byte nanos (`writeDuration`/`writeInstant`).
+        "Duration" | "SystemTime" => "12".to_string(),
+        "Uuid" => format!("(4 + {}.length * 3)", value),
+        "Url" => format!("(4 + {}.toString().length * 3)", value),
+        _ => format!("{}._m$wireEncodedSize()", value),
     }
 }
 
@@ -638,8 +646,15 @@ pub fn emit_size_expr(size: &SizeExpr) -> String {
     match size {
         SizeExpr::Fixed(value) => value.to_string(),
         SizeExpr::Runtime => "0".to_string(),
-        SizeExpr::StringLen(value) => format!("({}.length * 3)", render_value(value)),
-        SizeExpr::BytesLen(value) => format!("{}.length", render_value(value)),
+        // `writeString`/`writeTypedList`-of-bytes both lead with a 4-byte
+        // `writeU32(length)` prefix (see `_$$WireWriter`); the size must
+        // include it or the scratch buffer under-allocates and every write
+        // past the missing 4 bytes runs past the end of the calloc'd
+        // buffer (`ops.rs`'s own `SizeExpr::StringLen`/`BytesLen` doc
+        // comments spell out the same "4 bytes for the length prefix plus
+        // ..." contract this was missing).
+        SizeExpr::StringLen(value) => format!("(4 + {}.length * 3)", render_value(value)),
+        SizeExpr::BytesLen(value) => format!("(4 + {}.length)", render_value(value)),
         SizeExpr::ValueSize(value) => render_value(value),
         SizeExpr::WireSize { value, .. } => format!("{}._m$wireEncodedSize()", render_value(value)),
         SizeExpr::BuiltinSize { id, value } => emit_builtin_size(id, &render_value(value)),

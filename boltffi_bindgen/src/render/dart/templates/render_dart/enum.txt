@@ -1,3 +1,11 @@
+{%- for ctor in dart_enum.constructors %}
+{% let cfunc = ctor.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
+{%- for meth in dart_enum.methods %}
+{% let cfunc = meth.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
 enum {{ dart_enum.name }}{% if dart_enum.is_error %} implements Exception{% endif %} {
 {%- for variant in dart_enum.variants %}
   {{ variant.name }}({{ variant.tag }}){%- if !loop.last %},{%- else %};{%- endif %}
@@ -35,20 +43,26 @@ enum {{ dart_enum.name }}{% if dart_enum.is_error %} implements Exception{% endi
 {%- for param in ctor.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ ctor.body }}
+  }
 {% when super::DartConstructorKind::Named with { name: ctor_name } %}
   factory {{ dart_enum.name }}.{{ ctor_name }}(
 {%- for param in ctor.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ ctor.body }}
+  }
 {% endmatch -%}
 {% endfor -%}
 {%- for meth in dart_enum.methods %}
-  {% if meth.is_static() %}static {% endif %}{{ meth.ret_ty.dart_type() }} {{ meth.name }}(
+  {% if meth.is_static() %}static {% endif %}{% if meth.is_async %}Future<{{ meth.ret_ty.dart_type() }}>{% else %}{{ meth.ret_ty.dart_type() }}{% endif %} {{ meth.name }}(
 {%- for param in meth.params %}
     {{ param.ty.dart_type() }} {{ param.name }},
 {%- endfor %}
-  ) {}
+  ) {
+{{ meth.body }}
+  }
 {% endfor -%}
 }
