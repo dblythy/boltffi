@@ -336,7 +336,7 @@ impl DartType {
             DartType::Enum(enum_id) => enum_id.to_string(),
             DartType::Callback(callback_id) => callback_id.to_string(),
             DartType::Custom(custom_type_id) => custom_type_id.to_string(),
-            DartType::Builtin(builtin_id) => builtin_id.to_string(),
+            DartType::Builtin(builtin_id) => emit::builtin_dart_type(builtin_id),
         }
     }
 }

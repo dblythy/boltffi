@@ -107,10 +107,16 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                     NamingConvention::param_name(param.name.as_str())
                 };
                 match transport {
-                    Transport::Scalar(origin) => {
-                        let expr = if origin.primitive() == crate::ir::PrimitiveType::Bool {
-                            format!("({dart_name} ? 1 : 0)")
-                        } else if is_cstyle_enum(transport) {
+                    Transport::Scalar(_) => {
+                        // A direct scalar native param (`$$ffi.Bool`,
+                        // `$$ffi.Int32`, ...) already marshals to/from the
+                        // matching Dart type (`bool`, `int`, ...) — dart:ffi
+                        // itself does that conversion. No manual
+                        // int/bool juggling here (that's only needed for
+                        // *blittable-struct* byte access via `ByteData`,
+                        // which has no direct bool accessor — see
+                        // `emit::num_as_primitive`/`primitive_as_num`).
+                        let expr = if is_cstyle_enum(transport) {
                             format!("{dart_name}.value")
                         } else {
                             dart_name
@@ -160,10 +166,23 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                         } else {
                             // Direct scalar-element buffer (e.g. Vec<u8>):
                             // pass the typed list's own backing memory
-                            // (`.length`, not `_$$WireWriter.len`).
-                            setup.push(format!(
-                                "final {var} = {dart_name} is $$typed_data.Uint8List ? {dart_name} : $$typed_data.Uint8List.fromList({dart_name});"
-                            ));
+                            // (`.length`, not `_$$WireWriter.len`). A `Vec<u8>`
+                            // is already publicly typed as `Uint8List`
+                            // (`DartType::from_type_expr`'s `Vec<u8>` case) —
+                            // only non-u8 element vecs (a plain `List<T>`)
+                            // need converting to a typed buffer first.
+                            let is_u8 = matches!(
+                                content,
+                                crate::ir::SpanContent::Scalar(origin)
+                                    if origin.primitive() == crate::ir::PrimitiveType::U8
+                            );
+                            if is_u8 {
+                                setup.push(format!("final {var} = {dart_name};"));
+                            } else {
+                                setup.push(format!(
+                                    "final {var} = $$typed_data.Uint8List.fromList({dart_name});"
+                                ));
+                            }
                             format!("{var}.length")
                         };
                         let ptr_expr = if encode_ops.is_some() || is_utf8 {
@@ -273,8 +292,11 @@ fn decode_return(
                 last_error_throw_stmt()
             )
         }
-        DartNativeType::Primitive(p) => {
-            let value = emit::num_as_primitive(*p, result_expr);
+        DartNativeType::Primitive(_) => {
+            // See the matching note in `plan_call`'s `Transport::Scalar` arm:
+            // a direct scalar native return already comes back as the
+            // matching Dart type, no manual conversion needed here.
+            let value = result_expr.to_string();
             let value = match &dart_return.enum_wrap {
                 Some(enum_class) => format!("{enum_class}._m$fromValue({value})"),
                 None => value,

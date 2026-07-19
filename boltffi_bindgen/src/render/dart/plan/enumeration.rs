@@ -18,6 +18,12 @@ pub struct DartEnumField {
 }
 
 impl DartEnumField {
+    /// See [`DartEnumVariant::display_name`] — same keyword-escaping hazard,
+    /// same fix, for a field's label position in `toString()`.
+    pub fn display_name(&self) -> &str {
+        self.name.strip_prefix('$').unwrap_or(&self.name)
+    }
+
     pub fn wire_decode_expr(&self, reader_name: &str) -> String {
         emit::emit_reader_read(&self.read_seq, reader_name)
     }
@@ -37,6 +43,20 @@ pub struct DartEnumVariant {
     pub class_name: String,
     pub tag: i128,
     pub fields: Vec<DartEnumField>,
+}
+
+impl DartEnumVariant {
+    /// `name`, safe to embed as literal text inside a Dart string.
+    ///
+    /// `name` is a keyword-escaped identifier (`NamingConvention::escape_keyword`
+    /// prefixes a Dart-keyword variant name — e.g. a `Null` Rust variant — with
+    /// `$`, so it can be used as a bare identifier). Splicing that same
+    /// leading `$` into a Dart string literal (as `toString()` does) makes
+    /// Dart treat it as string interpolation syntax instead of a literal
+    /// dollar sign, so this strips it for that one, non-identifier use.
+    pub fn display_name(&self) -> &str {
+        self.name.strip_prefix('$').unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone)]
