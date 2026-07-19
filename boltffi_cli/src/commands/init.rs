@@ -114,6 +114,7 @@ fn create_default_config(package_name: &str) -> Config {
                 architectures: None,
                 kotlin: KotlinConfig {
                     package: Some(format!("com.example.{}", normalized_kotlin_name)),
+                    data_package: None,
                     output: None,
                     module_name: None,
                     library_name: None,

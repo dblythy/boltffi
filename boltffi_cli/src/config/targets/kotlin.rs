@@ -8,8 +8,14 @@ use crate::config::{DebugSymbolsConfig, ErrorStyle, TypeMapping};
 use crate::target::{Architecture, Platform};
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
+#[serde(deny_unknown_fields)]
 pub struct KotlinConfig {
     pub package: Option<String>,
+    /// Package for generated records/enums (the DTO/public-contract surface). Defaults to
+    /// `package` when unset — classes/callbacks/functions (the handle surface) always stay on
+    /// `package`, so only setting this splits the two. The Kotlin analogue of the C# backend's
+    /// `data_namespace`.
+    pub data_package: Option<String>,
     pub output: Option<PathBuf>,
     pub module_name: Option<String>,
     pub library_name: Option<String>,
