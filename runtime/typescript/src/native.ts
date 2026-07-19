@@ -126,10 +126,18 @@ export class NativeAsyncFutureManager<Token = unknown> {
     if (!entry) return;
 
     if (signal === NativeContinuationSignal.MaybeReady) {
-      // Re-issue poll() directly, on whatever thread this callback fired on — no microtask
-      // deferral. The design doc's own PoC proved this is the correct first cut (registration is
-      // cheap/thread-safe; deferring would only add latency, not safety).
-      entry.poll(entry.handle, callbackData, this.trampoline);
+      // Deferred via microtask, NOT re-issued inline. `poll()` invokes its continuation callback
+      // synchronously, at most once per call (boltffi_core::runtime::future::RustFuture::poll) --
+      // but `ContinuationScheduler::store_continuation` (continuation.rs) delivers MaybeReady
+      // synchronously, inline, whenever the scheduler is already `Waked` the instant it runs. That
+      // is not just a rare cross-thread race: any future that (re)wakes itself before returning
+      // `Poll::Pending` (a legitimate pattern -- e.g. one built on a cooperative-yield primitive)
+      // hits it on EVERY poll. Re-issuing `poll()` inline here would then recurse one JS + one
+      // native stack frame per iteration with no bound, for a future that never actually blocks.
+      // A microtask hop trades stack depth for queue depth: each iteration returns to an empty
+      // stack before the next one runs, so the recursion is unbounded in iteration count but
+      // bounded (O(1)) in stack depth.
+      queueMicrotask(() => entry.poll(entry.handle, callbackData, this.trampoline));
       return;
     }
 
@@ -159,6 +167,7 @@ export function readNativeStatusCode(buffer: Uint8Array): number {
  * one) before assuming "internal error" over "panic". */
 export const enum NativeFfiStatus {
   Ok = 0,
+  InvalidArgument = 3,
   Cancelled = 4,
 }
 
@@ -221,6 +230,34 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
     this.exports = exports;
     this.asyncManager = new NativeAsyncFutureManager<Token>(createContinuationTrampoline);
     this.arena = arena;
+    this.bindArenaToHost();
+  }
+
+  /**
+   * Shares the arena's backing `ArrayBuffer` with the host adapter, once now and again every time
+   * the arena grows (replaces the buffer) -- `NativeMemoryArena.setOnGrow`'s contract existed but
+   * was never wired to anything (Codex finding 3, HIGH growth binding): without this, offsets
+   * issued before a grow resolve against the OLD buffer's real native address on the host side
+   * forever, silently reading/writing stale (potentially freed, once GC'd) memory once JS moves on
+   * to the new one.
+   *
+   * The C++ contract this binds to (implemented on the runtime/cpp side, not here): the host's
+   * JSI HostObject exposes an optional `exports.__boltffi_native_bind_arena(buffer: ArrayBuffer):
+   * void` function. It is called once at construction with the arena's initial buffer, and again
+   * with the NEW buffer every time `NativeMemoryArena` grows -- the adapter re-derives the real
+   * native base address each time (e.g. via `jsi::ArrayBuffer::data()`) and uses it to translate
+   * every subsequent arena offset this file hands across the FFI boundary. A host that doesn't
+   * expose this function (the Bun scalar-only test harness, or any test construction) is left
+   * alone -- this file never requires it.
+   */
+  private bindArenaToHost(): void {
+    const exportsRecord = this.exports as Record<string, unknown>;
+    const bindArena = exportsRecord["__boltffi_native_bind_arena"] as
+      | ((buffer: ArrayBuffer) => void)
+      | undefined;
+    if (!bindArena) return;
+    bindArena(this.arena.buffer);
+    this.arena.setOnGrow((buffer) => bindArena(buffer));
   }
 
   // ---- scalar scratch (mirrors BoltFFIModule.allocStatus/readStatus/freeStatus, made public
@@ -241,17 +278,43 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
     this.arena.dataView.setInt32(statusPtr, 0, true);
     try {
       const result = complete(statusPtr);
-      const status = this.arena.dataView.getInt32(statusPtr, true);
-      if (status === 4) {
-        throw new BoltFFICancelledError();
-      }
-      if (status !== 0) {
-        throw new Error(`native async call failed with status ${status}`);
-      }
+      this.checkStatus(this.arena.dataView.getInt32(statusPtr, true));
       return result;
     } finally {
       this.arena.free(statusPtr, 4);
     }
+  }
+
+  /** Reads the little-endian `FfiStatus.code` a native `_complete` export wrote into a status
+   * buffer -- the instance-method form of the standalone `readNativeStatusCode` (usable directly
+   * by name from generated code via `_module.readStatusCode(...)`, matching every other
+   * `_module.xxx(...)` call site). */
+  readStatusCode(buffer: Uint8Array): number {
+    return readNativeStatusCode(buffer);
+  }
+
+  /**
+   * The ONE place every native-async return route (packed-buffer via `completeAsync` above, AND
+   * the void/scalar routes that skip the arena and pass a raw status buffer straight to the
+   * native `_complete` export) checks an `FfiStatus` code -- so cancellation/invalid-argument
+   * report the same error class regardless of which return route a method happens to use (Codex
+   * finding 5, MEDIUM status semantics: before this, the void/scalar branches hand-rolled their
+   * own `statusCode !== 0` check inline in the template and always threw a generic `Error`, never
+   * `BoltFFICancelledError`, and never recognized status 3 at all). Mirrors wasm's
+   * `BoltFFIModule.checkStatus` (module.ts) code-for-code, including status 3's message, so the
+   * two backends' error taxonomies never drift apart per status code.
+   */
+  checkStatus(status: number): void {
+    if (status === 0) {
+      return;
+    }
+    if (status === NativeFfiStatus.InvalidArgument) {
+      throw new Error("invalid argument");
+    }
+    if (status === NativeFfiStatus.Cancelled) {
+      throw new BoltFFICancelledError();
+    }
+    throw new Error(`native async call failed with status ${status}`);
   }
 
   // ---- string/bytes/primitive-array param allocation ----
@@ -472,12 +535,19 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
 
   // ---- takeBuf*/takeSlot*/takePacked* decode-and-free families (mirror BoltFFIModule 1:1) ----
 
+  // `takeBuf*`/`takeBufStructArray` below deliberately do NOT free the payload they read --
+  // matching `BoltFFIModule.takeBufU8Array`/`takeBufStructArray` (module.ts), which only ever
+  // copy bytes out of wasm linear memory. Every call site that decodes a buf descriptor (both
+  // `readerFromBuf` for reader-based routes and these `takeBuf*` calls for the direct
+  // primitive/struct-array routes -- lower.rs's `direct_vec_output_route` buf_decode table and
+  // emit.rs's `composite_buf_decode_expr`) is followed, in the SAME generated `finally` block, by
+  // exactly one `_module.freeBuf(bufPtr)` call that frees both the payload and the descriptor
+  // together. A `takeBuf*` that also freed the payload here double-frees it once that `freeBuf`
+  // runs (regression: two unrelated later allocations could alias the same freed pointer).
+
   takeBufU8Array(bufPtr: number): Uint8Array {
-    const { ptr, len, cap, align } = this.readBufDescriptor(bufPtr);
-    const result = ptr === 0 ? new Uint8Array(0) : this.arena.byteView.slice(ptr, ptr + len);
-    if (ptr !== 0) this.arena.free(ptr, cap || len);
-    void align;
-    return result;
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
+    return ptr === 0 ? new Uint8Array(0) : this.arena.byteView.slice(ptr, ptr + len);
   }
 
   takeBufI8Array(bufPtr: number): Int8Array {
@@ -491,12 +561,10 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
     build: (buffer: ArrayBuffer, byteOffset: number, count: number) => T,
     empty: () => T
   ): T {
-    const { ptr, len, cap, align } = this.readBufDescriptor(bufPtr);
+    const { ptr, len } = this.readBufDescriptor(bufPtr);
     if (ptr === 0) return empty();
-    void align;
     const count = Math.floor(len / bytesPerElement);
     const copy = this.arena.byteView.slice(ptr, ptr + len);
-    this.arena.free(ptr, cap || len);
     return build(copy.buffer, 0, count);
   }
 
@@ -538,11 +606,9 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
   }
 
   takeBufStructArray<T>(bufPtr: number, stride: number, decode: (view: DataView, offset: number) => T): T[] {
-    const { ptr, len: byteLen, cap, align } = this.readBufDescriptor(bufPtr);
+    const { ptr, len: byteLen } = this.readBufDescriptor(bufPtr);
     if (ptr === 0) return [];
-    void align;
     const copy = this.arena.byteView.slice(ptr, ptr + byteLen);
-    this.arena.free(ptr, cap || byteLen);
     const view = new DataView(copy.buffer, copy.byteOffset, copy.byteLength);
     const count = Math.floor(byteLen / stride);
     return Array.from({ length: count }, (_, index) => decode(view, index * stride));
