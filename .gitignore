@@ -36,3 +36,5 @@ benchmarks/generated/**/bindings/
 benchmarks/adapters/uniffi/target/
 benchmarks/adapters/uniffi/dist/
 benchmarks/adapters/uniffi/UniffiPackage/
+runtime/cpp/build/
+runtime/cpp/build_*/

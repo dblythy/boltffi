@@ -1,2 +1,0 @@
-/usr/bin/ar qc libboltffi_jsi_core.a CMakeFiles/boltffi_jsi_core.dir/src/native_trampoline.cpp.o CMakeFiles/boltffi_jsi_core.dir/src/ffi_buf.cpp.o
-/usr/bin/ranlib libboltffi_jsi_core.a

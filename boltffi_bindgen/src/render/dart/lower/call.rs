@@ -345,6 +345,12 @@ fn decode_return(
             "throw UnsupportedError('callback-handle returns are not yet supported by this renderer');"
                 .to_string()
         }
+        // Non-`Void`-inner pointer returns (e.g. a pointer to a nested struct) aren't wired up
+        // yet -- same placeholder convention as the two arms below, not a real implementation.
+        DartNativeType::Pointer(_) => {
+            "throw UnsupportedError('this return shape is not yet supported by this renderer');"
+                .to_string()
+        }
         DartNativeType::Composite(_) | DartNativeType::Function { .. } => {
             "throw UnsupportedError('this return shape is not yet supported by this renderer');"
                 .to_string()

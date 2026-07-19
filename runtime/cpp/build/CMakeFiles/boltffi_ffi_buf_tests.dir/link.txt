@@ -1,1 +1,0 @@
-/usr/bin/c++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/boltffi_ffi_buf_tests.dir/src/ffi_buf.cpp.o CMakeFiles/boltffi_ffi_buf_tests.dir/tests/ffi_buf_test.cpp.o -o boltffi_ffi_buf_tests
