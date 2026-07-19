@@ -18,9 +18,13 @@ use crate::{
 enum ArgSlot {
     /// A plain expression, e.g. a scalar param passed straight through.
     Expr(String),
-    /// The pointer half of a wire-encoded buffer built for `for_param`.
-    BufPtr { for_param: String },
-    /// The length half of a wire-encoded buffer built for `for_param`.
+    /// The length half of a wire-encoded buffer built for `for_param`. The
+    /// pointer half is pushed as a plain `Expr` at the `Input` param's own
+    /// position; the length's *expression* is recorded in `len_exprs`
+    /// (`Input` and its paired `SyntheticLen` are two separate entries in
+    /// `abi_call.params`, so the length can't be computed until this later
+    /// entry is reached, but the accessor differs by buffer kind — `.len` on
+    /// a `_$$WireWriter`, `.length` on a raw typed list).
     BufLen { for_param: String },
     /// The out-pointer to the scratch `_$$FFIStatus` this call writes into.
     StatusOutPtr,
@@ -31,10 +35,10 @@ struct CallPlan {
     setup: Vec<String>,
     /// Native call argument expressions, in order.
     args: Vec<String>,
-    /// Whether a `_$$FFIStatus` scratch value was allocated and needs freeing.
+    /// Whether a `_$$FFIStatus` scratch value was allocated and needs an
+    /// explicit, immediate free (wire-buffer scratch values do not: see
+    /// `render_sync_body`).
     has_status_scratch: bool,
-    /// Whether any wire buffers were allocated and need freeing.
-    buffer_vars: Vec<String>,
 }
 
 fn buffer_var(param_name: &str) -> String {
@@ -45,15 +49,44 @@ fn status_var() -> &'static str {
     "_p$status"
 }
 
+/// Replaces the standalone identifier `self` with `this` in a generated
+/// expression string. Used only where a value-level codec helper renders
+/// straight from an embedded `ValueExpr::Named("self")` with no way to pass
+/// an override (see the call site).
+fn replace_self_identifier(expr: &str) -> String {
+    let mut out = String::with_capacity(expr.len());
+    let bytes = expr.as_bytes();
+    let mut i = 0;
+    while i < expr.len() {
+        if expr[i..].starts_with("self") {
+            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
+            let after_idx = i + 4;
+            let after_ok = after_idx == expr.len() || !is_ident_byte(bytes[after_idx]);
+            if before_ok && after_ok {
+                out.push_str("this");
+                i = after_idx;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+fn is_ident_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
+}
+
 /// Builds the pre-call setup/argument plan by walking `abi_call.params` in
 /// native order. Each [`ParamRole`] maps to exactly one argument slot (or, for
 /// `Input` roles carrying wire-encoded data, a pointer+len pair sharing one
 /// scratch writer with the paired `SyntheticLen` entry).
 fn plan_call(abi_call: &AbiCall) -> CallPlan {
     let mut setup = Vec::new();
-    let mut buffer_vars = Vec::new();
     let mut has_status_scratch = false;
     let mut slots = Vec::new();
+    let mut len_exprs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
     for param in &abi_call.params {
         match &param.role {
@@ -74,14 +107,19 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                     NamingConvention::param_name(param.name.as_str())
                 };
                 match transport {
-                    Transport::Scalar(origin) => {
-                        let expr = if origin.primitive() == crate::ir::PrimitiveType::Bool {
-                            format!("({dart_name} ? 1 : 0)")
+                    Transport::Scalar(_) => {
+                        // A direct scalar native param (`$$ffi.Bool`,
+                        // `$$ffi.Int32`, ...) already marshals to/from the
+                        // matching Dart type (`bool`, `int`, ...) — dart:ffi
+                        // itself does that conversion. No manual
+                        // int/bool juggling here (that's only needed for
+                        // *blittable-struct* byte access via `ByteData`,
+                        // which has no direct bool accessor — see
+                        // `emit::num_as_primitive`/`primitive_as_num`).
+                        let expr = if is_cstyle_enum(transport) {
+                            format!("{dart_name}.value")
                         } else {
-                            match &param.abi_type {
-                                _ if is_cstyle_enum(transport) => format!("{dart_name}.value"),
-                                _ => dart_name,
-                            }
+                            dart_name
                         };
                         slots.push(ArgSlot::Expr(expr));
                     }
@@ -96,15 +134,29 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                     Transport::Composite(_) => {
                         // repr(C) record passed by value: the record's own
                         // blittable struct conversion already exists in
-                        // record.txt.
-                        slots.push(ArgSlot::Expr(format!("{dart_name}._m$toStruct()")));
+                        // record.txt. `_m$toStruct()` builds its own
+                        // throwaway `_$$WireWriter` (a `calloc`'d buffer with
+                        // a GC finalizer) and returns a view into it — hoist
+                        // the call into a named `setup` local (matching the
+                        // `Transport::Span` case below) so that buffer stays
+                        // reachable for the whole function body. Calling it
+                        // inline as a bare call argument, with nothing else
+                        // referencing it, would leave it eligible for GC
+                        // (and its finalizer eligible to run) before the
+                        // native call reads through the struct-by-value
+                        // argument — a real hazard with two or more
+                        // composite params in the same call.
+                        let var = buffer_var(&dart_name);
+                        setup.push(format!("final {var} = {dart_name}._m$toStruct();"));
+                        slots.push(ArgSlot::Expr(var));
                     }
                     Transport::Span(content) => {
                         let is_utf8 = matches!(content, crate::ir::SpanContent::Utf8);
-                        if let Some(encode_ops) = encode_ops {
-                            // `emit_size_expr` renders straight from the ops'
-                            // own embedded `ValueExpr::Named("self")` (it
-                            // takes no value-string override, unlike
+                        let var = buffer_var(&dart_name);
+                        let len_accessor = if let Some(encode_ops) = encode_ops {
+                            // `emit_size_expr` renders straight from the
+                            // ops' own embedded `ValueExpr::Named("self")`
+                            // (it takes no value-string override, unlike
                             // `emit_writer_write`), so the receiver
                             // substitution has to happen textually here.
                             let size_expr = emit::emit_size_expr(&encode_ops.size);
@@ -115,34 +167,49 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                             };
                             let write_stmt =
                                 emit::emit_writer_write(encode_ops, "_p$w", &dart_name);
-                            let var = buffer_var(&dart_name);
                             setup.push(format!(
                                 "final {var} = _$$WireWriter({size_expr});\n{{ final _p$w = {var}; {write_stmt} }}"
                             ));
-                            buffer_vars.push(var);
+                            format!("{var}.len")
                         } else if is_utf8 {
-                            let var = buffer_var(&dart_name);
                             setup.push(format!(
                                 "final {var} = _$$WireWriter(({dart_name}.length * 3));\n{{ final _p$w = {var}; _p$w.writeTypedList($$convert.utf8.encode({dart_name})); }}"
                             ));
-                            buffer_vars.push(var);
+                            format!("{var}.len")
                         } else {
                             // Direct scalar-element buffer (e.g. Vec<u8>):
-                            // pass the typed list's own backing memory.
-                            let var = buffer_var(&dart_name);
-                            setup.push(format!(
-                                "final {var} = {dart_name} is $$typed_data.Uint8List ? {dart_name} : $$typed_data.Uint8List.fromList({dart_name});"
-                            ));
-                            slots.push(ArgSlot::Expr(format!("{var}.address.cast()")));
-                            slots.push(ArgSlot::Expr(format!("{var}.length")));
-                            continue;
-                        }
-                        slots.push(ArgSlot::BufPtr {
-                            for_param: dart_name.clone(),
-                        });
-                        slots.push(ArgSlot::BufLen {
-                            for_param: dart_name,
-                        });
+                            // pass the typed list's own backing memory
+                            // (`.length`, not `_$$WireWriter.len`). A `Vec<u8>`
+                            // is already publicly typed as `Uint8List`
+                            // (`DartType::from_type_expr`'s `Vec<u8>` case) —
+                            // only non-u8 element vecs (a plain `List<T>`)
+                            // need converting to a typed buffer first.
+                            let is_u8 = matches!(
+                                content,
+                                crate::ir::SpanContent::Scalar(origin)
+                                    if origin.primitive() == crate::ir::PrimitiveType::U8
+                            );
+                            if is_u8 {
+                                setup.push(format!("final {var} = {dart_name};"));
+                            } else {
+                                setup.push(format!(
+                                    "final {var} = $$typed_data.Uint8List.fromList({dart_name});"
+                                ));
+                            }
+                            format!("{var}.length")
+                        };
+                        let ptr_expr = if encode_ops.is_some() || is_utf8 {
+                            format!("{var}.ptr")
+                        } else {
+                            format!("{var}.address.cast()")
+                        };
+                        slots.push(ArgSlot::Expr(ptr_expr));
+                        // The paired `SyntheticLen` entry (a *separate*
+                        // `AbiParam` later in `abi_call.params`) supplies
+                        // this param's length argument slot; record the
+                        // expression here since only this branch knows
+                        // which accessor the buffer kind needs.
+                        len_exprs.insert(dart_name, len_accessor);
                     }
                     Transport::Callback { .. } => {
                         // Passing a Dart closure/interface INTO a native call
@@ -155,7 +222,11 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                 }
             }
             ParamRole::SyntheticLen { for_param } => {
-                let for_param = NamingConvention::param_name(for_param.as_str());
+                let for_param = if for_param.as_str() == "self" {
+                    "this".to_string()
+                } else {
+                    NamingConvention::param_name(for_param.as_str())
+                };
                 slots.push(ArgSlot::BufLen { for_param });
             }
             ParamRole::CallbackContext { .. } => {
@@ -191,8 +262,10 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
         .into_iter()
         .map(|slot| match slot {
             ArgSlot::Expr(e) => e,
-            ArgSlot::BufPtr { for_param } => format!("{}.ptr", buffer_var(&for_param)),
-            ArgSlot::BufLen { for_param } => format!("{}.len", buffer_var(&for_param)),
+            ArgSlot::BufLen { for_param } => len_exprs
+                .get(&for_param)
+                .cloned()
+                .unwrap_or_else(|| format!("{}.len", buffer_var(&for_param))),
             ArgSlot::StatusOutPtr => status_var().to_string(),
         })
         .collect();
@@ -201,37 +274,7 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
         setup,
         args,
         has_status_scratch,
-        buffer_vars,
     }
-}
-
-/// Replaces the standalone identifier `self` with `this` in a generated
-/// expression string. Used only where a value-level codec helper renders
-/// straight from an embedded `ValueExpr::Named("self")` with no way to pass
-/// an override (see the call site).
-fn replace_self_identifier(expr: &str) -> String {
-    let mut out = String::with_capacity(expr.len());
-    let bytes = expr.as_bytes();
-    let mut i = 0;
-    while i < expr.len() {
-        if expr[i..].starts_with("self") {
-            let before_ok = i == 0 || !is_ident_byte(bytes[i - 1]);
-            let after_idx = i + 4;
-            let after_ok = after_idx == expr.len() || !is_ident_byte(bytes[after_idx]);
-            if before_ok && after_ok {
-                out.push_str("this");
-                i = after_idx;
-                continue;
-            }
-        }
-        out.push(bytes[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn is_ident_byte(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b == b'_' || b == b'$'
 }
 
 fn is_cstyle_enum(transport: &Transport) -> bool {
@@ -245,20 +288,23 @@ fn last_error_throw_stmt() -> String {
     "throw _$$FFIException(-1, _$$takeLastErrorMessage());".to_string()
 }
 
-/// Decodes the raw native call result (`resultExpr`) into the public Dart
+/// Decodes the raw native call result (`result_expr`) into the public Dart
 /// value, given the already-computed native return shape.
 ///
-/// `wrap_handle` is `Some(class_name)` for a class-typed return (constructor
-/// or method); `throws_on_absent` controls whether a null handle throws
-/// (fallible) or returns `null` (a plain optional handle, no failure
-/// implied).
-#[allow(clippy::too_many_arguments)]
+/// `is_constructor` governs the *encoded-Result* case specifically: a
+/// constructor can't declare `BoltFFIResult<...>` as "its own type" (the
+/// object it returns *is* the value), so it throws on failure via
+/// `BoltFFIResult.okOrThrow()`; an ordinary method's declared return type is
+/// always `BoltFFIResult<Ok, Err>` (`DartType::from_return_def`), so it
+/// always returns the decoded `BoltFFIResult` as-is, regardless of
+/// `dart_return.throws` (which governs the unrelated null-handle case below).
 fn decode_return(
     result_expr: &str,
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
     error: &ErrorTransport,
     returns: &ReturnShape,
+    is_constructor: bool,
 ) -> String {
     match native_return {
         DartNativeType::Void => String::new(),
@@ -268,8 +314,11 @@ fn decode_return(
                 last_error_throw_stmt()
             )
         }
-        DartNativeType::Primitive(p) => {
-            let value = emit::num_as_primitive(*p, result_expr);
+        DartNativeType::Primitive(_) => {
+            // See the matching note in `plan_call`'s `Transport::Scalar` arm:
+            // a direct scalar native return already comes back as the
+            // matching Dart type, no manual conversion needed here.
+            let value = result_expr.to_string();
             let value = match &dart_return.enum_wrap {
                 Some(enum_class) => format!("{enum_class}._m$fromValue({value})"),
                 None => value,
@@ -312,30 +361,31 @@ fn decode_return(
             let setup = format!(
                 "final {reader_var} = _$$WireReader({result_expr}.ptr, {result_expr}.len);"
             );
-            let body = match error {
-                ErrorTransport::Encoded { decode_ops, .. } => {
-                    let ok_expr = match &returns.decode_ops {
-                        Some(ok_ops) => emit::emit_reader_read(ok_ops, reader_var),
-                        None => String::new(),
-                    };
-                    let err_expr = emit::emit_reader_read(decode_ops, reader_var);
-                    if dart_return.throws {
-                        format!(
-                            "final _p$tag = {reader_var}.readU8();\nif (_p$tag == 1) {{ throw {err_expr}; }}\nreturn {ok_expr};"
-                        )
-                    } else {
-                        format!(
-                            "return {reader_var}.readResult((({reader_var}) => {ok_expr}), (({reader_var}) => {err_expr}));"
-                        )
-                    }
-                }
-                _ => {
-                    let ok_expr = match &returns.decode_ops {
-                        Some(ok_ops) => emit::emit_reader_read(ok_ops, reader_var),
-                        None => String::new(),
-                    };
-                    format!("return {ok_expr};")
-                }
+            // `returns.decode_ops` is already the *complete* decode sequence
+            // for whatever crossed in this buffer. When the error is
+            // encoded, that sequence is a `ReadOp::Result` covering the tag
+            // byte AND both branches as one unit (confirmed against real
+            // generated output: `emit_reader_read`'s `ReadOp::Result` arm
+            // already renders `reader.readResult(okFn, errFn)`) — it is not
+            // "just the Ok payload" needing a manually-read tag byte in
+            // front of it. Reading the tag again here, separately, both
+            // duplicates the read (misreading the Ok payload's own first
+            // byte as a second tag on every successful call) and ignores
+            // that `error`'s own `decode_ops` describe the identical error
+            // branch already folded into this same sequence.
+            let decode_expr = match &returns.decode_ops {
+                Some(ops) => emit::emit_reader_read(ops, reader_var),
+                None => String::new(),
+            };
+            let is_encoded_error = matches!(error, ErrorTransport::Encoded { .. });
+            let body = if is_encoded_error && is_constructor {
+                // A constructor can't declare `BoltFFIResult<...>` as its
+                // own return type, so unwrap-or-throw via the same
+                // `BoltFFIResult.okOrThrow()` helper `prelude.txt` already
+                // exposes for exactly this.
+                format!("return ({decode_expr}).okOrThrow();")
+            } else {
+                format!("return {decode_expr};")
             };
             format!(
                 "{setup}\ntry {{\n{body}\n}} finally {{ _f$boltffi_free_buf({result_expr}); }}"
@@ -345,13 +395,9 @@ fn decode_return(
             "throw UnsupportedError('callback-handle returns are not yet supported by this renderer');"
                 .to_string()
         }
-        // Non-`Void`-inner pointer returns (e.g. a pointer to a nested struct) aren't wired up
-        // yet -- same placeholder convention as the two arms below, not a real implementation.
-        DartNativeType::Pointer(_) => {
-            "throw UnsupportedError('this return shape is not yet supported by this renderer');"
-                .to_string()
-        }
-        DartNativeType::Composite(_) | DartNativeType::Function { .. } => {
+        DartNativeType::Pointer(_)
+        | DartNativeType::Composite(_)
+        | DartNativeType::Function { .. } => {
             "throw UnsupportedError('this return shape is not yet supported by this renderer');"
                 .to_string()
         }
@@ -414,10 +460,11 @@ impl DartReturnInfo {
 
 /// Renders the full Dart source body (the statements between the method's
 /// braces) for a synchronous native call.
-pub(super) fn render_sync_body(
+fn render_sync_body(
     abi_call: &AbiCall,
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
+    is_constructor: bool,
 ) -> String {
     let plan = plan_call(abi_call);
     let symbol_fn = format!("_f${}", abi_call.symbol);
@@ -439,24 +486,40 @@ pub(super) fn render_sync_body(
         ""
     };
 
-    let decode = decode_return(
+    let mut decode = decode_return(
         result_expr,
         native_return,
         dart_return,
         &abi_call.error,
         &abi_call.returns,
+        is_constructor,
     );
+    if plan.has_status_scratch {
+        // `ParamRole::StatusOut` writes failure into this out-param
+        // separately from the return value (which the `StatusOut` role
+        // exists precisely because it does *not* also carry a `Status`
+        // return type); check it before trusting `result_expr`, or a
+        // reported failure is silently swallowed and the (garbage) result
+        // gets decoded and returned anyway.
+        decode = format!(
+            "if ({}.ref.code != 0) {{ {} }}\n{decode}",
+            status_var(),
+            last_error_throw_stmt()
+        );
+    }
 
-    if plan.has_status_scratch || !plan.buffer_vars.is_empty() {
+    // Wire-encoded param buffers are NOT freed here: `_$$WireWriter`'s own
+    // factory already attaches a `calloc.nativeFree` `NativeFinalizer` to the
+    // typed-list view backing the buffer (see `prelude.txt`), so an explicit
+    // free here would race the GC-driven one and double-free the same
+    // pointer. Only the bare `calloc<_$$FFIStatus>()` scratch value (no
+    // finalizer attached — it's a plain struct alloc, not a `_$$WireWriter`)
+    // needs an explicit, immediate free.
+    if plan.has_status_scratch {
         out.push_str("try {\n");
         out.push_str(&decode);
         out.push_str("\n} finally {\n");
-        if plan.has_status_scratch {
-            out.push_str(&format!("$$extffi.calloc.free({});\n", status_var()));
-        }
-        for var in &plan.buffer_vars {
-            out.push_str(&format!("$$extffi.calloc.free({var}.ptr);\n"));
-        }
+        out.push_str(&format!("$$extffi.calloc.free({});\n", status_var()));
         out.push_str("}\n");
     } else {
         out.push_str(&decode);
@@ -469,13 +532,25 @@ pub(super) fn render_sync_body(
 /// Renders the full Dart source body for an async native call, driving the
 /// already-implemented `_$$BoltFFIAsync.create` poll/complete/cancel/free
 /// protocol (`prelude.txt`) rather than a new one.
-pub(super) fn render_async_body(
+fn render_async_body(
     abi_call: &AbiCall,
     async_call: &crate::ir::AsyncCall,
     complete_native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
 ) -> String {
     let plan = plan_call(abi_call);
+
+    if plan.has_status_scratch {
+        // A `StatusOut` role on the *create* call itself (as opposed to the
+        // complete call, which always carries one — handled below) would
+        // need its scratch value freed after `createFuture()` returns, but
+        // that call happens lazily inside `_$$BoltFFIAsync.create`, outside
+        // this function's own try/finally shape. Not seen in practice yet;
+        // rendering a loud failure instead of a silent leak until a real
+        // case justifies the extra plumbing.
+        return "throw UnsupportedError('a status-out parameter on the initiating call of an async method is not yet supported by this renderer');\n".to_string();
+    }
+
     let symbol_fn = format!("_f${}", abi_call.symbol);
     let poll_fn = format!("_f${}", async_call.poll);
     let complete_fn = format!("_f${}", async_call.complete);
@@ -490,12 +565,16 @@ pub(super) fn render_async_body(
 
     let create_args = plan.args.join(", ");
 
+    // The `complete` native declaration (`native_function.txt`) always takes
+    // an out-param `Pointer<_$$FFIStatus>` as its second argument — a
+    // panic/unexpected-failure channel that exists independently of whatever
+    // `async_call.error` says about the call's own `Result` shape — so this
+    // scratch value is allocated unconditionally, not gated on
+    // `plan.has_status_scratch` (which only reflects roles seen in
+    // `abi_call.params`, i.e. the *create* call's params, never the fixed
+    // complete-call signature).
     let needs_result_var = !matches!(complete_native_return, DartNativeType::Void);
-    let complete_call = if plan.has_status_scratch {
-        format!("{complete_fn}(handle, {})", status_var())
-    } else {
-        format!("{complete_fn}(handle)")
-    };
+    let complete_call = format!("{complete_fn}(handle, _p$asyncStatus)");
 
     let decode = decode_return(
         if needs_result_var { "_p$asyncResult" } else { "" },
@@ -503,13 +582,21 @@ pub(super) fn render_async_body(
         dart_return,
         &async_call.error,
         &async_call.result,
+        // Async constructors are rejected before this function is ever
+        // reached (see `render_body`) — every caller here is a method.
+        false,
     );
 
-    let complete_stmt = if needs_result_var {
-        format!("final _p$asyncResult = {complete_call};\n{decode}")
+    let fetch_stmt = if needs_result_var {
+        format!("final _p$asyncResult = {complete_call};")
     } else {
-        format!("{complete_call};\n{decode}")
+        format!("{complete_call};")
     };
+
+    let complete_stmt = format!(
+        "final _p$asyncStatus = $$extffi.calloc<_$$FFIStatus>();\ntry {{\n{fetch_stmt}\nif (_p$asyncStatus.ref.code != 0) {{ {} }}\n{decode}\n}} finally {{\n$$extffi.calloc.free(_p$asyncStatus);\n}}",
+        last_error_throw_stmt()
+    );
 
     out.push_str(&format!(
         "return _$$BoltFFIAsync.create(\n  createFuture: () => {symbol_fn}({create_args}),\n  pollFuture: {poll_fn},\n  completeFuture: (handle) {{\n{complete_stmt}\n  }},\n  freeFuture: {free_fn},\n  cancelFuture: {cancel_fn},\n);\n"
@@ -530,7 +617,7 @@ pub(super) fn render_body(
     is_constructor: bool,
 ) -> String {
     match &abi_call.mode {
-        CallMode::Sync => render_sync_body(abi_call, native_return, dart_return),
+        CallMode::Sync => render_sync_body(abi_call, native_return, dart_return, is_constructor),
         CallMode::Async(_) if is_constructor => {
             "throw UnsupportedError('async constructors are not representable as a Dart factory constructor; this renderer does not yet reshape them into a static async factory method');\n".to_string()
         }
@@ -547,3 +634,245 @@ fn async_call_complete_native_type(async_call: &crate::ir::AsyncCall) -> DartNat
     DartNativeType::from_return_shape_and_error_transport(&async_call.result, &async_call.error)
 }
 
+#[cfg(test)]
+mod tests {
+    use boltffi_ffi_rules::callable::ExecutionKind;
+
+    use crate::{
+        ir::{
+            ClassDef, ClassId, ConstructorDef, MethodDef, MethodId, ParamDef, ParamName,
+            ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef, TypeExpr,
+        },
+        render::dart::test,
+    };
+
+    fn string_param(name: &str) -> ParamDef {
+        ParamDef {
+            name: ParamName::new(name),
+            type_expr: TypeExpr::String,
+            passing: ParamPassing::Value,
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn sync_constructor_with_string_and_scalar_params_builds_one_writer_and_wraps_handle() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Person"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![
+                    string_param("name"),
+                    ParamDef {
+                        name: ParamName::new("age"),
+                        type_expr: TypeExpr::Primitive(PrimitiveType::U32),
+                        passing: ParamPassing::Value,
+                        doc: None,
+                    },
+                ],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].constructors[0].body;
+
+        // Regression: the length argument must appear exactly once (the
+        // `Input` param and its paired `SyntheticLen` AbiParam are two
+        // separate native-call slots, not two lengths to compute).
+        assert_eq!(
+            body.matches("_p$w$name.len").count(),
+            1,
+            "body: {body}"
+        );
+        assert!(
+            body.contains("_f$boltffi_person_new(_p$w$name.ptr, _p$w$name.len, age)"),
+            "body: {body}"
+        );
+        assert!(body.contains("return Person._(_p$result);"), "body: {body}");
+        // The WireWriter's own GC finalizer owns its buffer — no explicit
+        // free here (double-free guard).
+        assert!(!body.contains("calloc.free"), "body: {body}");
+    }
+
+    #[test]
+    fn fallible_constructor_throws_on_null_handle() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Widget"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: true,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].constructors[0].body;
+
+        assert!(
+            body.contains("if (_p$result == $$ffi.nullptr)")
+                && body.contains("_$$takeLastErrorMessage()"),
+            "body: {body}"
+        );
+        assert!(body.contains("throw _$$FFIException"), "body: {body}");
+    }
+
+    #[test]
+    fn method_returning_result_with_encoded_error_wraps_bolt_ffi_result() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_record(RecordDef {
+            id: crate::ir::RecordId::new("AppError"),
+            is_repr_c: false,
+            is_error: true,
+            fields: vec![crate::ir::FieldDef {
+                name: crate::ir::FieldName::new("message"),
+                type_expr: TypeExpr::String,
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Widget"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new("rename"),
+                receiver: Receiver::RefSelf,
+                params: vec![string_param("name")],
+                returns: ReturnDef::Result {
+                    ok: TypeExpr::Void,
+                    err: TypeExpr::Record(crate::ir::RecordId::new("AppError")),
+                },
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].methods[0].body;
+
+        // Exactly one `readResult` call: `returns.decode_ops` for an
+        // encoded-error `Result` is already the whole tag+ok+err decode as
+        // one unit. A regression here previously read the tag a *second*
+        // time manually before also calling `readResult` (which reads its
+        // own tag byte) — silently misreading the Ok payload's first byte
+        // as a second tag on every successful call, invisible to
+        // `dart analyze` since both branches are `BoltFFIResult`-typed.
+        assert_eq!(body.matches("readResult").count(), 1, "body: {body}");
+        assert!(!body.contains("_p$tag"), "body: {body}");
+        // A method's declared return type is always `BoltFFIResult<T, E>`
+        // (never a bare throw) — `okOrThrow()` is constructor-only.
+        assert!(!body.contains("okOrThrow"), "body: {body}");
+        assert!(body.contains("_f$boltffi_free_buf(_p$result);"), "body: {body}");
+        // The receiver reads `this`, never the Rust-side "self" identifier.
+        assert!(body.contains("this._handle"), "body: {body}");
+        assert!(!body.contains(" self"), "body should not leak `self`: {body}");
+    }
+
+    #[test]
+    fn fallible_constructor_with_encoded_error_unwraps_or_throws() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_record(RecordDef {
+            id: crate::ir::RecordId::new("Acl"),
+            is_repr_c: false,
+            is_error: false,
+            fields: vec![crate::ir::FieldDef {
+                name: crate::ir::FieldName::new("owner"),
+                type_expr: TypeExpr::String,
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![ConstructorDef::Default {
+                params: vec![string_param("owner")],
+                is_fallible: true,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.records[0].constructors[0].body;
+
+        // A constructor can't declare `BoltFFIResult<...>` as its own return
+        // type, so — unlike a method — it unwraps via `okOrThrow()` (which
+        // itself calls `readResult` exactly once internally).
+        assert_eq!(body.matches("readResult").count(), 1, "body: {body}");
+        assert!(body.contains("okOrThrow()"), "body: {body}");
+        assert!(!body.contains("_p$tag"), "body: {body}");
+    }
+
+    #[test]
+    fn async_method_drives_bolt_ffi_async_create() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Widget"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new("fetch_count"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::U32)),
+                execution_kind: ExecutionKind::Async,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let method = &library.classes[0].methods[0];
+
+        assert!(method.is_async);
+        assert!(method.body.contains("_$$BoltFFIAsync.create("), "body: {}", method.body);
+        assert!(
+            method.body.contains("completeFuture: (handle)"),
+            "body: {}",
+            method.body
+        );
+        // The complete call always takes the out-status pointer, unconditionally.
+        assert!(
+            method.body.contains("(handle, _p$asyncStatus)"),
+            "body: {}",
+            method.body
+        );
+    }
+}

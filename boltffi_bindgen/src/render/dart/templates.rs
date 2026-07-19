@@ -68,9 +68,9 @@ mod tests {
     use crate::{
         ir::{
             self, CallbackId, CallbackKind, CallbackMethodDef, CallbackTraitDef, ClassDef, ClassId,
-            ConstructorDef, FfiContract, MethodDef, MethodId, PackageInfo, ParamDef, ParamName,
-            ParamPassing, PrimitiveType, Receiver, ReturnDef, StreamDef, StreamId, StreamMode,
-            TypeExpr,
+            ConstructorDef, FfiContract, FieldDef, FieldName, MethodDef, MethodId, PackageInfo,
+            ParamDef, ParamName, ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef,
+            StreamDef, StreamId, StreamMode, TypeExpr,
         },
         render::dart::{DartLibrary, DartLowerer},
     };
@@ -284,5 +284,64 @@ mod tests {
         };
 
         insta::assert_snapshot!(template.render().unwrap());
+    }
+
+    // Regression: a merge once silently duplicated `record.txt`'s
+    // constructor/method `@Native` declaration loop into a second copy
+    // sitting *inside* the record's class body (the exact
+    // `ffi_native_unexpected_number_of_parameters_with_receiver` bug an
+    // earlier fix already eliminated — `dart analyze` only catches it
+    // against a real generation, never a plain `cargo test`). Pins both the
+    // "exactly once" and the "before the class opens" invariants directly
+    // on the rendered template output.
+    #[test]
+    pub fn record_native_declarations_render_once_before_class_body() {
+        let mut ffi = empty_contract();
+        ffi.catalog.insert_record(RecordDef {
+            id: ir::RecordId::new("Acl"),
+            is_repr_c: false,
+            is_error: false,
+            fields: vec![FieldDef {
+                name: FieldName::new("owner"),
+                type_expr: TypeExpr::String,
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![ConstructorDef::Default {
+                params: vec![ParamDef {
+                    name: ParamName::new("owner"),
+                    type_expr: TypeExpr::String,
+                    passing: ParamPassing::Value,
+                    doc: None,
+                }],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+        let library = lower(&ffi);
+
+        let template = RecordTemplate {
+            record: &library.records[0],
+        };
+        let rendered = template.render().unwrap();
+
+        let native_decl_marker = "@$$ffi.Native";
+        let occurrences = rendered.matches(native_decl_marker).count();
+        assert_eq!(
+            occurrences, 1,
+            "expected exactly one @Native declaration, found {occurrences}: {rendered}"
+        );
+
+        let decl_pos = rendered.find(native_decl_marker).unwrap();
+        let class_open_pos = rendered.find("final class Acl").unwrap();
+        assert!(
+            decl_pos < class_open_pos,
+            "the @Native declaration must render before the class body opens: {rendered}"
+        );
     }
 }

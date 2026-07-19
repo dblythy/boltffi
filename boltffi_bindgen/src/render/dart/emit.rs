@@ -131,6 +131,23 @@ fn render_type_name(name: &str) -> String {
     NamingConvention::class_name(name)
 }
 
+/// The one mapping from a `Builtin` type (`Duration`, `SystemTime`, `Uuid`,
+/// `Url`, ...) to its public Dart type name. Used both for record/enum
+/// fields (`type_expr_dart_type`, above) and for method/constructor
+/// params/returns (`DartType::dart_type`'s `Builtin` arm) — those two call
+/// sites used to duplicate (and disagree on) this mapping, which is exactly
+/// how `SystemTime` ended up correctly rendered as `DateTime` in one and left
+/// as the undefined class `SystemTime` in the other.
+pub fn builtin_dart_type(id: &BuiltinId) -> String {
+    match id.as_str() {
+        "Duration" => "Duration".to_string(),
+        "SystemTime" => "DateTime".to_string(),
+        "Uuid" => "String".to_string(),
+        "Url" => "Uri".to_string(),
+        _ => "String".to_string(),
+    }
+}
+
 pub fn render_value(expr: &ValueExpr) -> String {
     match expr {
         ValueExpr::Instance => String::new(),
@@ -179,13 +196,7 @@ pub fn type_expr_dart_type(ty: &TypeExpr) -> String {
         TypeExpr::Record(id) => render_type_name(id.as_str()),
         TypeExpr::Enum(id) => render_type_name(id.as_str()),
         TypeExpr::Custom(id) => render_type_name(id.as_str()),
-        TypeExpr::Builtin(id) => match id.as_str() {
-            "Duration" => "Duration".to_string(),
-            "SystemTime" => "DateTime".to_string(),
-            "Uuid" => "String".to_string(),
-            "Url" => "Uri".to_string(),
-            _ => "String".to_string(),
-        },
+        TypeExpr::Builtin(id) => builtin_dart_type(id),
         TypeExpr::Handle(class_id) => render_type_name(class_id.as_str()),
         TypeExpr::Callback(callback_id) => render_type_name(callback_id.as_str()),
         TypeExpr::Void => "void".to_string(),

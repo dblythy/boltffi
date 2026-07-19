@@ -1,5 +1,6 @@
 ---
 source: boltffi_bindgen/src/render/dart/templates.rs
+assertion_line: 286
 expression: template.render().unwrap()
 ---
 @$$ffi.Native<
@@ -7,27 +8,38 @@ expression: template.render().unwrap()
 >(symbol: 'boltffi_person_free', isLeaf: true)
 external void _f$boltffi_person_free($$ffi.Pointer<$$ffi.Void> handle);
 
+
 @$$ffi.Native<
   $$ffi.Pointer<$$ffi.Void> Function(
     $$ffi.Pointer<$$ffi.Uint8>,
     $$ffi.UintPtr,
     $$ffi.Uint32,
-  )
+    )
 >(symbol: 'boltffi_person_new', isLeaf: true)
 external $$ffi.Pointer<$$ffi.Void> _f$boltffi_person_new(
   $$ffi.Pointer<$$ffi.Uint8> namePtr,
   int nameLen,
   int age,
 );
+
 @$$ffi.Native<
   $$ffi.Pointer<$$ffi.Void> Function(
     $$ffi.Pointer<$$ffi.Uint8>,
     $$ffi.UintPtr,
-  )
+    )
 >(symbol: 'boltffi_person_new_with_default_age', isLeaf: true)
 external $$ffi.Pointer<$$ffi.Void> _f$boltffi_person_new_with_default_age(
   $$ffi.Pointer<$$ffi.Uint8> namePtr,
   int nameLen,
+);
+
+@$$ffi.Native<
+  _$$FFIBuf Function(
+    $$ffi.Pointer<$$ffi.Void>,
+    )
+>(symbol: 'boltffi_person_get_name', isLeaf: true)
+external _$$FFIBuf _f$boltffi_person_get_name(
+  $$ffi.Pointer<$$ffi.Void> self,
 );
 
 @$$ffi.Native<
@@ -421,14 +433,33 @@ final class Person implements $$ffi.Finalizable {
   factory Person(
     String name,
     int age,
-  ) {}
+  ) {
+final _p$w$name = _$$WireWriter((name.length * 3));
+{ final _p$w = _p$w$name; _p$w.writeTypedList($$convert.utf8.encode(name)); }
+final _p$result = _f$boltffi_person_new(_p$w$name.ptr, _p$w$name.len, age);
+return Person._(_p$result);
+
+  }
 
   factory Person.newWithDefaultAge(
     String name,
-  ) {}
+  ) {
+final _p$w$name = _$$WireWriter((name.length * 3));
+{ final _p$w = _p$w$name; _p$w.writeTypedList($$convert.utf8.encode(name)); }
+final _p$result = _f$boltffi_person_new_with_default_age(_p$w$name.ptr, _p$w$name.len);
+return Person._(_p$result);
+
+  }
 
   String getName(
-  ) {}
+  ) {
+final _p$result = _f$boltffi_person_get_name(this._handle);
+final _p$reader = _$$WireReader(_p$result.ptr, _p$result.len);
+try {
+return _p$reader.readString();
+} finally { _f$boltffi_free_buf(_p$result); }
+
+  }
 
   Stream<double> temperatureEventAsync() {
     final ctx = _$$BoltFFIStreamCtx(

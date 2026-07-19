@@ -66,3 +66,22 @@ pub struct DartRecord {
     pub constructors: Vec<super::DartConstructor>,
     pub methods: Vec<super::DartFunction>,
 }
+
+impl DartRecord {
+    /// Whether the Rust source already declares its own unnamed
+    /// constructor.
+    ///
+    /// The memberwise `{{ record.name }}({required this.field, ...})`
+    /// constructor is always emitted alongside `constructors` (it backs
+    /// `_m$wireDecode`/`_m$fromStruct`, which construct by field name
+    /// regardless of what the source declares) — when the source record
+    /// *also* declares its own unnamed constructor, the two collide as two
+    /// `factory {{ name }}(...)` declarations on the same class, which
+    /// `dart analyze` rejects outright as `duplicate_constructor`. The
+    /// template checks this to skip its own memberwise one in that case.
+    pub fn has_explicit_default_constructor(&self) -> bool {
+        self.constructors
+            .iter()
+            .any(|ctor| matches!(ctor.kind, super::DartConstructorKind::Default))
+    }
+}

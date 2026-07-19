@@ -94,7 +94,7 @@ final class {{ variant.class_name }} extends {{ dart_enum.name }} {
 
   @override
   String toString() {
-    return "{{ dart_enum.name }}.{{ variant.name }} { {% for field in variant.fields %}{{ field.name }}=${{ field.name }}{%if !loop.last %}, {% endif %}{% endfor %} }";
+    return "{{ dart_enum.name }}.{{ variant.display_name() }} { {% for field in variant.fields %}{{ field.display_name() }}=${{ field.name }}{%if !loop.last %}, {% endif %}{% endfor %} }";
   }
 }
 {% endfor %}

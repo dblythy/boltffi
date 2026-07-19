@@ -4,7 +4,7 @@ use crate::{
     },
     render::dart::{
         DartConstructor, DartConstructorKind, DartFunction, DartFunctionParam, DartLibrary,
-        DartNative, DartNativeType, DartType, NamingConvention,
+        DartNative, DartType, NamingConvention,
     },
 };
 

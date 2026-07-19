@@ -8,19 +8,35 @@ final class {{ layout.struct_name }} extends $$ffi.Struct {
 {% endfor -%}
 }
 {% endmatch %}
+{%- for ctor in record.constructors %}
+{% let cfunc = ctor.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
+{%- for meth in record.methods %}
+{% let cfunc = meth.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
 final class {{ record.name }}{% if record.is_error %} implements Exception{% endif %} {
 {%- for field in record.fields %}
   {{ field.dart_type }} {{ field.name }};
 {%- endfor %}
 
+{%- if record.has_explicit_default_constructor() %}
+  {{ record.name }}._m$fieldsCtor({
+{%- for field in record.fields %}
+    required this.{{ field.name }},
+{%- endfor %}
+  });
+{%- else %}
   {{ record.name }}({
 {%- for field in record.fields %}
     required this.{{ field.name }},
 {%- endfor %}
   });
+{%- endif %}
 
   factory {{ record.name }}._m$wireDecode(_$$WireReader _p$reader) {
-    return {{ record.name }}(
+    return {{ record.name }}{% if record.has_explicit_default_constructor() %}._m$fieldsCtor{% endif %}(
 {%- for field in record.fields %}
       {{ field.name }}: {{ field.wire_decode_expr("_p$reader")|indent(6)|trim }},
 {%- endfor %}
@@ -55,7 +71,7 @@ final class {{ record.name }}{% if record.is_error %} implements Exception{% end
   }
 
   factory {{ record.name }}._m$fromStruct({{ layout.struct_name }} _p$struct) {
-    return {{ record.name }}(
+    return {{ record.name }}{% if record.has_explicit_default_constructor() %}._m$fieldsCtor{% endif %}(
 {%- for field in layout.fields %}
       {{ field.name }}: _p$struct.{{ field.name }},
 {%- endfor %}
@@ -80,14 +96,6 @@ final class {{ record.name }}{% if record.is_error %} implements Exception{% end
     return ref;
   }
 {% endmatch -%}
-{%- for ctor in record.constructors %}
-{% let cfunc = ctor.native %}
-{% include "native_function.txt" %}
-{%- endfor %}
-{%- for meth in record.methods %}
-{% let cfunc = meth.native %}
-{% include "native_function.txt" %}
-{%- endfor %}
 {%- for ctor in record.constructors %}
 {%- match ctor.kind %}
 {% when super::DartConstructorKind::Default %}
