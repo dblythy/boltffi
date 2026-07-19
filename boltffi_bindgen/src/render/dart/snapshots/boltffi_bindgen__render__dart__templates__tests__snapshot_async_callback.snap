@@ -1,6 +1,5 @@
 ---
 source: boltffi_bindgen/src/render/dart/templates.rs
-assertion_line: 180
 expression: template.render().unwrap()
 ---
 final class _I$ICallbackVTable extends $$ffi.Struct {
@@ -112,8 +111,8 @@ _p$callback.asFunction<void Function(int, int, int)>()(_p$callbackData, 0, -1);
 
   static void mapStringRef(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> sPtr,
-    int sLen,
+    $$ffi.Pointer<$$ffi.Uint8> _p$sPtr,
+    int _p$sLen,
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
@@ -122,7 +121,7 @@ final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$s = _$$WireReader(sPtr, sLen);
+final _p$r$s = _$$WireReader(_p$sPtr, _p$sLen);
 final _p$value = await impl.mapStringRef(_p$r$s.readString());
 late final _$$WireWriter _p$w;
 {
@@ -139,8 +138,8 @@ _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>
 
   static void mapString(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> sPtr,
-    int sLen,
+    $$ffi.Pointer<$$ffi.Uint8> _p$sPtr,
+    int _p$sLen,
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
@@ -149,7 +148,7 @@ final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$s = _$$WireReader(sPtr, sLen);
+final _p$r$s = _$$WireReader(_p$sPtr, _p$sLen);
 final _p$value = await impl.mapString(_p$r$s.readString());
 late final _$$WireWriter _p$w;
 {
@@ -166,8 +165,8 @@ _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>
 
   static void processBytes(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> bytesPtr,
-    int bytesLen,
+    $$ffi.Pointer<$$ffi.Uint8> _p$bytesPtr,
+    int _p$bytesLen,
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
@@ -176,7 +175,7 @@ final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$bytes = _$$WireReader(bytesPtr, bytesLen);
+final _p$r$bytes = _$$WireReader(_p$bytesPtr, _p$bytesLen);
 await impl.processBytes(_p$r$bytes.readUint8List());
 _p$callback.asFunction<void Function(int, int)>()(_p$callbackData, 0);
 } catch (e) {
@@ -194,31 +193,85 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   late final $$ffi.Pointer<_I$ICallbackVTable> _vtable;
   static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer($$extffi.calloc.nativeFree);
 
+  // `free` is void — its native call site never reads anything back — so
+  // it dispatches through `NativeCallable.listener` like the qualifying
+  // methods below (`DartNativeCallbackMethod::dispatch_via_listener`),
+  // safe to invoke from any thread that drops the last `Foreign` handle.
+  // Kept alive for as long as `_vtable` is (closed in `dispose()`).
+  late final $$ffi.NativeCallable<$$ffi.Void Function($$ffi.Uint64)> _c$free;
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+      $$ffi.Uint64,
+      $$ffi.Uint32,
+      $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Uint32, $$ffi.Int32)>>,
+      $$ffi.Uint64,
+    )
+  >
+  _c$mapU32;
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+      $$ffi.Uint64,
+      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
+      $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
+      $$ffi.Uint64,
+    )
+  >
+  _c$mapStringRef;
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+      $$ffi.Uint64,
+      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
+      $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
+      $$ffi.Uint64,
+    )
+  >
+  _c$mapString;
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+      $$ffi.Uint64,
+      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
+      $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Int32)>>,
+      $$ffi.Uint64,
+    )
+  >
+  _c$processBytes;
+
   _I$ICallbackHandleMap() {
     _vtable = $$extffi.calloc<_I$ICallbackVTable>();
 
-    _vtable.ref.free = $$ffi.Pointer.fromFunction(
-      _I$ICallback.free
-    );
+    _c$free = $$ffi.NativeCallable.listener(_I$ICallback.free);
+    _vtable.ref.free = _c$free.nativeFunction;
+    // `clone` returns a real handle value the Rust caller reads
+    // synchronously — `NativeCallable.listener` can't deliver that
+    // (it defers the call; Rust would read a stale/default value
+    // immediately). It keeps `Pointer.fromFunction` and relies on the
+    // host never cloning a `Foreign` handle off the mutator thread.
     _vtable.ref.clone = $$ffi.Pointer.fromFunction(
       _I$ICallback.clone,
       0
     );
-    _vtable.ref.mapU32 = $$ffi.Pointer.fromFunction(
+    _c$mapU32 = $$ffi.NativeCallable.listener(
       _I$ICallback.mapU32,
     );
+    _vtable.ref.mapU32 = _c$mapU32.nativeFunction;
 
-    _vtable.ref.mapStringRef = $$ffi.Pointer.fromFunction(
+    _c$mapStringRef = $$ffi.NativeCallable.listener(
       _I$ICallback.mapStringRef,
     );
+    _vtable.ref.mapStringRef = _c$mapStringRef.nativeFunction;
 
-    _vtable.ref.mapString = $$ffi.Pointer.fromFunction(
+    _c$mapString = $$ffi.NativeCallable.listener(
       _I$ICallback.mapString,
     );
+    _vtable.ref.mapString = _c$mapString.nativeFunction;
 
-    _vtable.ref.processBytes = $$ffi.Pointer.fromFunction(
+    _c$processBytes = $$ffi.NativeCallable.listener(
       _I$ICallback.processBytes,
     );
+    _vtable.ref.processBytes = _c$processBytes.nativeFunction;
 
     _vtableFinalizer.attach(
       this,
@@ -230,6 +283,11 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   void dispose() {
     _vtableFinalizer.detach(this);
     $$extffi.calloc.free(_vtable);
+    _c$free.close();
+    _c$mapU32.close();
+    _c$mapStringRef.close();
+    _c$mapString.close();
+    _c$processBytes.close();
   }
 
   int insert(ICallback value) {

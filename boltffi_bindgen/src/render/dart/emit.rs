@@ -533,6 +533,28 @@ fn emit_reader_vec(
     }
 }
 
+/// Renders one branch closure (`Ok` or `Err`) of a `readResult(...)` call.
+///
+/// A branch whose payload is `()` (`CodecPlan::Void`'s `ReadSeq` — `ops` is
+/// empty, nothing was ever written to the wire for it: `readResult` already
+/// consumed the whole 1-byte tag before invoking either closure) must read
+/// nothing — a block-bodied closure (`(reader) {}`), never an arrow closure
+/// forwarding to `emit_reader_read`, which asserts at least one op exists.
+/// A void-ok `Result` used to fall through to the ordinary (non-empty) path
+/// by way of a lossy `Transport`-level round-trip that silently turned
+/// `void` into a one-byte scalar, reading a phantom byte the wire never
+/// carried and throwing `StateError: Buffer overflow` the first time a real
+/// caller decoded a real void-returning fallible response (consumer-repo
+/// finding, 2026-07-20) — see `ReturnPlan::Fallible::ok_codec`'s doc for the
+/// upstream half of this fix.
+fn emit_result_branch_arm(seq: &ReadSeq, reader_name: &str) -> String {
+    if seq.ops.is_empty() {
+        format!("({reader_name}) {{}}")
+    } else {
+        format!("({reader_name}) => {}", emit_reader_read(seq, reader_name))
+    }
+}
+
 pub fn emit_reader_read(seq: &ReadSeq, reader_name: &str) -> String {
     let op = seq.ops.first().expect("read ops");
     match op {
@@ -578,13 +600,13 @@ pub fn emit_reader_read(seq: &ReadSeq, reader_name: &str) -> String {
             ..
         } => emit_reader_vec(element_type, element, layout, reader_name),
         ReadOp::Result { ok, err, .. } => {
-            let ok_expr = emit_reader_read(ok, reader_name);
-            let err_expr = emit_reader_read(err, reader_name);
+            let ok_arm = emit_result_branch_arm(ok, reader_name);
+            let err_arm = emit_result_branch_arm(err, reader_name);
             format!(
                 r#"
 {reader_name}.readResult(
-  ({reader_name}) => {ok_expr},
-  ({reader_name}) => {err_expr}
+  {ok_arm},
+  {err_arm}
 )
             "#
             )
@@ -719,5 +741,83 @@ pub fn emit_size_expr(size: &SizeExpr) -> String {
                 err_expr
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::WireShape;
+
+    fn void_seq() -> ReadSeq {
+        ReadSeq {
+            size: SizeExpr::Fixed(0),
+            ops: vec![],
+            shape: WireShape::Value,
+        }
+    }
+
+    fn u8_seq() -> ReadSeq {
+        ReadSeq {
+            size: SizeExpr::Fixed(1),
+            ops: vec![ReadOp::Primitive {
+                primitive: PrimitiveType::U8,
+                offset: crate::ir::OffsetExpr::Base,
+            }],
+            shape: WireShape::Value,
+        }
+    }
+
+    // Regression (consumer-repo finding, 2026-07-20): `Ok(())`'s wire
+    // payload is zero bytes — `readResult` already consumes the whole
+    // 1-byte tag before either branch closure runs. The Ok arm used to
+    // forward straight to `emit_reader_read`, which always renders (and, for
+    // a genuinely empty `ReadSeq`, used to panic on) at least one read op —
+    // `readU8()` for a `Result<(), E>`'s ok side once a real codec finally
+    // reached this arm, throwing `StateError: Buffer overflow` against
+    // every real void-returning fallible call. This exercises the shared
+    // `emit_reader_read`/`ReadOp::Result` path both `call.rs` (methods/free
+    // functions) and `callback.rs` (callback trait methods) render through.
+    #[test]
+    fn void_ok_result_arm_reads_nothing_not_a_phantom_byte() {
+        let seq = ReadSeq {
+            size: SizeExpr::Runtime,
+            ops: vec![ReadOp::Result {
+                tag_offset: crate::ir::OffsetExpr::Base,
+                ok: Box::new(void_seq()),
+                err: Box::new(u8_seq()),
+            }],
+            shape: WireShape::Value,
+        };
+
+        let rendered = emit_reader_read(&seq, "reader");
+
+        assert_eq!(
+            rendered.matches("(reader) => reader.readU8()").count(),
+            1,
+            "exactly the Err arm reads a byte — the Ok arm must not: {rendered}"
+        );
+        assert!(
+            rendered.contains("(reader) {}"),
+            "the Ok arm must be a true no-op read: {rendered}"
+        );
+    }
+
+    #[test]
+    fn non_void_result_arms_are_unaffected() {
+        let seq = ReadSeq {
+            size: SizeExpr::Runtime,
+            ops: vec![ReadOp::Result {
+                tag_offset: crate::ir::OffsetExpr::Base,
+                ok: Box::new(u8_seq()),
+                err: Box::new(u8_seq()),
+            }],
+            shape: WireShape::Value,
+        };
+
+        let rendered = emit_reader_read(&seq, "reader");
+
+        assert_eq!(rendered.matches("(reader) => reader.readU8()").count(), 2);
+        assert!(!rendered.contains("(reader) {}"));
     }
 }

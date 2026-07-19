@@ -1375,11 +1375,29 @@ pub mod transport {
                 },
                 ReturnInvocationContext::CallbackVtable => match self {
                     Self::Void => ValueReturnMethod::DirectReturn,
-                    Self::Scalar(_) => ValueReturnMethod::WriteToOutParameter,
-                    Self::CompositeValue
-                    | Self::Buffer(_)
-                    | Self::ObjectHandle
-                    | Self::CallbackHandle => ValueReturnMethod::WriteToOutBufferParts,
+                    // A handle/callback return is a single scalar-shaped
+                    // token (the same `u64` handle carried directly in every
+                    // other context — see `HostCall`/`InlineClosure` above,
+                    // both `DirectReturn` for these two), never a
+                    // variable-length payload — it needs exactly one out
+                    // parameter, like `Scalar`. `ir::lower::abi`'s
+                    // `abi_callback_out_params` (the bindgen IR every
+                    // renderer — Dart, TypeScript, the new Kotlin/JNI
+                    // backends, C — actually builds the generated ABI from)
+                    // already treats `Transport::Handle`/`Transport::Callback`
+                    // this way; this arm used to disagree and classify them
+                    // as `WriteToOutBufferParts` (two out params), which is
+                    // what `boltffi_macros`' native vtable-struct codegen
+                    // reads — a genuine struct-layout mismatch between the
+                    // compiled Rust vtable and every generated language
+                    // binding for a callback method that returns a handle or
+                    // another callback (Codex review finding, 2026-07-20).
+                    Self::Scalar(_) | Self::ObjectHandle | Self::CallbackHandle => {
+                        ValueReturnMethod::WriteToOutParameter
+                    }
+                    Self::CompositeValue | Self::Buffer(_) => {
+                        ValueReturnMethod::WriteToOutBufferParts
+                    }
                 },
             }
         }
@@ -1493,6 +1511,61 @@ pub mod transport {
                     ReturnPlatform::Native,
                 ),
                 ValueReturnMethod::WriteToOutParameter
+            );
+        }
+
+        // Regression (Codex review finding, 2026-07-20): a callback method
+        // returning a handle/callback is a single scalar-shaped token, same
+        // as `Scalar` above — `ir::lower::abi::abi_callback_out_params`
+        // (the bindgen IR every renderer builds its generated ABI from)
+        // already emits exactly one out parameter for these transports. This
+        // arm used to disagree (`WriteToOutBufferParts`, two out params),
+        // which is what the native vtable-struct macro (`boltffi_macros`)
+        // reads when deciding the *compiled* Rust struct's field layout — a
+        // real struct-layout mismatch against every generated language
+        // binding for this callback shape.
+        #[test]
+        fn callback_vtable_object_handle_uses_out_parameter() {
+            assert_eq!(
+                ReturnContract::infallible(ValueReturnStrategy::ObjectHandle).value_return_method(
+                    ReturnInvocationContext::CallbackVtable,
+                    ReturnPlatform::Native,
+                ),
+                ValueReturnMethod::WriteToOutParameter
+            );
+        }
+
+        #[test]
+        fn callback_vtable_callback_handle_uses_out_parameter() {
+            assert_eq!(
+                ReturnContract::infallible(ValueReturnStrategy::CallbackHandle)
+                    .value_return_method(
+                        ReturnInvocationContext::CallbackVtable,
+                        ReturnPlatform::Native,
+                    ),
+                ValueReturnMethod::WriteToOutParameter
+            );
+        }
+
+        #[test]
+        fn callback_vtable_composite_and_buffer_still_use_out_buffer_parts() {
+            assert_eq!(
+                ReturnContract::infallible(ValueReturnStrategy::CompositeValue)
+                    .value_return_method(
+                        ReturnInvocationContext::CallbackVtable,
+                        ReturnPlatform::Native,
+                    ),
+                ValueReturnMethod::WriteToOutBufferParts
+            );
+            assert_eq!(
+                ReturnContract::infallible(ValueReturnStrategy::Buffer(
+                    EncodedReturnStrategy::WireEncoded
+                ))
+                .value_return_method(
+                    ReturnInvocationContext::CallbackVtable,
+                    ReturnPlatform::Native,
+                ),
+                ValueReturnMethod::WriteToOutBufferParts
             );
         }
     }

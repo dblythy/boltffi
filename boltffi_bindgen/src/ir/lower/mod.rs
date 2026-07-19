@@ -873,7 +873,7 @@ mod tests {
         });
 
         match async_plan.result {
-            ReturnPlan::Fallible { ok, err_codec } => {
+            ReturnPlan::Fallible { ok, err_codec, .. } => {
                 match ok {
                     Transport::Handle {
                         class_id: id,
@@ -972,7 +972,7 @@ mod tests {
 
         match plan.kind {
             CallPlanKind::Sync {
-                returns: ReturnPlan::Fallible { ok, err_codec },
+                returns: ReturnPlan::Fallible { ok, err_codec, .. },
             } => {
                 match ok {
                     Transport::Handle {
