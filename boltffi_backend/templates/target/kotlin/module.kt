@@ -8,11 +8,15 @@ import kotlinx.coroutines.launch
 {%- if stream_runtime %}
 import kotlinx.coroutines.channels.awaitClose
 {%- endif %}
+{%- if let Some(data_package) = data_package %}
+
+import {{ data_package }}.*
+{%- endif %}
 
 {{ runtime }}
 
 @Suppress("FunctionName")
-private object Native {
+{% if let Some(_) = data_package %}internal{% else %}private{% endif %} object Native {
     init {
         val androidLibrary = {{ native_libraries.android() }}
         val desktopPreferredLibrary = {{ native_libraries.desktop_jni() }}

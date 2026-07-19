@@ -30,6 +30,13 @@ use crate::{
 #[template(path = "target/kotlin/module.kt", escape = "none")]
 struct ModuleTemplate {
     package: KotlinPackage,
+    // Only `Some` when it differs from `package` — drives the `import` that lets classes/
+    // callbacks/functions whose signatures reference a record/enum (rendered by-value into
+    // `data_package`) resolve them, and widens the runtime helpers records/enums call back into
+    // (`Native`, `Utf8Codec`, ...) from file-private to module-internal so the split-out data
+    // file can still reach them. See `ModuleDataTemplate::ffi_package`'s doc comment for the
+    // mirror-image case.
+    data_package: Option<KotlinPackage>,
     native_libraries: LibraryLiterals,
     resource_platforms: &'static [Platform],
     runtime: String,
@@ -41,18 +48,43 @@ struct ModuleTemplate {
 }
 
 #[derive(AskamaTemplate)]
+#[template(path = "target/kotlin/module_data.kt", escape = "none")]
+struct ModuleDataTemplate {
+    package: KotlinPackage,
+    // Only `Some` (and only ever rendered) when a split is active — see `ModuleTemplate::
+    // data_package`'s doc comment for the mirror-image case. Imported so records/enums' own
+    // `#[data(impl)]`/initializer methods can still reach `Native`/`WireReader`/`WireWriter`/
+    // `Utf8Codec`, which stay declared in `ffi_package`.
+    ffi_package: KotlinPackage,
+    declarations: String,
+}
+
+#[derive(AskamaTemplate)]
 #[template(path = "target/kotlin/runtime.kt", escape = "none")]
 struct RuntimeTemplate {
     record_vectors: bool,
+    // Widens the file-private codec helpers (`Utf8Codec`, `DirectVectorCodec`, `WireWriterPool`)
+    // records/enums call into from `private` (file-scoped) to `internal` (module-scoped) — only
+    // needed, and only rendered, when records/enums render into a separate file (see
+    // `ModuleTemplate::data_package`). `false` reproduces today's byte-for-byte output.
+    split_data_package: bool,
 }
 
 #[derive(AskamaTemplate)]
 #[template(path = "target/kotlin/runtime/result.kt", escape = "none")]
-struct ResultRuntimeTemplate;
+struct ResultRuntimeTemplate {
+    // See `RuntimeTemplate::split_data_package`'s doc comment — a record/enum field of a
+    // `Result<T, E>` shape calls these extension functions too.
+    split_data_package: bool,
+}
 
 #[derive(AskamaTemplate)]
 #[template(path = "target/kotlin/runtime/builtin.kt", escape = "none")]
-struct BuiltinRuntimeTemplate;
+struct BuiltinRuntimeTemplate {
+    // See `RuntimeTemplate::split_data_package`'s doc comment — records/enums with a
+    // `Duration`/`SystemTime`/`Uuid`/`Url` field call these extension functions too.
+    split_data_package: bool,
+}
 
 #[derive(AskamaTemplate)]
 #[template(path = "target/kotlin/runtime/async.kt", escape = "none")]
@@ -136,27 +168,49 @@ impl<'host, 'bridge, 'decl> Module<'host, 'bridge, 'decl> {
         let diagnostics = self.diagnostics();
         let native_functions = self.native_functions()?;
         let closures = self.closures()?;
-        let declarations = self.declarations()?;
         let features = RuntimeFeatures::from_declarations(&self.declarations);
-        let contents = ModuleTemplate {
-            package: self.host.package().clone(),
+        let package = self.host.package().clone();
+        let data_package = self.host.resolved_data_package().clone();
+        let split = data_package != package;
+
+        let ffi_declarations = if split {
+            self.ffi_declarations()?
+        } else {
+            self.declarations()?
+        };
+        let ffi_contents = ModuleTemplate {
+            package: package.clone(),
+            data_package: split.then(|| data_package.clone()),
             native_libraries: LibraryLiterals::new(self.host.native_libraries()),
             resource_platforms: PLATFORMS,
-            runtime: Runtime::new(features).render()?,
+            runtime: Runtime::new(features, split).render()?,
             closures,
             native_functions,
-            declarations,
+            declarations: ffi_declarations,
             async_runtime: features.asynchronous,
             stream_runtime: features.streaming,
         }
         .render()?;
-        Ok(GeneratedOutput::new(
-            vec![GeneratedFile::new(
-                FilePath::new(self.host.file().path(self.host.package()))?,
-                contents,
-            )],
-            diagnostics,
-        ))
+        let mut files = vec![GeneratedFile::new(
+            FilePath::new(self.host.file().path(&package))?,
+            ffi_contents,
+        )];
+
+        if split {
+            let data_declarations = self.data_declarations()?;
+            let data_contents = ModuleDataTemplate {
+                package: data_package.clone(),
+                ffi_package: package,
+                declarations: data_declarations,
+            }
+            .render()?;
+            files.push(GeneratedFile::new(
+                FilePath::new(self.host.file().path(&data_package))?,
+                data_contents,
+            ));
+        }
+
+        Ok(GeneratedOutput::new(files, diagnostics))
     }
 
     fn native_functions(&self) -> Result<Vec<NativeFunction>> {
@@ -310,6 +364,45 @@ impl<'host, 'bridge, 'decl> Module<'host, 'bridge, 'decl> {
         ]))
     }
 
+    /// Every non-DTO declaration kind — the ffi-package file's content when a data-package split
+    /// is active (records/enums render into `data_declarations` instead). Mirrors
+    /// `all_declarations`/`object_declarations` minus the record/enumeration groups.
+    fn ffi_declarations(&self) -> Result<String> {
+        match self.host.api_layout() {
+            KotlinApiStyle::TopLevel => Ok(Self::join_declarations([
+                self.custom_types()?,
+                self.callbacks()?,
+                self.classes()?,
+                self.streams()?,
+                self.constants()?,
+                self.functions()?,
+            ])),
+            KotlinApiStyle::ModuleObject => {
+                let callbacks = self.callbacks()?.join("\n\n");
+                let declarations = self.api_declarations(Self::join_declarations([
+                    self.custom_types()?,
+                    self.classes()?,
+                    self.streams()?,
+                    self.constants()?,
+                    self.functions()?,
+                ]));
+                Ok([callbacks, declarations]
+                    .into_iter()
+                    .filter(|chunk| !chunk.is_empty())
+                    .collect::<Vec<_>>()
+                    .join("\n\n"))
+            }
+        }
+    }
+
+    /// The DTO surface (records/enums) — the data-package file's content when a split is active.
+    fn data_declarations(&self) -> Result<String> {
+        Ok(Self::join_declarations([
+            self.records()?,
+            self.enumerations()?,
+        ]))
+    }
+
     fn object_declarations(&self) -> Result<String> {
         Ok(Self::join_declarations([
             self.custom_types()?,
@@ -363,17 +456,22 @@ impl<'host, 'bridge, 'decl> Module<'host, 'bridge, 'decl> {
 
 struct Runtime {
     features: RuntimeFeatures,
+    split_data_package: bool,
 }
 
 impl Runtime {
-    fn new(features: RuntimeFeatures) -> Self {
-        Self { features }
+    fn new(features: RuntimeFeatures, split_data_package: bool) -> Self {
+        Self {
+            features,
+            split_data_package,
+        }
     }
 
     fn render(self) -> Result<String> {
         let mut blocks = vec![
             RuntimeTemplate {
                 record_vectors: self.features.record_vectors,
+                split_data_package: self.split_data_package,
             }
             .render()?,
         ];
@@ -384,10 +482,20 @@ impl Runtime {
             blocks.push(StreamRuntimeTemplate.render()?);
         }
         if self.features.builtin {
-            blocks.push(BuiltinRuntimeTemplate.render()?);
+            blocks.push(
+                BuiltinRuntimeTemplate {
+                    split_data_package: self.split_data_package,
+                }
+                .render()?,
+            );
         }
         if self.features.result {
-            blocks.push(ResultRuntimeTemplate.render()?);
+            blocks.push(
+                ResultRuntimeTemplate {
+                    split_data_package: self.split_data_package,
+                }
+                .render()?,
+            );
         }
         Ok(blocks.join("\n\n"))
     }

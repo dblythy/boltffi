@@ -61,6 +61,7 @@ pub enum KotlinFactoryStyle {
 #[non_exhaustive]
 pub struct KotlinHost {
     package: KotlinPackage,
+    data_package: Option<KotlinPackage>,
     file: KotlinFile,
     c_header: PathBuf,
     jni_source: PathBuf,
@@ -77,6 +78,7 @@ impl KotlinHost {
     pub fn new(package: impl Into<String>, file: impl Into<String>) -> Result<Self> {
         Ok(Self {
             package: KotlinPackage::parse(package)?,
+            data_package: None,
             file: KotlinFile::parse(file)?,
             c_header: PathBuf::from("jni/boltffi.h"),
             jni_source: PathBuf::from("jni/jni_glue.c"),
@@ -85,6 +87,17 @@ impl KotlinHost {
             factory_style: KotlinFactoryStyle::default(),
             custom_mappings: crate::core::CustomTypeMappingSet::default(),
         })
+    }
+
+    /// Selects the package used by generated records/enums (the DTO/public-contract surface).
+    /// Defaults to [`Self::package`] when unset, so callers that never split data from handles
+    /// see no change. Handle types (classes/callbacks/functions/streams/constants) always stay
+    /// on `package` — only records and enums move, so a consumer's own `com.parsecore.ffi`
+    /// handle imports never leak a raw DTO, and a hand-written shim type of the same simple name
+    /// as a generated DTO never collides.
+    pub fn data_package(mut self, package: impl Into<String>) -> Result<Self> {
+        self.data_package = Some(KotlinPackage::parse(package)?);
+        Ok(self)
     }
 
     /// Selects the generated C header path.
@@ -165,6 +178,12 @@ impl KotlinHost {
     /// Returns the Kotlin package name.
     pub fn package(&self) -> &KotlinPackage {
         &self.package
+    }
+
+    /// Returns the package records/enums render into. Falls back to [`Self::package`] when
+    /// `data_package` was never set, so the default (single-package) output is unaffected.
+    pub fn resolved_data_package(&self) -> &KotlinPackage {
+        self.data_package.as_ref().unwrap_or(&self.package)
     }
 
     /// Returns the generated Kotlin file name.
@@ -295,7 +314,7 @@ impl host::HostBackend for KotlinHost {
             self,
             bridge,
             context,
-            Some(self.package()),
+            Some(self.resolved_data_package()),
         )?
         .render()
     }

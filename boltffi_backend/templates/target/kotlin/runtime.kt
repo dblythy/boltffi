@@ -1,4 +1,4 @@
-private object Utf8Codec {
+{% if split_data_package %}internal{% else %}private{% endif %} object Utf8Codec {
     fun maxBytes(value: String): Int = value.length * 3
 }
 
@@ -6,7 +6,7 @@ class FfiException(message: String) : RuntimeException(message)
 
 internal class BoltFfiErrorBufferException(val bytes: ByteArray) : RuntimeException("BoltFFI call failed")
 
-private object DirectVectorCodec {
+{% if split_data_package %}internal{% else %}private{% endif %} object DirectVectorCodec {
     fun readBooleanArray(bytes: ByteArray): BooleanArray =
         BooleanArray(bytes.size) { index -> bytes[index] != 0.toByte() }
 
@@ -582,7 +582,7 @@ internal class WireWriter(initialCapacity: Int) {
 
 private const val MAX_CACHED_WIRE_WRITER_BYTES: Int = 1024 * 1024
 
-private class WireWriterPoolState(private val cacheSize: Int = 4) {
+{% if split_data_package %}internal{% else %}private{% endif %} class WireWriterPoolState(private val cacheSize: Int = 4) {
     private val cachedWriters: Array<WireWriter?> = arrayOfNulls(cacheSize)
     private var depth = 0
 
@@ -605,7 +605,7 @@ private class WireWriterPoolState(private val cacheSize: Int = 4) {
     }
 }
 
-private class BorrowedWireWriter(
+{% if split_data_package %}internal{% else %}private{% endif %} class BorrowedWireWriter(
     private val state: WireWriterPoolState,
     val writer: WireWriter,
 ) : AutoCloseable {
@@ -620,7 +620,7 @@ private class BorrowedWireWriter(
     }
 }
 
-private object WireWriterPool {
+{% if split_data_package %}internal{% else %}private{% endif %} object WireWriterPool {
     private val state: ThreadLocal<WireWriterPoolState> =
         ThreadLocal.withInitial { WireWriterPoolState() }
 
