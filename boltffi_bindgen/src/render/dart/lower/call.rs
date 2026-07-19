@@ -9,8 +9,12 @@
 //! `emit::emit_reader_read`/`emit::emit_size_expr`, already proven by the record
 //! field codec) rather than inventing a parallel one.
 
+use super::callback::handle_map_instance_name;
 use crate::{
-    ir::{AbiCall, CallMode, ErrorTransport, ParamRole, ReturnDef, ReturnShape, Transport, TypeExpr},
+    ir::{
+        AbiCall, CallMode, CallbackStyle, ErrorTransport, ParamRole, ReturnDef, ReturnShape,
+        Transport, TypeExpr,
+    },
     render::dart::{DartNativeType, NamingConvention, emit},
 };
 
@@ -211,12 +215,44 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                         // which accessor the buffer kind needs.
                         len_exprs.insert(dart_name, len_accessor);
                     }
-                    Transport::Callback { .. } => {
-                        // Passing a Dart closure/interface INTO a native call
-                        // (as opposed to a stream/async completion, both of
-                        // which already work) is not yet implemented here.
+                    Transport::Callback {
+                        callback_id,
+                        nullable,
+                        style: CallbackStyle::BoxedDyn,
+                    } => {
+                        // Boxes the Dart implementation into a
+                        // `_$$BoltFFICallbackHandle` (handle + vtable
+                        // pointer, passed by value like a `Composite` param)
+                        // through the same handle map `callback.txt` already
+                        // builds for the *returning* direction — `createHandle`
+                        // registers the impl and clones the shared vtable.
+                        let handle_map = handle_map_instance_name(callback_id);
+                        let var = buffer_var(&dart_name);
+                        let create_expr = format!("{handle_map}.createHandle({dart_name})");
+                        let expr = if *nullable {
+                            format!(
+                                "({dart_name} == null ? ($$ffi.Struct.create<_$$BoltFFICallbackHandle>()..handle = 0..vtable = $$ffi.nullptr) : {create_expr})"
+                            )
+                        } else {
+                            create_expr
+                        };
+                        setup.push(format!("final {var} = {expr};"));
+                        slots.push(ArgSlot::Expr(var));
+                    }
+                    Transport::Callback {
+                        style: CallbackStyle::ImplTrait,
+                        ..
+                    } => {
+                        // A closure passed *into* a native call would need a
+                        // `NativeCallable` minted per call from an arbitrary
+                        // runtime closure — `Pointer.fromFunction` (used for
+                        // the trait/vtable style above) only accepts a
+                        // static function known at compile time. Out of
+                        // scope here: this renderer's callback support is
+                        // the trait/vtable style (`BoxedDyn`) LiveQuery-style
+                        // listeners need.
                         slots.push(ArgSlot::Expr(format!(
-                            "(throw UnsupportedError('{dart_name}: callback-typed parameters are not yet supported by this renderer'))"
+                            "(throw UnsupportedError('{dart_name}: closure-typed parameters are not yet supported by this renderer'))"
                         )));
                     }
                 }
@@ -874,5 +910,164 @@ mod tests {
             "body: {}",
             method.body
         );
+    }
+
+    fn callback_trait(id: &str, method_id: &str) -> crate::ir::CallbackTraitDef {
+        crate::ir::CallbackTraitDef {
+            id: crate::ir::CallbackId::new(id),
+            methods: vec![crate::ir::CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: crate::ir::MethodId::new(method_id),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: crate::ir::CallbackKind::Trait,
+            doc: None,
+        }
+    }
+
+    #[test]
+    fn boxed_dyn_callback_param_is_boxed_through_the_handle_map() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog
+            .insert_callback(callback_trait("Listener", "on_event"));
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Subject"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new("subscribe"),
+                receiver: Receiver::RefSelf,
+                params: vec![ParamDef {
+                    name: ParamName::new("listener"),
+                    type_expr: TypeExpr::Callback(crate::ir::CallbackId::new("Listener")),
+                    passing: ParamPassing::BoxedDyn,
+                    doc: None,
+                }],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].methods[0].body;
+
+        assert!(
+            body.contains("_k$ListenerHandleMap.createHandle(listener)"),
+            "body: {body}"
+        );
+        assert!(!body.contains("UnsupportedError"), "body: {body}");
+    }
+
+    #[test]
+    fn nullable_boxed_dyn_callback_param_falls_back_to_a_zero_handle() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog
+            .insert_callback(callback_trait("Listener", "on_event"));
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Subject"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new("subscribe"),
+                receiver: Receiver::RefSelf,
+                params: vec![ParamDef {
+                    name: ParamName::new("listener"),
+                    type_expr: TypeExpr::Option(Box::new(TypeExpr::Callback(
+                        crate::ir::CallbackId::new("Listener"),
+                    ))),
+                    passing: ParamPassing::BoxedDyn,
+                    doc: None,
+                }],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].methods[0].body;
+
+        assert!(body.contains("listener == null ?"), "body: {body}");
+        assert!(
+            body.contains("_k$ListenerHandleMap.createHandle(listener)"),
+            "body: {body}"
+        );
+        assert!(body.contains("..handle = 0"), "body: {body}");
+    }
+
+    // Regression guard: a closure-style (`ImplTrait`) callback param must
+    // keep failing loudly — it has no handle map to box into (only
+    // `CallbackKind::Trait` callbacks get one; `lower_callbacks` skips
+    // `Closure`), and boxing it as if it were `BoxedDyn` would reference a
+    // handle map that was never generated.
+    #[test]
+    fn impl_trait_callback_param_still_reports_unsupported() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_callback(crate::ir::CallbackTraitDef {
+            id: crate::ir::CallbackId::new("ClosureCb"),
+            methods: vec![crate::ir::CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: crate::ir::MethodId::new("call"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: crate::ir::CallbackKind::Closure,
+            doc: None,
+        });
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Subject"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new("on_tick"),
+                receiver: Receiver::RefSelf,
+                params: vec![ParamDef {
+                    name: ParamName::new("cb"),
+                    type_expr: TypeExpr::Callback(crate::ir::CallbackId::new("ClosureCb")),
+                    passing: ParamPassing::ImplTrait,
+                    doc: None,
+                }],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].methods[0].body;
+
+        assert!(body.contains("UnsupportedError"), "body: {body}");
+        assert!(!body.contains("HandleMap"), "body: {body}");
     }
 }

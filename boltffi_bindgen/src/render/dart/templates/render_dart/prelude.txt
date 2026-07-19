@@ -134,6 +134,18 @@ final class _$$WireWriter {
     return obj;
   }
 
+  /// Same allocation as the default factory, but with no GC finalizer
+  /// attached: for a buffer whose ownership transfers to native code (a
+  /// callback trampoline's return value, freed by Rust's own `free()` once
+  /// it has read it), attaching one here would race that free with a
+  /// double-free once the Dart-side wrapper is collected.
+  factory _$$WireWriter.transferOut([int initialCapacity = 256]) {
+    final ptr = $$extffi.calloc.allocate<$$ffi.Uint8>(initialCapacity);
+    final data = ptr.asTypedList(initialCapacity);
+
+    return _$$WireWriter._(ptr, data, 0);
+  }
+
   $$ffi.Pointer<$$ffi.Uint8> get ptr => _ptr;
 
   int get len => _offset;
