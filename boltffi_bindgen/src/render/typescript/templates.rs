@@ -1144,6 +1144,7 @@ mod tests {
                 is_default: true,
                 params: vec![],
                 returns_nullable_handle: false,
+                throws: false,
                 doc: Some("Creates a counter".to_string()),
             }],
             methods: vec![
@@ -1162,6 +1163,7 @@ mod tests {
                     mode: TsClassMethodMode::Sync(TsClassSyncMethod {
                         return_route: TsOutputRoute::direct(String::new()),
                     }),
+                    throws: false,
                     doc: None,
                 },
                 TsClassMethod {
@@ -1181,6 +1183,7 @@ mod tests {
                         free_ffi_name: "boltffi_counter_next_value_free".to_string(),
                         return_route: TsOutputRoute::packed("reader.readI32()".to_string()),
                     }),
+                    throws: false,
                     doc: None,
                 },
             ],
@@ -1205,6 +1208,7 @@ mod tests {
                     input_route: TsInputRoute::String,
                 }],
                 returns_nullable_handle: true,
+                throws: false,
                 doc: None,
             }],
             methods: vec![],
@@ -1214,6 +1218,45 @@ mod tests {
         let rendered = ClassTemplate { cls: &class }.render().unwrap();
         assert!(rendered.contains("static open(path: string): Session | null {"));
         assert!(rendered.contains("if (handle === 0) {\n        return null;\n      }"));
+    }
+
+    #[test]
+    fn class_fallible_constructor_throws_instead_of_returning_null() {
+        let class = TsClass {
+            class_name: "Inventory".to_string(),
+            ffi_free: "boltffi_inventory_free".to_string(),
+            constructors: vec![TsClassConstructor {
+                ts_name: "tryNew".to_string(),
+                ffi_name: "boltffi_inventory_try_new".to_string(),
+                is_default: false,
+                params: vec![TsParam {
+                    name: "capacity".to_string(),
+                    ts_type: "number".to_string(),
+                    input_route: TsInputRoute::Direct,
+                }],
+                returns_nullable_handle: true,
+                throws: true,
+                doc: None,
+            }],
+            methods: vec![],
+            doc: None,
+        };
+
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+        assert!(
+            rendered.contains("static tryNew(capacity: number): Inventory {"),
+            "a throwing constructor must not advertise `| null` in its return type; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "if (handle === 0) {\n      throw new Error(_module.takeLastErrorMessage());\n    }"
+            ),
+            "a fallible constructor must throw the real last-error message instead of returning null; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return null;"),
+            "a throwing constructor must never silently return null; got:\n{rendered}"
+        );
     }
 
     #[test]
@@ -1238,6 +1281,7 @@ mod tests {
                     free_ffi_name: "boltffi_counter_next_value_free".to_string(),
                     return_route: TsOutputRoute::packed("reader.readI32()".to_string()),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1281,6 +1325,7 @@ mod tests {
                         "QueryResultCodec.decode(reader)".to_string(),
                     ),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1369,6 +1414,7 @@ mod tests {
                 mode: TsClassMethodMode::Sync(TsClassSyncMethod {
                     return_route: TsOutputRoute::direct(String::new()),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1388,6 +1434,7 @@ mod tests {
                 is_default: true,
                 params: vec![],
                 returns_nullable_handle: false,
+                throws: false,
                 doc: None,
             }],
             methods: vec![TsClassMethod {
@@ -1405,6 +1452,7 @@ mod tests {
                 mode: TsClassMethodMode::Sync(TsClassSyncMethod {
                     return_route: TsOutputRoute::void(),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1433,6 +1481,7 @@ mod tests {
                 mode: TsClassMethodMode::Sync(TsClassSyncMethod {
                     return_route: TsOutputRoute::direct(String::new()),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1465,6 +1514,7 @@ mod tests {
                 mode: TsClassMethodMode::Sync(TsClassSyncMethod {
                     return_route: TsOutputRoute::direct(String::new()),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1496,6 +1546,7 @@ mod tests {
                 mode: TsClassMethodMode::Sync(TsClassSyncMethod {
                     return_route: TsOutputRoute::void(),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
@@ -1532,11 +1583,102 @@ mod tests {
                         "QueryResultCodec.decode(reader)".to_string(),
                     ),
                 }),
+                throws: false,
                 doc: None,
             }],
             doc: None,
         };
         let template = ClassTemplate { cls: &class };
         insta::assert_snapshot!(template.render().unwrap());
+    }
+
+    #[test]
+    fn class_fallible_sync_method_returning_handle_throws_instead_of_returning_null() {
+        let class = TsClass {
+            class_name: "Map".to_string(),
+            ffi_free: "boltffi_map_free".to_string(),
+            constructors: vec![],
+            methods: vec![TsClassMethod {
+                ts_name: "tryClone".to_string(),
+                ffi_name: "boltffi_map_try_clone".to_string(),
+                is_static: false,
+                params: vec![],
+                return_type: Some("Map".to_string()),
+                return_handle: Some(TsHandleReturn {
+                    class_name: "Map".to_string(),
+                    nullable: true,
+                }),
+                return_callback: None,
+                mode: TsClassMethodMode::Sync(TsClassSyncMethod {
+                    return_route: TsOutputRoute::direct(String::new()),
+                }),
+                throws: true,
+                doc: None,
+            }],
+            doc: None,
+        };
+        let template = ClassTemplate { cls: &class };
+        let rendered = template.render().unwrap();
+        assert!(
+            rendered.contains("tryClone(): Map {"),
+            "a throwing method must not advertise `| null` in its return type; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "if (result === 0) {\n      throw new Error(_module.takeLastErrorMessage());\n    }"
+            ),
+            "a fallible handle-returning method must throw the real last-error message instead of returning null; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return null;"),
+            "a throwing method must never silently return null; got:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn class_fallible_async_method_returning_handle_throws_instead_of_returning_null() {
+        let class = TsClass {
+            class_name: "Map".to_string(),
+            ffi_free: "boltffi_map_free".to_string(),
+            constructors: vec![],
+            methods: vec![TsClassMethod {
+                ts_name: "tryCloneAsync".to_string(),
+                ffi_name: "boltffi_map_try_clone_async".to_string(),
+                is_static: false,
+                params: vec![],
+                return_type: Some("Map".to_string()),
+                return_handle: Some(TsHandleReturn {
+                    class_name: "Map".to_string(),
+                    nullable: true,
+                }),
+                return_callback: None,
+                mode: TsClassMethodMode::Async(TsClassAsyncMethod {
+                    poll_sync_ffi_name: "boltffi_map_try_clone_async_poll_sync".to_string(),
+                    complete_ffi_name: "boltffi_map_try_clone_async_complete".to_string(),
+                    panic_message_ffi_name: "boltffi_map_try_clone_async_panic_message"
+                        .to_string(),
+                    cancel_ffi_name: "boltffi_map_try_clone_async_cancel".to_string(),
+                    free_ffi_name: "boltffi_map_try_clone_async_free".to_string(),
+                    return_route: TsOutputRoute::packed("reader.readU64()".to_string()),
+                }),
+                throws: true,
+                doc: None,
+            }],
+            doc: None,
+        };
+        let template = ClassTemplate { cls: &class };
+        let rendered = template.render().unwrap();
+        assert!(
+            rendered.contains("async tryCloneAsync(): Promise<Map> {"),
+            "a throwing async method must not advertise `| null` in its return type; got:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("throw new Error(_module.takeLastErrorMessage());"),
+            "a fallible async handle-returning method must throw the real last-error message instead of returning null; got:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("return null;"),
+            "a throwing async method must never silently return null; got:\n{rendered}"
+        );
     }
 }

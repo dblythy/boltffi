@@ -764,6 +764,8 @@ impl<'a> TypeScriptLowerer<'a> {
             })
             .collect();
 
+        let (throws, _err_type) = self.lower_error(&abi_call.error);
+
         TsClassConstructor {
             ts_name,
             ffi_name: abi_call.symbol.as_str().to_string(),
@@ -773,6 +775,7 @@ impl<'a> TypeScriptLowerer<'a> {
                 abi_call.returns.transport,
                 Some(Transport::Handle { nullable: true, .. })
             ),
+            throws,
             doc: constructor.doc().map(String::from),
         }
     }
@@ -816,7 +819,7 @@ impl<'a> TypeScriptLowerer<'a> {
             })
             .collect();
 
-        let (return_type, return_handle, return_callback, mode) = match &abi_call.mode {
+        let (return_type, return_handle, return_callback, mode, throws) = match &abi_call.mode {
             CallMode::Sync => {
                 let (return_type, return_route) = self.select_output_route(
                     &abi_call.returns,
@@ -831,11 +834,14 @@ impl<'a> TypeScriptLowerer<'a> {
                     _ => None,
                 };
                 let return_callback = self.callback_return(&abi_call.returns);
+                let throws = return_handle.is_some()
+                    && matches!(&method_def.returns, ReturnDef::Result { .. });
                 (
                     return_type,
                     return_handle,
                     return_callback,
                     TsClassMethodMode::Sync(TsClassSyncMethod { return_route }),
+                    throws,
                 )
             }
             CallMode::Async(async_call) => {
@@ -853,6 +859,13 @@ impl<'a> TypeScriptLowerer<'a> {
                     _ => None,
                 };
                 let return_callback = self.callback_return(&async_call.result);
+                // `AsyncCall::error` is unconditionally `ErrorReturnStrategy::StatusCode`
+                // (async_call_for_method forces it, since completion always reports failure
+                // through the poll-status channel) — it no longer reflects whether the
+                // method's source signature was truly fallible. The source `ReturnDef` is
+                // the only signal that survives that overwrite.
+                let throws = return_handle.is_some()
+                    && matches!(&method_def.returns, ReturnDef::Result { .. });
                 (
                     return_type,
                     return_handle,
@@ -865,6 +878,7 @@ impl<'a> TypeScriptLowerer<'a> {
                         free_ffi_name: format!("{entry_ffi_name}_free"),
                         return_route,
                     }),
+                    throws,
                 )
             }
         };
@@ -878,6 +892,7 @@ impl<'a> TypeScriptLowerer<'a> {
             return_handle,
             return_callback,
             mode,
+            throws,
             doc: method_def.doc.clone(),
         }
     }
@@ -3490,6 +3505,76 @@ mod tests {
     }
 
     #[test]
+    fn class_fallible_constructor_lowers_to_a_throwing_binding() {
+        // `pub fn try_new(ok: bool) -> Result<Self, SomeError>` — the constructor never
+        // wire-encodes its error (handles aren't wire-decodable), so it must be marked
+        // `throws` and never advertise a nullable return: a null handle here means the
+        // call failed, not that "there is no value" the way an `Option<Self>`
+        // constructor's null does.
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(ClassDef {
+            id: ClassId::new("Inventory"),
+            constructors: vec![ConstructorDef::NamedFactory {
+                name: MethodId::new("try_new"),
+                is_fallible: true,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract(&contract);
+        let class = module
+            .classes
+            .iter()
+            .find(|c| c.class_name == "Inventory")
+            .expect("class should be lowered");
+
+        let constructor = &class.constructors[0];
+        assert!(
+            constructor.throws,
+            "a Result<Self, Error> constructor must be marked throws"
+        );
+        assert!(
+            constructor.returns_nullable_handle,
+            "the handle transport is still nullable at the ABI level (0 signals failure)"
+        );
+    }
+
+    #[test]
+    fn class_infallible_constructor_never_throws() {
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(ClassDef {
+            id: ClassId::new("Counter"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract(&contract);
+        let class = module
+            .classes
+            .iter()
+            .find(|c| c.class_name == "Counter")
+            .expect("class should be lowered");
+
+        assert!(!class.constructors[0].throws);
+        assert!(!class.constructors[0].returns_nullable_handle);
+    }
+
+    #[test]
     fn value_type_constructor_name_collision_returns_error() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
@@ -4121,6 +4206,131 @@ mod tests {
             }
             _ => panic!("expected sync method"),
         }
+    }
+
+    #[test]
+    fn class_sync_method_returning_result_of_self_lowers_to_a_throwing_binding() {
+        // `pub fn try_clone(&self) -> Result<Self, String>` — same handle-return shape
+        // as a fallible constructor (boltffi_macros lowers both through the identical
+        // handle-out + set_last_error native path), so it must throw instead of
+        // returning null on failure too.
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(ClassDef {
+            id: ClassId::new("Map"),
+            constructors: vec![],
+            methods: vec![MethodDef {
+                id: MethodId::new("try_clone"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Result {
+                    ok: TypeExpr::Handle(ClassId::new("Map")),
+                    err: TypeExpr::String,
+                },
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract(&contract);
+        let class = module
+            .classes
+            .iter()
+            .find(|c| c.class_name == "Map")
+            .expect("class should be lowered");
+
+        let method = &class.methods[0];
+        assert!(
+            method.throws,
+            "a Result<Self, Error> method must be marked throws"
+        );
+        assert_eq!(
+            method.return_handle.as_ref().map(|h| h.nullable),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn class_async_method_returning_result_of_handle_lowers_to_a_throwing_binding() {
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(ClassDef {
+            id: ClassId::new("Map"),
+            constructors: vec![],
+            methods: vec![MethodDef {
+                id: MethodId::new("try_clone_async"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Result {
+                    ok: TypeExpr::Handle(ClassId::new("Map")),
+                    err: TypeExpr::String,
+                },
+                execution_kind: ExecutionKind::Async,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract(&contract);
+        let class = module
+            .classes
+            .iter()
+            .find(|c| c.class_name == "Map")
+            .expect("class should be lowered");
+
+        let method = &class.methods[0];
+        assert!(
+            method.throws,
+            "an async Result<Self, Error> method must be marked throws \
+             even though AsyncCall::error is always StatusCode"
+        );
+    }
+
+    #[test]
+    fn class_method_returning_option_of_handle_never_throws() {
+        // `pub fn get(&self) -> Option<Entry>` — a genuinely absent value, never a
+        // failure. Must keep returning null, never throw.
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(ClassDef {
+            id: ClassId::new("Cache"),
+            constructors: vec![],
+            methods: vec![MethodDef {
+                id: MethodId::new("get"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Value(TypeExpr::Option(Box::new(TypeExpr::Handle(
+                    ClassId::new("Entry"),
+                )))),
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract(&contract);
+        let class = module
+            .classes
+            .iter()
+            .find(|c| c.class_name == "Cache")
+            .expect("class should be lowered");
+
+        let method = &class.methods[0];
+        assert!(
+            !method.throws,
+            "an Option<Handle> method must never throw — null is a valid absent value"
+        );
+        assert_eq!(
+            method.return_handle.as_ref().map(|h| h.nullable),
+            Some(true)
+        );
     }
 
     #[test]

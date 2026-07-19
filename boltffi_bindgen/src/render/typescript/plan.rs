@@ -79,6 +79,11 @@ pub struct TsClassConstructor {
     pub is_default: bool,
     pub params: Vec<TsParam>,
     pub returns_nullable_handle: bool,
+    /// True when a `null` handle means the constructor failed (`Result<Self, Error>`),
+    /// as opposed to a genuinely optional constructor (`Option<Self>`). A throwing
+    /// constructor never returns `null` — it throws with the real failure message
+    /// instead, via `BoltFFIModule.takeLastErrorMessage()`.
+    pub throws: bool,
     pub doc: Option<String>,
 }
 
@@ -114,6 +119,10 @@ pub struct TsClassMethod {
     pub return_handle: Option<TsHandleReturn>,
     pub return_callback: Option<TsCallbackHandleReturn>,
     pub mode: TsClassMethodMode,
+    /// True when a `null` handle return means the call failed (`Result<Handle, Error>`),
+    /// as opposed to a genuinely optional return (`Option<Handle>`). Mirrors
+    /// `TsClassConstructor::throws` — see its doc for the failure-vs-absence distinction.
+    pub throws: bool,
     pub doc: Option<String>,
 }
 

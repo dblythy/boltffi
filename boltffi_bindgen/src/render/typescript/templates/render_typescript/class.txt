@@ -44,13 +44,17 @@ export class {{ cls.class_name }} {
   }
 {%- for constructor in cls.constructors %}
 
-{{ crate::render::typescript::templates::ts_doc_block(constructor.doc, "  ") }}  static {{ constructor.ts_name }}({% for param in constructor.params %}{{ param.name }}: {{ param.ts_type }}{% if !loop.last %}, {% endif %}{% endfor %}): {{ cls.class_name }}{% if constructor.returns_nullable_handle %} | null{% endif %} {
+{{ crate::render::typescript::templates::ts_doc_block(constructor.doc, "  ") }}  static {{ constructor.ts_name }}({% for param in constructor.params %}{{ param.name }}: {{ param.ts_type }}{% if !loop.last %}, {% endif %}{% endfor %}): {{ cls.class_name }}{% if constructor.returns_nullable_handle && !constructor.throws %} | null{% endif %} {
 {%- if !constructor.wrapper_code().is_empty() %}
     {{ constructor.wrapper_code() }}
 {%- endif %}
 {%- if constructor.cleanup_code().is_empty() %}
     const handle = (_exports.{{ constructor.ffi_name }} as Function)({{ constructor.ffi_call_args() }});
-{%- if constructor.returns_nullable_handle %}
+{%- if constructor.throws %}
+    if (handle === 0) {
+      throw new Error(_module.takeLastErrorMessage());
+    }
+{%- elif constructor.returns_nullable_handle %}
     if (handle === 0) {
       return null;
     }
@@ -59,7 +63,11 @@ export class {{ cls.class_name }} {
 {%- else %}
     try {
       const handle = (_exports.{{ constructor.ffi_name }} as Function)({{ constructor.ffi_call_args() }});
-{%- if constructor.returns_nullable_handle %}
+{%- if constructor.throws %}
+      if (handle === 0) {
+        throw new Error(_module.takeLastErrorMessage());
+      }
+{%- elif constructor.returns_nullable_handle %}
       if (handle === 0) {
         return null;
       }
@@ -88,7 +96,11 @@ export class {{ cls.class_name }} {
 {%- elif sync_method.return_route.is_direct() %}
 {%- if let Some(handle_return) = method.return_handle %}
     const result = (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }});
-{%- if handle_return.nullable %}
+{%- if method.throws %}
+    if (result === 0) {
+      throw new Error(_module.takeLastErrorMessage());
+    }
+{%- elif handle_return.nullable %}
     if (result === 0) {
       return null;
     }
@@ -148,7 +160,11 @@ export class {{ cls.class_name }} {
       const reader = _module.readerFromBuf(outPtr);
       const result = {{ async_method.return_route.decode_expr() }};
 {%- if let Some(handle_return) = method.return_handle %}
-{%- if handle_return.nullable %}
+{%- if method.throws %}
+      if (result === 0) {
+        throw new Error(_module.takeLastErrorMessage());
+      }
+{%- elif handle_return.nullable %}
       if (result === 0) {
         return null;
       }
@@ -188,7 +204,11 @@ export class {{ cls.class_name }} {
 {%- elif sync_method.return_route.is_direct() %}
 {%- if let Some(handle_return) = method.return_handle %}
       const result = (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }});
-{%- if handle_return.nullable %}
+{%- if method.throws %}
+      if (result === 0) {
+        throw new Error(_module.takeLastErrorMessage());
+      }
+{%- elif handle_return.nullable %}
       if (result === 0) {
         return null;
       }
@@ -252,7 +272,11 @@ export class {{ cls.class_name }} {
         const reader = _module.readerFromBuf(outPtr);
         const result = {{ async_method.return_route.decode_expr() }};
 {%- if let Some(handle_return) = method.return_handle %}
-{%- if handle_return.nullable %}
+{%- if method.throws %}
+        if (result === 0) {
+          throw new Error(_module.takeLastErrorMessage());
+        }
+{%- elif handle_return.nullable %}
         if (result === 0) {
           return null;
         }
