@@ -204,7 +204,13 @@ mod tests {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_callback(CallbackTraitDef {
             id: CallbackId::new("ClosureCb"),
-            methods: vec![],
+            methods: vec![crate::ir::CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: crate::ir::MethodId::new("call"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
             kind: CallbackKind::Closure,
             doc: None,
         });

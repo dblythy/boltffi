@@ -6,6 +6,11 @@ pub struct DartNativeCallbackMethod {
     pub params: Vec<super::DartNativeFunctionParam>,
     pub return_type: super::DartNativeType,
     pub kind: ExecutionKind,
+    /// The full trampoline body: looks up the registered implementation,
+    /// decodes native arguments, invokes the Dart method, and reports the
+    /// result back through the out-param (sync) or completion callback
+    /// pointer (async) — see `lower::callback::render_native_method_body`.
+    pub body: String,
 }
 
 impl DartNativeCallbackMethod {

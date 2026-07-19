@@ -1,5 +1,6 @@
 ---
 source: boltffi_bindgen/src/render/dart/templates.rs
+assertion_line: 166
 expression: template.render().unwrap()
 ---
 final class _I$ICallbackVTable extends $$ffi.Struct {
@@ -97,15 +98,18 @@ final class _I$ICallback {
     $$ffi.Pointer<$$ffi.Uint32> _p$outPtr,
     $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
   ) {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$value = impl.mapU32(n);
+_p$outPtr.value = _p$value;
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
   }
 
   static void mapStringRef(
@@ -116,15 +120,26 @@ final class _I$ICallback {
     $$ffi.Pointer<$$ffi.UintPtr> _p$outLen,
     $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
   ) {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$s = _$$WireReader(sPtr, sLen);
+final _p$value = impl.mapStringRef(_p$r$s.readString());
+late final _$$WireWriter _p$w;
+{
+final value = _p$value;
+_p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
+_p$w.writeString(value);
+}
+_p$outPtr.value = _p$w.ptr;
+_p$outLen.value = _p$w.len;
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
   }
 
   static void mapString(
@@ -135,15 +150,26 @@ final class _I$ICallback {
     $$ffi.Pointer<$$ffi.UintPtr> _p$outLen,
     $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
   ) {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$s = _$$WireReader(sPtr, sLen);
+final _p$value = impl.mapString(_p$r$s.readString());
+late final _$$WireWriter _p$w;
+{
+final value = _p$value;
+_p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
+_p$w.writeString(value);
+}
+_p$outPtr.value = _p$w.ptr;
+_p$outLen.value = _p$w.len;
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
   }
 
   static void processBytes(
@@ -152,15 +178,18 @@ final class _I$ICallback {
     int bytesLen,
     $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
   ) {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$bytes = _$$WireReader(bytesPtr, bytesLen);
+impl.processBytes(_p$r$bytes.readUint8List());
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
   }
 
 }

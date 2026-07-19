@@ -61,6 +61,12 @@ pub struct ClassTemplate<'a> {
     pub class: &'a super::DartClass,
 }
 
+#[derive(Template)]
+#[template(path = "render_dart/functions.txt", escape = "none")]
+pub struct TopLevelFunctionsTemplate<'a> {
+    pub functions: &'a [super::DartFunction],
+}
+
 #[cfg(test)]
 mod tests {
     use boltffi_ffi_rules::callable::ExecutionKind;
@@ -68,9 +74,9 @@ mod tests {
     use crate::{
         ir::{
             self, CallbackId, CallbackKind, CallbackMethodDef, CallbackTraitDef, ClassDef, ClassId,
-            ConstructorDef, FfiContract, FieldDef, FieldName, MethodDef, MethodId, PackageInfo,
-            ParamDef, ParamName, ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef,
-            StreamDef, StreamId, StreamMode, TypeExpr,
+            ConstructorDef, FfiContract, FieldDef, FieldName, FunctionDef, MethodDef, MethodId,
+            PackageInfo, ParamDef, ParamName, ParamPassing, PrimitiveType, Receiver, RecordDef,
+            ReturnDef, StreamDef, StreamId, StreamMode, TypeExpr,
         },
         render::dart::{DartLibrary, DartLowerer},
     };
@@ -284,6 +290,79 @@ mod tests {
         };
 
         insta::assert_snapshot!(template.render().unwrap());
+    }
+
+    // A free function is not a class member: its wrapper must render as a
+    // plain top-level function — no enclosing `final class { ... }`, and no
+    // `static` keyword (that keyword only exists to distinguish a static
+    // *class* method from an instance one; a free function has neither
+    // concept). Covers the sync scalar-return and async-fallible shapes in
+    // one rendered snippet.
+    #[test]
+    pub fn top_level_functions_render_without_a_class_or_static_keyword() {
+        let mut ffi = empty_contract();
+        ffi.catalog.insert_record(RecordDef {
+            id: ir::RecordId::new("ParseError"),
+            is_repr_c: false,
+            is_error: true,
+            fields: vec![FieldDef {
+                name: FieldName::new("message"),
+                type_expr: TypeExpr::String,
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+        ffi.functions.push(FunctionDef {
+            id: ir::FunctionId::new("live_query_reconnect_delay_ms"),
+            params: vec![ParamDef {
+                name: ParamName::new("attempt"),
+                type_expr: TypeExpr::Primitive(PrimitiveType::U32),
+                passing: ParamPassing::Value,
+                doc: None,
+            }],
+            returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::U64)),
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+        ffi.functions.push(FunctionDef {
+            id: ir::FunctionId::new("fetch_session"),
+            params: vec![],
+            returns: ReturnDef::Result {
+                ok: TypeExpr::String,
+                err: TypeExpr::Record(ir::RecordId::new("ParseError")),
+            },
+            execution_kind: ExecutionKind::Async,
+            doc: None,
+            deprecated: None,
+        });
+        let library = lower(&ffi);
+
+        let template = TopLevelFunctionsTemplate {
+            functions: &library.functions,
+        };
+        let rendered = template.render().unwrap();
+
+        assert!(
+            rendered.contains("int liveQueryReconnectDelayMs("),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Future<BoltFFIResult<String, ParseError>> fetchSession("),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("static "), "{rendered}");
+        assert!(!rendered.contains("final class"), "{rendered}");
+        assert!(
+            !rendered.contains("implements $$ffi.Finalizable"),
+            "{rendered}"
+        );
+
+        insta::assert_snapshot!(rendered);
     }
 
     // Regression: a merge once silently duplicated `record.txt`'s

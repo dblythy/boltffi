@@ -1,5 +1,6 @@
 ---
 source: boltffi_bindgen/src/render/dart/templates.rs
+assertion_line: 180
 expression: template.render().unwrap()
 ---
 final class _I$ICallbackVTable extends $$ffi.Struct {
@@ -20,7 +21,7 @@ final class _I$ICallbackVTable extends $$ffi.Struct {
       $$ffi.Void Function(
         $$ffi.Uint64,
         $$ffi.Uint32,
-        $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
+        $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Uint32, $$ffi.Int32)>>,
         $$ffi.Uint64,
     )
     >
@@ -93,18 +94,20 @@ final class _I$ICallback {
   static void mapU32(
     int _p$handle,
     int n,
-    $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
+    $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Uint32, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$value = await impl.mapU32(n);
+_p$callback.asFunction<void Function(int, int, int)>()(_p$callbackData, _p$value, 0);
+} catch (e) {
+_p$callback.asFunction<void Function(int, int, int)>()(_p$callbackData, 0, -1);
+}
+
   }
 
   static void mapStringRef(
@@ -114,15 +117,24 @@ final class _I$ICallback {
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$s = _$$WireReader(sPtr, sLen);
+final _p$value = await impl.mapStringRef(_p$r$s.readString());
+late final _$$WireWriter _p$w;
+{
+final value = _p$value;
+_p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
+_p$w.writeString(value);
+}
+_p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, _p$w.ptr, _p$w.len, 0);
+} catch (e) {
+_p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, $$ffi.nullptr, 0, -1);
+}
+
   }
 
   static void mapString(
@@ -132,15 +144,24 @@ final class _I$ICallback {
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$s = _$$WireReader(sPtr, sLen);
+final _p$value = await impl.mapString(_p$r$s.readString());
+late final _$$WireWriter _p$w;
+{
+final value = _p$value;
+_p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
+_p$w.writeString(value);
+}
+_p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, _p$w.ptr, _p$w.len, 0);
+} catch (e) {
+_p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, $$ffi.nullptr, 0, -1);
+}
+
   }
 
   static void processBytes(
@@ -150,15 +171,18 @@ final class _I$ICallback {
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
-    final impl = _k$ICallbackHandleMap.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
-    }
-
     try {
-    } catch (e) {
-    }
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$bytes = _$$WireReader(bytesPtr, bytesLen);
+await impl.processBytes(_p$r$bytes.readUint8List());
+_p$callback.asFunction<void Function(int, int)>()(_p$callbackData, 0);
+} catch (e) {
+_p$callback.asFunction<void Function(int, int)>()(_p$callbackData, -1);
+}
+
   }
 
 }
