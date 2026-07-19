@@ -7,18 +7,20 @@
 // jsi/boltffi_generic_callback_host.h, mirroring native_trampoline.h/
 // boltffi_counter_host_object.h's existing split.
 //
-// Why a handful of generic trampolines cover 12 of the 13 real callback vtables IN FULL (measured
+// Why a handful of generic trampolines cover ALL 13 of the real callback vtables IN FULL (measured
 // against tests/fixtures/parse_core_real_abi.h): every vtable field beyond the universal
-// `free`/`clone` pair reduces to one of the shapes below. NOT YET covered (documented, not silently
-// dropped, both real but neither exercised by any trait this session's fixture proof needs):
-//   - `EventuallyQueueListener::on_dropped`'s `(ptr,len,ptr,len,i32,ptr,len)` shape (3 buffers + 1
-//     scalar, sync void) -- a straightforward `VoidBuf`-family extension.
-//   - `RandomSource::fill`'s `FfiBuf_u8(uint64_t, uint32_t)` shape (scalar-in, LARGE aggregate-out)
-//     -- needs its OWN return-type struct exactly matching `FfiBuf_u8`'s real 32-byte layout
-//     (unlike `generic_invoke.h`'s caller-side `LargeAggregate<64>`, a callback TRAMPOLINE is the
-//     ABI's CALLEE: the real caller -- Rust -- allocates exactly `sizeof(the real return type)`
-//     bytes, so writing a 64-byte struct through that pointer would overflow it; this is the
-//     mirror-image of `generic_invoke.h`'s own sret finding, on the other side of the same coin).
+// `free`/`clone` pair reduces to one of the shapes below -- including, as of this session's finding-4
+// fix, the two shapes that used to fall through `classifyVTableField` as `nullopt` (silently
+// installing a NULL vtable slot rather than failing loudly): `EventuallyQueueListener::on_dropped`'s
+// `(ptr,len,ptr,len,i32,ptr,len)` shape (3 buffers + 1 scalar, sync void -- `VoidBuf2Scalar1Buf1`)
+// and `RandomSource::fill`'s `FfiBuf_u8(uint64_t, uint32_t)` shape (scalar-in, LARGE aggregate-out
+// -- `ScalarInBufOut`, whose OWN return-type struct exactly matches `FfiBuf_u8`'s real 32-byte
+// layout; unlike `generic_invoke.h`'s caller-side `LargeAggregate`, a callback TRAMPOLINE is the
+// ABI's CALLEE: the real caller -- Rust -- allocates exactly `sizeof(the real return type)` bytes,
+// so writing a wider struct through that pointer would overflow it -- the mirror-image of
+// `generic_invoke.h`'s own sret finding, on the other side of the same coin). Any FUTURE vtable
+// shape this file genuinely doesn't cover still returns `nullopt` from `classifyVTableField` (never
+// a guess) so `buildVTableBytes` can fail loudly rather than install a null slot.
 //
 // The "SlotId" mechanism: a C vtable field is a plain function pointer with NO capture -- it can't
 // close over "which registered object" or "which method name" the way a `std::function` can. Every
@@ -63,6 +65,15 @@ struct CallbackCompletion {
   std::int32_t statusCode = 0;          // FfiStatus.code; 0 == FFI_STATUS_OK
   std::vector<std::uint8_t> bytes;      // only meaningful for the Status+Buf completion shape
 };
+
+/// `FfiStatus`'s real `FFI_STATUS_CANCELLED` code (`parse_core_real_abi.h:20`,
+/// `#define FFI_STATUS_CANCELLED ((FfiStatus){4})`) -- the status every completion trampoline below
+/// reports when the registered object/method is missing (teardown raced the call: `free` ran, or
+/// the method was never registered) instead of the default-constructed `CallbackCompletion{}`'s
+/// `statusCode == 0` (`FFI_STATUS_OK`). Reporting OK for a completion that never actually ran is a
+/// silent correctness bug: Rust (and everything built on top of it) reads success and proceeds as
+/// if the operation happened.
+constexpr std::int32_t kFfiStatusCancelled = 4;
 
 /// One registered callback object's method table entry. `bufArgs` carries the leading `(ptr,len)`
 /// buffer arguments (never the trailing completion-fn-ptr/userdata pair, which the trampoline owns);
@@ -146,6 +157,32 @@ inline std::size_t allocateSlot(const std::string& methodName) {
   if (next >= kMaxCallbackSlots) throw std::runtime_error("boltffi::generic_callback: out of slots");
   std::size_t slot = next++;
   slotMethodNames()[slot] = methodName;
+  return slot;
+}
+
+inline std::unordered_map<std::string, std::size_t>& slotCache() {
+  static std::unordered_map<std::string, std::size_t> cache;
+  return cache;
+}
+
+/// Returns the SlotId for `methodName` under `shapeTag` (the calling `CallbackShape`'s own integer
+/// value, passed as `int` so this file doesn't need `CallbackShape`'s definition, declared later),
+/// allocating a fresh one via `allocateSlot` only the FIRST time this exact (shape, methodName)
+/// pair is seen -- every later call for the SAME pair reuses it. Without this, registering the
+/// SAME trait/method more than once (multiple `ParseClient` instances installing the same
+/// `SessionStorage`-shaped trait, or a hot reload re-registering) would burn a fresh slot from the
+/// fixed `kMaxCallbackSlots` budget on every call, exhausting it under nothing more exotic than
+/// ordinary repeated use (finding 6) -- a SlotId is process-wide metadata identifying "the
+/// trampoline for method X of shape Y," not a per-registration resource.
+inline std::size_t allocateOrReuseSlot(int shapeTag, const std::string& methodName) {
+  static std::mutex m;
+  std::lock_guard<std::mutex> lock(m);
+  std::string key = std::to_string(shapeTag) + "|" + methodName;
+  auto& cache = slotCache();
+  auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  std::size_t slot = allocateSlot(methodName);
+  cache.emplace(std::move(key), slot);
   return slot;
 }
 
@@ -235,6 +272,30 @@ void trampolineVoidBuf1(std::uint64_t handle, const std::uint8_t* ptr, std::uint
   it->second(call, nullptr, result);
 }
 
+// ---- VoidBuf2Scalar1Buf1: void(handle, (ptr,len), (ptr,len), i32, (ptr,len)) -- the real header's
+// `EventuallyQueueListener::on_dropped` shape (3 buffers + 1 scalar, sync void, no completion) --
+// covering it closes finding 4: before this fix, `classifyVTableField` returned `nullopt` for this
+// field and `buildVTableBytes` installed a NULL vtable slot, so Rust invoking `on_dropped` on a
+// dropped eventually-queue entry called through a null function pointer.
+
+template <std::size_t SlotId>
+void trampolineVoidBuf2Scalar1Buf1(std::uint64_t handle, const std::uint8_t* ptr0, std::uintptr_t len0,
+                                    const std::uint8_t* ptr1, std::uintptr_t len1, std::int32_t scalar,
+                                    const std::uint8_t* ptr2, std::uintptr_t len2) {
+  auto obj = lookup(handle);
+  if (!obj) return;
+  auto it = obj->methods.find(slotMethodNames()[SlotId]);
+  if (it == obj->methods.end()) return;
+  CallbackResult result;
+  GenericMethodCall call;
+  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr0, ptr0 + len0));
+  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr1, ptr1 + len1));
+  call.scalarArg = static_cast<std::uint64_t>(scalar);
+  call.hasScalarArg = true;
+  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr2, ptr2 + len2));
+  it->second(call, nullptr, result);
+}
+
 // ---- CompletionStatus<N>: void(handle, (ptr,len)*N, void(*)(void*,int32_t), void*) ----
 // (`SessionStorage`/`InstallationIdStorage::set`/`clear`, `KeyValueStorage::set`/`delete`)
 
@@ -245,12 +306,12 @@ void trampolineCompletionStatus0(std::uint64_t handle, CompletionStatusFn comple
   auto obj = lookup(handle);
   auto onComplete = [complete, userdata](CallbackCompletion c) { complete(userdata, c.statusCode); };
   if (!obj) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   CallbackResult result;
@@ -264,12 +325,12 @@ void trampolineCompletionStatus1(std::uint64_t handle, const std::uint8_t* ptr, 
   auto obj = lookup(handle);
   auto onComplete = [complete, userdata](CallbackCompletion c) { complete(userdata, c.statusCode); };
   if (!obj) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   CallbackResult result;
@@ -286,12 +347,12 @@ void trampolineCompletionStatus2(std::uint64_t handle, const std::uint8_t* ptr0,
   auto obj = lookup(handle);
   auto onComplete = [complete, userdata](CallbackCompletion c) { complete(userdata, c.statusCode); };
   if (!obj) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   CallbackResult result;
@@ -328,6 +389,43 @@ inline LargeAggregate makeFfiBufFromBytes(const std::vector<std::uint8_t>& bytes
   return agg;
 }
 
+// ---- ScalarInBufOut: FfiBuf_u8(uint64_t, uint32_t) -- the real header's `RandomSource::fill`
+// shape (scalar-in, LARGE aggregate-out, synchronous). Covering it closes the other half of
+// finding 4. `FfiBufReturn` mirrors `FfiBuf_u8`'s real 32-byte layout EXACTLY: unlike
+// `generic_invoke.h`'s caller-side `LargeAggregate` (a padded, oversized scratch type a CALLER
+// decodes from), a callback TRAMPOLINE is the ABI's CALLEE here -- the real caller (Rust) allocates
+// exactly `sizeof(FfiBuf_u8)` bytes for the hidden sret pointer, so returning anything wider (e.g.
+// reusing `LargeAggregate`'s 64-byte scratch type as the declared C++ return type) would have the
+// compiler write past the space Rust actually reserved. Declaring the REAL, exactly-sized struct as
+// this function's return type lets the compiler generate the correct callee-side sret convention
+// for whichever real aggregate it is on the current target ABI.
+struct FfiBufReturn {
+  std::uint8_t* ptr;
+  std::uintptr_t len;
+  std::uintptr_t cap;
+  std::uintptr_t align;
+};
+
+template <std::size_t SlotId>
+FfiBufReturn trampolineScalarInBufOut(std::uint64_t handle, std::uint32_t n) {
+  auto emptyReturn = []() { return FfiBufReturn{nullptr, 0, 0, 0}; };  // FfiBuf::empty() shape --
+                                                                        // a no-op to free, matching
+                                                                        // ffi_buf.h's own convention.
+  auto obj = lookup(handle);
+  if (!obj) return emptyReturn();
+  auto it = obj->methods.find(slotMethodNames()[SlotId]);
+  if (it == obj->methods.end()) return emptyReturn();
+  CallbackResult result;
+  GenericMethodCall call;
+  call.scalarArg = static_cast<std::uint64_t>(n);
+  call.hasScalarArg = true;
+  it->second(call, nullptr, result);
+  LargeAggregate agg = makeFfiBufFromBytes(result.bytes);
+  FfiBufReturn out{};
+  std::memcpy(&out, agg.bytes, sizeof(out));
+  return out;
+}
+
 template <std::size_t SlotId>
 void trampolineCompletionStatusBuf0(std::uint64_t handle, CompletionStatusBufFn complete, void* userdata) {
   auto obj = lookup(handle);
@@ -336,12 +434,12 @@ void trampolineCompletionStatusBuf0(std::uint64_t handle, CompletionStatusBufFn 
     complete(userdata, c.statusCode, agg);
   };
   if (!obj) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   CallbackResult result;
@@ -358,12 +456,12 @@ void trampolineCompletionStatusBuf1(std::uint64_t handle, const std::uint8_t* pt
     complete(userdata, c.statusCode, agg);
   };
   if (!obj) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) {
-    onComplete(CallbackCompletion{});
+    onComplete(CallbackCompletion{kFfiStatusCancelled, {}});
     return;
   }
   CallbackResult result;
@@ -383,6 +481,8 @@ enum class CallbackShape {
   VoidScalar1,
   VoidScalar2,
   VoidBuf1,
+  VoidBuf2Scalar1Buf1,
+  ScalarInBufOut,
   CompletionStatus0,
   CompletionStatus1,
   CompletionStatus2,
@@ -412,5 +512,25 @@ std::optional<CallbackShape> classifyVTableField(const VTableFieldAbi& field);
 /// bug, never reached by a correctly-modeled trait) -- callers may assert `classifyVTableField`
 /// succeeds for every field of a trait they intend to fully support.
 std::vector<void*> buildVTableBytes(const VTableAbi& vtable);
+
+/// Builds `vtable`'s trampoline slots and registers them for the REST OF THE PROCESS's lifetime,
+/// returning the pointer to pass to `boltffi_register_callback_*`. This is the ONLY sanctioned way
+/// to obtain that pointer for an actual registration call (as opposed to `buildVTableBytes`
+/// directly, still useful for tests that never call `boltffi_register_callback_*` for real): the
+/// real generated registration function stores this EXACT pointer in a process-wide
+/// `static AtomicPtr` and dereferences it on EVERY SUBSEQUENT call into the trait for as long as
+/// the process runs (verified against boltffi_macros' actual codegen,
+/// `experimental/wrapper/callback.rs`'s `#register_ident`/`#foreign_vtable_static` -- there is no
+/// copy on the Rust side, and no "unregister"/teardown call anywhere in the real ABI). A caller
+/// that registers a plain, function-local `std::vector<void*>` and lets it go out of scope once
+/// registration returns has handed Rust a pointer that is GUARANTEED dangling on the very next
+/// call into that trait -- not a speculative race, a certainty, since Rust retains the pointer
+/// forever. This intentionally leaks the slot storage (mirrors Rust's own choice of a `static`,
+/// never freed) rather than returning ownership to a caller who has to remember an unusual
+/// lifetime rule.
+inline const void* registerVTableForProcessLifetime(const VTableAbi& vtable) {
+  auto* slots = new std::vector<void*>(buildVTableBytes(vtable));
+  return slots->data();
+}
 
 }  // namespace boltffi

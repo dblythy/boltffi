@@ -53,9 +53,13 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <vector>
+
+#include "boltffi/abi_header.h"
 
 namespace boltffi {
 
@@ -240,6 +244,56 @@ inline void invokeGenericSret(void* fn, const CValue* args, std::size_t argc, vo
   int floatPos = detail::singleFloatPosition(args, argc);
   LargeAggregate result = detail::dispatchArity<LargeAggregate>(fn, args, argc, floatPos);
   std::memcpy(outBuffer, result.bytes, outSize);
+}
+
+/// One JS-facing/logical argument value for ONE entry of `FunctionAbi::params` -- the unit
+/// `buildRegisterArgs` expands into one-or-two physical `CValue` register slots per
+/// `abi_header.h`'s `planFunctionCall`. A `Scalar`/`Float` logical parameter only ever reads `u64`/
+/// `f64`; the one 16-byte-two-word aggregate parameter shape this dispatcher covers
+/// (`BoltFFICallbackHandle`) reads BOTH `u64` (the `handle` field) and `high` (the `vtable` field,
+/// a raw pointer bit pattern) -- exactly the two fields a `TwoWord` result (from
+/// `invokeGenericTwoWord`, e.g. a `boltffi_create_callback_*` call) already carries, so forwarding
+/// one straight into a `LogicalArg` needs no manual decomposition.
+struct LogicalArg {
+  std::uint64_t u64 = 0;
+  double f64 = 0.0;
+  std::uint64_t high = 0;
+};
+
+/// Expands `logicalArgs` (one entry per `fn.params`, i.e. `logicalArgs[i]` corresponds to
+/// `fn.params[i]`) into the register-level `CValue` array `invokeGeneric*` needs, following `plan`
+/// (from `planFunctionCall(fn, abi)` -- callers MUST have already rejected a `nullopt` plan; this
+/// function assumes `plan` is valid and every `logicalParamIndex` it references is in bounds).
+/// `translateIfPointer` is invoked for every `Scalar` slot, receiving that parameter's own
+/// `TypeRef` (so it can consult `isArenaPointerKind`) and the raw value, returning the value to
+/// actually place in the register -- called ONLY for `Scalar` slots; a `TwoWordLow`/`TwoWordHigh`
+/// pair always crosses verbatim (the callback vtable pointer is never an arena offset, see
+/// `RegisterSlotKind::TwoWordHigh`'s own doc), matching the one place a generic caller may
+/// legitimately rebase a pointer at all.
+inline std::vector<CValue> buildRegisterArgs(
+    const FunctionAbi& fn, const std::vector<RegisterSlot>& plan, const std::vector<LogicalArg>& logicalArgs,
+    const std::function<CValue(const TypeRef&, CValue)>& translateIfPointer) {
+  std::vector<CValue> args;
+  args.reserve(plan.size());
+  for (const RegisterSlot& slot : plan) {
+    const LogicalArg& logical = logicalArgs[slot.logicalParamIndex];
+    switch (slot.kind) {
+      case RegisterSlotKind::Float:
+        args.push_back(CValue::ofF64(logical.f64));
+        break;
+      case RegisterSlotKind::TwoWordLow:
+        args.push_back(CValue::ofU64(logical.u64));
+        break;
+      case RegisterSlotKind::TwoWordHigh:
+        args.push_back(CValue::ofU64(logical.high));
+        break;
+      case RegisterSlotKind::Scalar:
+      default:
+        args.push_back(translateIfPointer(fn.params[slot.logicalParamIndex], CValue::ofU64(logical.u64)));
+        break;
+    }
+  }
+  return args;
 }
 
 }  // namespace boltffi

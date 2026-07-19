@@ -2,6 +2,7 @@
 
 #include <dlfcn.h>
 
+#include <cstring>
 #include <stdexcept>
 
 using facebook::jsi::ArrayBuffer;
@@ -45,7 +46,10 @@ void* BoltFFIGenericHostObject::resolveSymbol(const std::string& name) {
 void BoltFFIGenericHostObject::bindArena(std::uint8_t* baseAddress) { arenaBase_.store(baseAddress); }
 
 CValue BoltFFIGenericHostObject::translateIfPointer(const TypeRef& paramType, CValue value) const {
-  if (paramType.kind != PrimKind::PtrConst && paramType.kind != PrimKind::PtrMut) return value;
+  // `isArenaPointerKind` (abi_header.h) is `false` for `OpaqueHandle` (e.g. `RustFutureHandle`) --
+  // finding 3's fix: an opaque, Rust-owned handle must cross verbatim, never rebased against the
+  // arena the way a REAL inline `PtrConst`/`PtrMut` data pointer (`key_ptr`, `value_ptr`, ...) is.
+  if (!isArenaPointerKind(paramType.kind)) return value;
   if (value.u64 == 0) return value;  // null stays null -- never offset against the arena base
   std::uint8_t* base = arenaBase_.load();
   if (!base) {
@@ -56,27 +60,21 @@ CValue BoltFFIGenericHostObject::translateIfPointer(const TypeRef& paramType, CV
   return CValue::ofPtr(base + value.u64);
 }
 
-std::uint64_t BoltFFIGenericHostObject::callScalar(const std::string& name, const std::vector<CValue>& args) {
-  const FunctionAbi* fn = abi_.findFunction(name);
-  if (!fn) throw std::runtime_error("boltffi: unknown function: " + name);
-  std::vector<CValue> translated;
-  translated.reserve(args.size());
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    translated.push_back(i < fn->params.size() ? translateIfPointer(fn->params[i], args[i]) : args[i]);
-  }
-  return invokeGenericScalar(resolveSymbol(name), translated.data(), translated.size());
+std::uint64_t BoltFFIGenericHostObject::callScalar(const std::string& name,
+                                                    const std::vector<CValue>& registerArgs) {
+  if (!abi_.findFunction(name)) throw std::runtime_error("boltffi: unknown function: " + name);
+  return invokeGenericScalar(resolveSymbol(name), registerArgs.data(), registerArgs.size());
 }
 
-void BoltFFIGenericHostObject::callSretIntoBuffer(const std::string& name, const std::vector<CValue>& args,
+void BoltFFIGenericHostObject::callSretIntoBuffer(const std::string& name, const std::vector<CValue>& registerArgs,
                                                    void* outBuffer, std::size_t outSize) {
-  const FunctionAbi* fn = abi_.findFunction(name);
-  if (!fn) throw std::runtime_error("boltffi: unknown function: " + name);
-  std::vector<CValue> translated;
-  translated.reserve(args.size());
-  for (std::size_t i = 0; i < args.size(); ++i) {
-    translated.push_back(i < fn->params.size() ? translateIfPointer(fn->params[i], args[i]) : args[i]);
-  }
-  invokeGenericSret(resolveSymbol(name), translated.data(), translated.size(), outBuffer, outSize);
+  if (!abi_.findFunction(name)) throw std::runtime_error("boltffi: unknown function: " + name);
+  invokeGenericSret(resolveSymbol(name), registerArgs.data(), registerArgs.size(), outBuffer, outSize);
+}
+
+TwoWord BoltFFIGenericHostObject::callTwoWord(const std::string& name, const std::vector<CValue>& registerArgs) {
+  if (!abi_.findFunction(name)) throw std::runtime_error("boltffi: unknown function: " + name);
+  return invokeGenericTwoWord(resolveSymbol(name), registerArgs.data(), registerArgs.size());
 }
 
 std::vector<PropNameID> BoltFFIGenericHostObject::getPropertyNames(Runtime& rt) {
@@ -100,7 +98,18 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
             throw facebook::jsi::JSError(rt2, "__boltffi_native_bind_arena expects an ArrayBuffer");
           }
           ArrayBuffer buffer = args[0].asObject(rt2).getArrayBuffer(rt2);
-          bindArena(buffer.data(rt2));
+          std::uint8_t* base = buffer.data(rt2);
+          {
+            // Keeps the REAL jsi::ArrayBuffer object alive (not just its raw address, which
+            // `bindArena` tracks for JSI-independent testability) so a call in flight can pin its
+            // own `shared_ptr` to the CURRENT buffer before this one replaces the member -- see
+            // the module doc's finding-8 note. `jsi::Pointer` is move-only, so the buffer is moved
+            // into a fresh heap allocation rather than copied.
+            auto held = std::make_shared<ArrayBuffer>(std::move(buffer));
+            std::lock_guard<std::mutex> lock(arenaObjectMutex_);
+            currentArenaBuffer_ = std::move(held);
+          }
+          bindArena(base);
           return Value::undefined();
         });
   }
@@ -108,46 +117,92 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
   const FunctionAbi* fn = abi_.findFunction(propName);
   if (!fn) return Value::undefined();
 
-  // Aggregate (record) returns wider than 16 bytes need a decode buffer sized from the ABI; look
-  // it up once here (not per-call) since it never changes for a given function.
+  // The closed-shape-space call/return planner (findings 1+2): `nullopt` means `fn` has a
+  // parameter outside the shapes this dispatcher covers (e.g. `boltffi_free_string`/
+  // `boltffi_free_buf`'s own >16-byte by-value parameters) -- such a function is REJECTED here,
+  // exactly like an unknown name, rather than silently mis-called through the wrong registers.
+  auto plan = planFunctionCall(*fn, abi_);
+  if (!plan) return Value::undefined();
+  ReturnPlan returnPlan = planFunctionReturn(*fn, abi_);
   std::size_t aggregateSize = 0;
-  bool isLargeAggregate = false;
-  if (fn->returnType.kind == PrimKind::Aggregate) {
+  if (returnPlan != ReturnPlan::Scalar) {
     const RecordAbi* record = abi_.findRecord(fn->returnType.aggregateName);
-    if (record && record->byteSize > 16) {
-      aggregateSize = record->byteSize;
-      isLargeAggregate = true;
-    }
+    aggregateSize = record ? record->byteSize : 0;
   }
 
   return Function::createFromHostFunction(
       rt, name, static_cast<unsigned int>(fn->params.size()),
-      [this, propName, fn, isLargeAggregate, aggregateSize](Runtime& rt2, const Value&, const Value* jsArgs,
-                                                              std::size_t count) -> Value {
-        std::vector<CValue> args;
-        args.reserve(count);
-        for (std::size_t i = 0; i < count; ++i) {
-          const TypeRef& paramType = i < fn->params.size() ? fn->params[i] : TypeRef{};
+      [this, propName, fn, plan, returnPlan, aggregateSize](Runtime& rt2, const Value&, const Value* jsArgs,
+                                                             std::size_t count) -> Value {
+        // Pin the CURRENTLY bound arena for this call's ENTIRE duration (finding 8): a synchronous
+        // host-callback shape invoked by the native call below could reenter JS, which could grow
+        // the arena (replacing `currentArenaBuffer_`/`arenaBase_`) before this call returns -- a
+        // local copy of the `shared_ptr` keeps the underlying buffer's backing store alive via
+        // JSI's own refcounting regardless of what the MEMBER field is reassigned to mid-call.
+        std::shared_ptr<ArrayBuffer> pinnedArena;
+        {
+          std::lock_guard<std::mutex> lock(arenaObjectMutex_);
+          pinnedArena = currentArenaBuffer_;
+        }
+        (void)pinnedArena;  // kept alive for this scope's duration; never read directly
+
+        std::vector<LogicalArg> logicalArgs(fn->params.size());
+        for (std::size_t i = 0; i < fn->params.size() && i < count; ++i) {
+          const TypeRef& paramType = fn->params[i];
           if (paramType.kind == PrimKind::F64) {
-            args.push_back(CValue::ofF64(jsArgs[i].asNumber()));
+            logicalArgs[i].f64 = jsArgs[i].asNumber();
+          } else if (paramType.kind == PrimKind::Aggregate) {
+            // The one 16-byte `BoltFFICallbackHandle` by-value parameter shape: crosses as a
+            // 16-byte ArrayBuffer, the SAME convention a 16-byte aggregate RETURN uses (see this
+            // file's module doc) -- low 8 bytes = `handle`, high 8 bytes = `vtable` (a real
+            // pointer, never arena-translated).
+            if (!jsArgs[i].isObject() || !jsArgs[i].asObject(rt2).isArrayBuffer(rt2)) {
+              throw facebook::jsi::JSError(rt2,
+                                            "boltffi: " + propName + " expects a 16-byte ArrayBuffer for its "
+                                            "callback-handle argument");
+            }
+            ArrayBuffer buf = jsArgs[i].asObject(rt2).getArrayBuffer(rt2);
+            if (buf.size(rt2) < 16) {
+              throw facebook::jsi::JSError(rt2, "boltffi: callback-handle ArrayBuffer must be >= 16 bytes");
+            }
+            std::uint8_t* bytes = buf.data(rt2);
+            std::uint64_t low = 0, high = 0;
+            std::memcpy(&low, bytes, sizeof(low));
+            std::memcpy(&high, bytes + sizeof(low), sizeof(high));
+            logicalArgs[i].u64 = low;
+            logicalArgs[i].high = high;
           } else if (jsArgs[i].isBigInt()) {
-            args.push_back(CValue::ofU64(jsArgs[i].asBigInt(rt2).asUint64(rt2)));
+            logicalArgs[i].u64 = jsArgs[i].asBigInt(rt2).asUint64(rt2);
           } else {
-            // Every I32/U32/Bool/PtrConst/PtrMut-classified argument arrives as a plain JS number
-            // -- a literal scalar for the former, an ARENA OFFSET (never a real address) for the
-            // latter (see this file's module doc on `__boltffi_native_bind_arena`).
-            args.push_back(CValue::ofU64(static_cast<std::uint64_t>(static_cast<std::int64_t>(jsArgs[i].asNumber()))));
+            // Every I32/U32/Bool/PtrConst/PtrMut/OpaqueHandle-classified argument arrives as a
+            // plain JS number -- a literal scalar for the former, an ARENA OFFSET (never a real
+            // address) for `PtrConst`/`PtrMut`, and a verbatim opaque token for `OpaqueHandle`
+            // (see this file's module doc on `__boltffi_native_bind_arena` and finding 3).
+            logicalArgs[i].u64 = static_cast<std::uint64_t>(static_cast<std::int64_t>(jsArgs[i].asNumber()));
           }
         }
 
-        if (isLargeAggregate) {
+        auto translate = [this](const TypeRef& paramType, CValue v) { return translateIfPointer(paramType, v); };
+        std::vector<CValue> registerArgs = buildRegisterArgs(*fn, *plan, logicalArgs, translate);
+
+        if (returnPlan == ReturnPlan::Sret) {
           std::vector<std::uint8_t> bytes(aggregateSize);
-          callSretIntoBuffer(propName, args, bytes.data(), bytes.size());
+          callSretIntoBuffer(propName, registerArgs, bytes.data(), bytes.size());
+          auto buffer = std::make_shared<OwnedBuffer>(std::move(bytes));
+          return Value(rt2, ArrayBuffer(rt2, buffer));
+        }
+        if (returnPlan == ReturnPlan::TwoWord) {
+          // Finding 2's fix: a 16-byte aggregate return (every `boltffi_create_callback_*`) used
+          // to fall through to the plain-scalar path below and lose the `vtable` word entirely.
+          TwoWord result = callTwoWord(propName, registerArgs);
+          std::vector<std::uint8_t> bytes(16);
+          std::memcpy(bytes.data(), &result.a, sizeof(result.a));
+          std::memcpy(bytes.data() + sizeof(result.a), &result.b, sizeof(result.b));
           auto buffer = std::make_shared<OwnedBuffer>(std::move(bytes));
           return Value(rt2, ArrayBuffer(rt2, buffer));
         }
 
-        std::uint64_t result = callScalar(propName, args);
+        std::uint64_t result = callScalar(propName, registerArgs);
         switch (fn->returnType.kind) {
           case PrimKind::Void:
             return Value::undefined();
@@ -158,7 +213,7 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
           case PrimKind::U32:
             return Value(static_cast<double>(static_cast<std::uint32_t>(result)));
           default:
-            // I64/U64/PtrConst/PtrMut (a handle)/small (<=8 byte) Aggregate -- BigInt is always
+            // I64/U64/PtrConst/PtrMut/OpaqueHandle/small (<=8 byte) Aggregate -- BigInt is always
             // safe here (never truncates), even where a real device build might later choose a
             // plain `number` for handles the way native.ts currently does (see this session's
             // report on that discrepancy).
