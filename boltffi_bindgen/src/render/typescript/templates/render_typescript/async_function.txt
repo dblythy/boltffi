@@ -1,5 +1,17 @@
 {{ crate::render::typescript::templates::ts_doc_block(doc, "") -}}
 export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type }}{% if !loop.last %}, {% endif %}{% endfor %}): Promise<{{ return_type_str }}> {
+{% if native_async && !wrapper_code.is_empty() %}
+  // A non-empty `wrapper_code` means at least one parameter needs wasm-linear-memory
+  // allocation (`_module.allocString`/`allocBytes`/`allocWriter`, ...) before the call --
+  // `NativeBoltFFIModule` has no such methods (native and JS share one process address space;
+  // there is nothing to allocate into). Failing loudly here beats generating a call that
+  // throws a confusing "not a function" TypeError at the allocation site instead of at the
+  // point that actually explains why (react-native track stage 2 -- adversarial review finding).
+  throw new Error(
+    "native async mode does not yet support parameters requiring wasm-linear-memory allocation ({{ name }})"
+  );
+}
+{% else %}
 {% if !wrapper_code.is_empty() %}  {{ wrapper_code }}
 {% endif %}
 {% if cleanup_code.is_empty() %}
@@ -176,3 +188,4 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
   }
 {% endif %}
 }
+{% endif %}

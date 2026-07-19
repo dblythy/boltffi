@@ -1076,6 +1076,32 @@ mod tests {
     }
 
     #[test]
+    fn native_async_param_needing_wasm_wrapper_code_is_a_loud_unsupported_error_not_a_crash() {
+        // Adversarial-review finding (react-native track stage 2): a non-empty `wrapper_code`
+        // means some parameter needs wasm-linear-memory allocation
+        // (`_module.allocString`/`allocBytes`/`allocWriter`, ...), which `NativeBoltFFIModule`
+        // has no methods for. Before this test/fix, native_async mode emitted the wrapper_code
+        // unconditionally anyway, producing a call that throws a confusing
+        // "_module.allocString is not a function" at the allocation site instead of a clear
+        // "native async mode does not yet support this" error.
+        let doc: Option<String> = None;
+        let return_route = TsOutputRoute::async_scalar(String::new());
+        let mut template = native_async_scalar_template(&[], &doc, &return_route, "");
+        let param_alloc_statement = "const w = _module.allocString(the_message_param);";
+        template.wrapper_code = param_alloc_statement;
+        let rendered = template.render().unwrap();
+
+        assert!(rendered.contains(
+            "native async mode does not yet support parameters requiring wasm-linear-memory allocation"
+        ));
+        // The actual param-allocation statement itself must never reach the output -- only the
+        // guard's own doc comment (which names the method group for the reader's benefit) may
+        // mention `_module.allocString` in the abstract.
+        assert!(!rendered.contains(param_alloc_statement));
+        assert!(!rendered.contains("pollAsyncNative("));
+    }
+
+    #[test]
     fn native_async_buffer_encoded_return_is_a_loud_unsupported_error_not_silently_wrong() {
         let doc: Option<String> = None;
         let return_route = TsOutputRoute::packed("ResponseCodec.decode(reader)".to_string());
