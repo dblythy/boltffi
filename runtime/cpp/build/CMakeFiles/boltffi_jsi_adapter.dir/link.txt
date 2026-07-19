@@ -1,0 +1,2 @@
+/usr/bin/ar qc libboltffi_jsi_adapter.a CMakeFiles/boltffi_jsi_adapter.dir/jsi/boltffi_counter_host_object.cpp.o
+/usr/bin/ranlib libboltffi_jsi_adapter.a

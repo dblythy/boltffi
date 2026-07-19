@@ -29,10 +29,19 @@ pub struct TsAsyncFunction {
     pub name: String,
     pub entry_ffi_name: String,
     pub poll_sync_ffi_name: String,
+    /// The native-protocol registration symbol (`{base}_poll`, distinct from
+    /// `poll_sync_ffi_name`'s wasm-only `{base}_poll_sync`) — only referenced by the generated
+    /// output when `native_async` is set.
+    pub poll_ffi_name: String,
     pub complete_ffi_name: String,
     pub panic_message_ffi_name: String,
     pub cancel_ffi_name: String,
     pub free_ffi_name: String,
+    /// Selects the native-async dispatch mode (`@boltffi/runtime`'s `pollAsyncNative`) over the
+    /// default wasm `pollAsync`/`poll_sync` convention in `async_function.txt`
+    /// (docs/tracks/react-native.md, parse-core-sdks repo, stage 2). Defaults to `false`
+    /// (`TypeScriptExperimental::default()`), so every existing caller's output is unchanged.
+    pub native_async: bool,
     pub params: Vec<TsParam>,
     pub return_type: Option<String>,
     pub return_route: TsOutputRoute,
@@ -164,6 +173,20 @@ impl TsClassMethod {
     pub fn is_async(&self) -> bool {
         matches!(self.mode, TsClassMethodMode::Async(_))
     }
+
+    /// True when this method's `native_async` dispatch would emit an unusable call: a wasm-only
+    /// param wrapper (`_module.allocString`/`allocBytes`/`allocWriter`, ...) that
+    /// `NativeBoltFFIModule` has no method for. Mirrors `async_function.txt`'s free-function
+    /// guard — fail loudly before rendering the call, not with a confusing "not a function"
+    /// TypeError at the allocation site (react-native track, stage 3).
+    pub fn native_async_wrapper_unsupported(&self) -> bool {
+        match &self.mode {
+            TsClassMethodMode::Async(async_method) => {
+                async_method.native_async && !self.wrapper_code().is_empty()
+            }
+            TsClassMethodMode::Sync(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -193,10 +216,18 @@ pub struct TsClassSyncMethod {
 #[derive(Debug, Clone)]
 pub struct TsClassAsyncMethod {
     pub poll_sync_ffi_name: String,
+    /// The native-protocol registration symbol (`{base}_poll`, distinct from
+    /// `poll_sync_ffi_name`'s wasm-only `{base}_poll_sync`) — only referenced by the generated
+    /// output when `native_async` is set. Mirrors `TsAsyncFunction::poll_ffi_name`.
+    pub poll_ffi_name: String,
     pub complete_ffi_name: String,
     pub panic_message_ffi_name: String,
     pub cancel_ffi_name: String,
     pub free_ffi_name: String,
+    /// Selects the native-async dispatch mode (`@boltffi/runtime`'s `pollAsyncNative`) over the
+    /// default wasm `pollAsync`/`poll_sync` convention (docs/tracks/react-native.md, stage 3).
+    /// Mirrors `TsAsyncFunction::native_async`.
+    pub native_async: bool,
     pub return_route: TsOutputRoute,
 }
 
@@ -441,6 +472,16 @@ impl TsValueTypeMethod {
     pub fn is_async(&self) -> bool {
         matches!(self.mode, TsValueTypeMethodMode::Async(_))
     }
+
+    /// Mirrors `TsClassMethod::native_async_wrapper_unsupported` — see its doc.
+    pub fn native_async_wrapper_unsupported(&self) -> bool {
+        match &self.mode {
+            TsValueTypeMethodMode::Async(async_method) => {
+                async_method.native_async && !self.wrapper_code().is_empty()
+            }
+            TsValueTypeMethodMode::Sync(_) => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -457,10 +498,18 @@ pub struct TsValueTypeSyncMethod {
 #[derive(Debug, Clone)]
 pub struct TsValueTypeAsyncMethod {
     pub poll_sync_ffi_name: String,
+    /// The native-protocol registration symbol (`{base}_poll`, distinct from
+    /// `poll_sync_ffi_name`'s wasm-only `{base}_poll_sync`) — only referenced by the generated
+    /// output when `native_async` is set. Mirrors `TsAsyncFunction::poll_ffi_name`.
+    pub poll_ffi_name: String,
     pub complete_ffi_name: String,
     pub panic_message_ffi_name: String,
     pub cancel_ffi_name: String,
     pub free_ffi_name: String,
+    /// Selects the native-async dispatch mode (`@boltffi/runtime`'s `pollAsyncNative`) over the
+    /// default wasm `pollAsync`/`poll_sync` convention (docs/tracks/react-native.md, stage 3).
+    /// Mirrors `TsAsyncFunction::native_async`.
+    pub native_async: bool,
     pub return_route: TsOutputRoute,
 }
 

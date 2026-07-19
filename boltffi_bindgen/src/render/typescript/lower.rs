@@ -208,6 +208,13 @@ impl<'a> TsValueTypeMemberDef<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct TypeScriptExperimental {
     pub async_streams: bool,
+    /// Emits top-level async functions against `@boltffi/runtime`'s native backend
+    /// (`NativeAsyncFutureManager.pollAsyncNative`, `native.ts`) instead of the wasm backend's
+    /// `pollAsync`/`poll_sync` convention (docs/tracks/react-native.md, parse-core-sdks repo,
+    /// stage 2). Scoped to top-level functions only so far — class methods and value-type
+    /// methods share the identical five-field async shape and need the same treatment, tracked
+    /// as follow-up rather than half-wired here.
+    pub native_async: bool,
 }
 
 pub struct TypeScriptLowerer<'a> {
@@ -708,10 +715,12 @@ impl<'a> TypeScriptLowerer<'a> {
                     self.refine_value_type_output_route(return_route, return_type_expr);
                 TsValueTypeMethodMode::Async(TsValueTypeAsyncMethod {
                     poll_sync_ffi_name: format!("{entry_ffi_name}_poll_sync"),
+                    poll_ffi_name: format!("{entry_ffi_name}_poll"),
                     complete_ffi_name: format!("{entry_ffi_name}_complete"),
                     panic_message_ffi_name: format!("{entry_ffi_name}_panic_message"),
                     cancel_ffi_name: format!("{entry_ffi_name}_cancel"),
                     free_ffi_name: format!("{entry_ffi_name}_free"),
+                    native_async: self.experimental.native_async,
                     return_route,
                 })
             }
@@ -872,10 +881,12 @@ impl<'a> TypeScriptLowerer<'a> {
                     return_callback,
                     TsClassMethodMode::Async(TsClassAsyncMethod {
                         poll_sync_ffi_name: format!("{entry_ffi_name}_poll_sync"),
+                        poll_ffi_name: format!("{entry_ffi_name}_poll"),
                         complete_ffi_name: format!("{entry_ffi_name}_complete"),
                         panic_message_ffi_name: format!("{entry_ffi_name}_panic_message"),
                         cancel_ffi_name: format!("{entry_ffi_name}_cancel"),
                         free_ffi_name: format!("{entry_ffi_name}_free"),
+                        native_async: self.experimental.native_async,
                         return_route,
                     }),
                     throws,
@@ -1338,10 +1349,12 @@ impl<'a> TypeScriptLowerer<'a> {
             name: emit::escape_ts_keyword(&func_name),
             entry_ffi_name: base_ffi_name.clone(),
             poll_sync_ffi_name: format!("{}_poll_sync", base_ffi_name),
+            poll_ffi_name: format!("{}_poll", base_ffi_name),
             complete_ffi_name: format!("{}_complete", base_ffi_name),
             panic_message_ffi_name: format!("{}_panic_message", base_ffi_name),
             cancel_ffi_name: format!("{}_cancel", base_ffi_name),
             free_ffi_name: format!("{}_free", base_ffi_name),
+            native_async: self.experimental.native_async,
             params,
             return_type,
             return_route,
@@ -2438,6 +2451,16 @@ mod tests {
 
     fn lower_contract(contract: &FfiContract) -> TsModule {
         lower_contract_result(contract).expect("typescript lowering should succeed")
+    }
+
+    fn lower_contract_with_experimental(
+        contract: &FfiContract,
+        experimental: TypeScriptExperimental,
+    ) -> TsModule {
+        let abi = IrLowerer::new(contract).to_abi_contract();
+        TypeScriptLowerer::new(contract, &abi, "Test".to_string(), experimental)
+            .lower()
+            .expect("typescript lowering should succeed")
     }
 
     fn sync_return_route(returns: &ReturnShape) -> TsOutputRoute {
@@ -4444,6 +4467,72 @@ mod tests {
     }
 
     #[test]
+    fn class_async_method_native_async_flag_populates_native_poll_symbol_and_marker() {
+        // Mirrors `native_async_flag_populates_native_poll_symbol_and_marker` (free-function
+        // coverage) -- react-native track stage 3: class methods are the required remaining
+        // gap (ParseClient IS a class), so `experimental.native_async` must thread through
+        // class-method lowering exactly the same way it already does for top-level functions.
+        let mut contract = empty_contract();
+        contract.catalog.insert_class(ClassDef {
+            id: ClassId::new("NetworkClient"),
+            constructors: vec![],
+            methods: vec![MethodDef {
+                id: MethodId::new("fetch_data"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Value(TypeExpr::String),
+                execution_kind: ExecutionKind::Async,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract_with_experimental(
+            &contract,
+            TypeScriptExperimental {
+                native_async: true,
+                ..TypeScriptExperimental::default()
+            },
+        );
+        let class = module
+            .classes
+            .iter()
+            .find(|c| c.class_name == "NetworkClient")
+            .expect("class should be lowered");
+        let method = &class.methods[0];
+
+        match &method.mode {
+            TsClassMethodMode::Async(async_method) => {
+                assert!(async_method.native_async);
+                assert_eq!(
+                    async_method.poll_ffi_name,
+                    "boltffi_network_client_fetch_data_poll"
+                );
+                // The wasm-only symbol is still computed (cheap, other backends may want it)
+                // but the native template branch never references it.
+                assert_eq!(
+                    async_method.poll_sync_ffi_name,
+                    "boltffi_network_client_fetch_data_poll_sync"
+                );
+            }
+            _ => panic!("expected async method"),
+        }
+    }
+
+    // No `value_type_async_method_native_async_flag_populates_native_poll_symbol_and_marker`
+    // integration test here: `crate::ir::lower::tests::to_abi_contract_excludes_async_record_methods`
+    // documents that the ABI contract builder deliberately excludes async value-type (record)
+    // methods entirely (pre-existing, independent of this change) -- `TsValueTypeAsyncMethod`'s
+    // `poll_ffi_name`/`native_async` fields and `value_type_companion.txt`'s native_async branch
+    // are still added for parity with `TsClassAsyncMethod` (react-native track, stage 3's
+    // "mechanical 5-field mirror"), verified directly at the template layer
+    // (`templates::tests::value_type_native_async_*`), but cannot be exercised end-to-end via
+    // `lower_contract` until that separate ABI-layer gap closes.
+
+    #[test]
     fn wasm_async_class_scalar_return_uses_direct_completion() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
@@ -4508,5 +4597,42 @@ mod tests {
         assert_eq!(function.return_type.as_deref(), Some("number"));
         assert!(function.return_route.is_async_scalar());
         assert_eq!(function.return_route.ts_cast(), "");
+        // Default TypeScriptExperimental (native_async unset) must leave every existing caller's
+        // output byte-identical -- react-native track, stage 2.
+        assert!(!function.native_async);
+        assert_eq!(function.poll_sync_ffi_name, "boltffi_async_add_poll_sync");
+    }
+
+    #[test]
+    fn native_async_flag_populates_native_poll_symbol_and_marker() {
+        let mut contract = empty_contract();
+        contract.functions.push(function(
+            "async_add",
+            vec![
+                primitive_param("a", PrimitiveType::I32),
+                primitive_param("b", PrimitiveType::I32),
+            ],
+            ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::I32)),
+            ExecutionKind::Async,
+        ));
+
+        let module = lower_contract_with_experimental(
+            &contract,
+            TypeScriptExperimental {
+                native_async: true,
+                ..TypeScriptExperimental::default()
+            },
+        );
+        let function = module
+            .async_functions
+            .iter()
+            .find(|function| function.name == "asyncAdd")
+            .expect("async function should be lowered");
+
+        assert!(function.native_async);
+        assert_eq!(function.poll_ffi_name, "boltffi_async_add_poll");
+        // The wasm-only symbol is still computed (cheap, and other backends of this same struct
+        // may want it later) but the native template branch never references it.
+        assert_eq!(function.poll_sync_ffi_name, "boltffi_async_add_poll_sync");
     }
 }

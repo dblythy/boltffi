@@ -1,0 +1,9 @@
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/boltffi_jsi_core.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/boltffi_jsi_core_tests.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/boltffi_ffi_buf_tests.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/boltffi_jsi_facebook.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/boltffi_jsi_adapter.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/boltffi_jsi_adapter_linkcheck.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/test.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/edit_cache.dir
+/Users/daniel/Documents/GitHub/boltffi/runtime/cpp/build/CMakeFiles/rebuild_cache.dir

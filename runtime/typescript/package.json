@@ -26,7 +26,8 @@
     "prepare": "tsc",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:native": "bun test test/native.bun.test.ts"
+    "test:native": "bun test test/native.bun.test.ts",
+    "test:codegen-sample": "tsc --noEmit --module esnext --moduleResolution bundler --target es2020 --strict test/fixtures/native_async_codegen_sample.ts"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

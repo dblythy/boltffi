@@ -812,6 +812,10 @@ impl Config {
                 target: Target::TypeScript,
                 name: "async_streams",
             }),
+            native_async: self.is_experimental_enabled(&Experimental::Feature {
+                target: Target::TypeScript,
+                name: "native_async",
+            }),
         }
     }
 
