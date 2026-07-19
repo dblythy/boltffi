@@ -134,8 +134,21 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                     Transport::Composite(_) => {
                         // repr(C) record passed by value: the record's own
                         // blittable struct conversion already exists in
-                        // record.txt.
-                        slots.push(ArgSlot::Expr(format!("{dart_name}._m$toStruct()")));
+                        // record.txt. `_m$toStruct()` builds its own
+                        // throwaway `_$$WireWriter` (a `calloc`'d buffer with
+                        // a GC finalizer) and returns a view into it — hoist
+                        // the call into a named `setup` local (matching the
+                        // `Transport::Span` case below) so that buffer stays
+                        // reachable for the whole function body. Calling it
+                        // inline as a bare call argument, with nothing else
+                        // referencing it, would leave it eligible for GC
+                        // (and its finalizer eligible to run) before the
+                        // native call reads through the struct-by-value
+                        // argument — a real hazard with two or more
+                        // composite params in the same call.
+                        let var = buffer_var(&dart_name);
+                        setup.push(format!("final {var} = {dart_name}._m$toStruct();"));
+                        slots.push(ArgSlot::Expr(var));
                     }
                     Transport::Span(content) => {
                         let is_utf8 = matches!(content, crate::ir::SpanContent::Utf8);
@@ -277,12 +290,21 @@ fn last_error_throw_stmt() -> String {
 
 /// Decodes the raw native call result (`result_expr`) into the public Dart
 /// value, given the already-computed native return shape.
+///
+/// `is_constructor` governs the *encoded-Result* case specifically: a
+/// constructor can't declare `BoltFFIResult<...>` as "its own type" (the
+/// object it returns *is* the value), so it throws on failure via
+/// `BoltFFIResult.okOrThrow()`; an ordinary method's declared return type is
+/// always `BoltFFIResult<Ok, Err>` (`DartType::from_return_def`), so it
+/// always returns the decoded `BoltFFIResult` as-is, regardless of
+/// `dart_return.throws` (which governs the unrelated null-handle case below).
 fn decode_return(
     result_expr: &str,
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
     error: &ErrorTransport,
     returns: &ReturnShape,
+    is_constructor: bool,
 ) -> String {
     match native_return {
         DartNativeType::Void => String::new(),
@@ -339,30 +361,31 @@ fn decode_return(
             let setup = format!(
                 "final {reader_var} = _$$WireReader({result_expr}.ptr, {result_expr}.len);"
             );
-            let body = match error {
-                ErrorTransport::Encoded { decode_ops, .. } => {
-                    let ok_expr = match &returns.decode_ops {
-                        Some(ok_ops) => emit::emit_reader_read(ok_ops, reader_var),
-                        None => String::new(),
-                    };
-                    let err_expr = emit::emit_reader_read(decode_ops, reader_var);
-                    if dart_return.throws {
-                        format!(
-                            "final _p$tag = {reader_var}.readU8();\nif (_p$tag == 1) {{ throw {err_expr}; }}\nreturn {ok_expr};"
-                        )
-                    } else {
-                        format!(
-                            "return {reader_var}.readResult((({reader_var}) => {ok_expr}), (({reader_var}) => {err_expr}));"
-                        )
-                    }
-                }
-                _ => {
-                    let ok_expr = match &returns.decode_ops {
-                        Some(ok_ops) => emit::emit_reader_read(ok_ops, reader_var),
-                        None => String::new(),
-                    };
-                    format!("return {ok_expr};")
-                }
+            // `returns.decode_ops` is already the *complete* decode sequence
+            // for whatever crossed in this buffer. When the error is
+            // encoded, that sequence is a `ReadOp::Result` covering the tag
+            // byte AND both branches as one unit (confirmed against real
+            // generated output: `emit_reader_read`'s `ReadOp::Result` arm
+            // already renders `reader.readResult(okFn, errFn)`) — it is not
+            // "just the Ok payload" needing a manually-read tag byte in
+            // front of it. Reading the tag again here, separately, both
+            // duplicates the read (misreading the Ok payload's own first
+            // byte as a second tag on every successful call) and ignores
+            // that `error`'s own `decode_ops` describe the identical error
+            // branch already folded into this same sequence.
+            let decode_expr = match &returns.decode_ops {
+                Some(ops) => emit::emit_reader_read(ops, reader_var),
+                None => String::new(),
+            };
+            let is_encoded_error = matches!(error, ErrorTransport::Encoded { .. });
+            let body = if is_encoded_error && is_constructor {
+                // A constructor can't declare `BoltFFIResult<...>` as its
+                // own return type, so unwrap-or-throw via the same
+                // `BoltFFIResult.okOrThrow()` helper `prelude.txt` already
+                // exposes for exactly this.
+                format!("return ({decode_expr}).okOrThrow();")
+            } else {
+                format!("return {decode_expr};")
             };
             format!(
                 "{setup}\ntry {{\n{body}\n}} finally {{ _f$boltffi_free_buf({result_expr}); }}"
@@ -441,6 +464,7 @@ fn render_sync_body(
     abi_call: &AbiCall,
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
+    is_constructor: bool,
 ) -> String {
     let plan = plan_call(abi_call);
     let symbol_fn = format!("_f${}", abi_call.symbol);
@@ -468,6 +492,7 @@ fn render_sync_body(
         dart_return,
         &abi_call.error,
         &abi_call.returns,
+        is_constructor,
     );
     if plan.has_status_scratch {
         // `ParamRole::StatusOut` writes failure into this out-param
@@ -557,6 +582,9 @@ fn render_async_body(
         dart_return,
         &async_call.error,
         &async_call.result,
+        // Async constructors are rejected before this function is ever
+        // reached (see `render_body`) — every caller here is a method.
+        false,
     );
 
     let fetch_stmt = if needs_result_var {
@@ -589,7 +617,7 @@ pub(super) fn render_body(
     is_constructor: bool,
 ) -> String {
     match &abi_call.mode {
-        CallMode::Sync => render_sync_body(abi_call, native_return, dart_return),
+        CallMode::Sync => render_sync_body(abi_call, native_return, dart_return, is_constructor),
         CallMode::Async(_) if is_constructor => {
             "throw UnsupportedError('async constructors are not representable as a Dart factory constructor; this renderer does not yet reshape them into a static async factory method');\n".to_string()
         }
@@ -750,11 +778,58 @@ mod tests {
         let library = test::lower(&ffi);
         let body = &library.classes[0].methods[0].body;
 
-        assert!(body.contains("readResult"), "body: {body}");
+        // Exactly one `readResult` call: `returns.decode_ops` for an
+        // encoded-error `Result` is already the whole tag+ok+err decode as
+        // one unit. A regression here previously read the tag a *second*
+        // time manually before also calling `readResult` (which reads its
+        // own tag byte) — silently misreading the Ok payload's first byte
+        // as a second tag on every successful call, invisible to
+        // `dart analyze` since both branches are `BoltFFIResult`-typed.
+        assert_eq!(body.matches("readResult").count(), 1, "body: {body}");
+        assert!(!body.contains("_p$tag"), "body: {body}");
+        // A method's declared return type is always `BoltFFIResult<T, E>`
+        // (never a bare throw) — `okOrThrow()` is constructor-only.
+        assert!(!body.contains("okOrThrow"), "body: {body}");
         assert!(body.contains("_f$boltffi_free_buf(_p$result);"), "body: {body}");
         // The receiver reads `this`, never the Rust-side "self" identifier.
         assert!(body.contains("this._handle"), "body: {body}");
         assert!(!body.contains(" self"), "body should not leak `self`: {body}");
+    }
+
+    #[test]
+    fn fallible_constructor_with_encoded_error_unwraps_or_throws() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_record(RecordDef {
+            id: crate::ir::RecordId::new("Acl"),
+            is_repr_c: false,
+            is_error: false,
+            fields: vec![crate::ir::FieldDef {
+                name: crate::ir::FieldName::new("owner"),
+                type_expr: TypeExpr::String,
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![ConstructorDef::Default {
+                params: vec![string_param("owner")],
+                is_fallible: true,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.records[0].constructors[0].body;
+
+        // A constructor can't declare `BoltFFIResult<...>` as its own return
+        // type, so — unlike a method — it unwraps via `okOrThrow()` (which
+        // itself calls `readResult` exactly once internally).
+        assert_eq!(body.matches("readResult").count(), 1, "body: {body}");
+        assert!(body.contains("okOrThrow()"), "body: {body}");
+        assert!(!body.contains("_p$tag"), "body: {body}");
     }
 
     #[test]

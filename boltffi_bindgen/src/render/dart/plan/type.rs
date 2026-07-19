@@ -128,18 +128,37 @@ impl DartNativeType {
             return Self::from_abi_type(&AbiType::CallbackHandle);
         }
 
+        // A `Void` ok value (`return_shape.transport == None`) always uses
+        // the plain `FfiStatus` (or bare `void`) convention, *regardless* of
+        // what the error transport is — including `Encoded`. The exported
+        // macro's own codegen (`boltffi_macros::exports::methods`) checks
+        // `return_abi.is_unit()` first, unconditionally, before it ever
+        // considers an encoded-return strategy: a `Result<(), AnyError>`
+        // export always compiles down to `-> FfiStatus`, discarding a rich
+        // error's structure in favor of the thread-local last-error-message
+        // channel, never a wire-encoded tag+payload buffer. Checking
+        // `ErrorTransport::Encoded` before this (as this function used to)
+        // makes a `Result<(), SomeStructError>` return native type
+        // `OwnedBuffer` instead of `Status` — a genuine ABI-shape mismatch
+        // with the real exported symbol (confirmed via a real crash: `dart
+        // analyze` can't catch it since both shapes are just structs, but
+        // decoding a `FfiStatus`'s bytes as a `_$$FFIBuf` and then reading
+        // through its bogus `.ptr`/`.len` throws "Buffer overflow" at
+        // runtime on the very first such call).
+        if return_shape.transport.is_none() {
+            return if matches!(error_transport, ErrorTransport::None) {
+                Self::from_abi_type(&AbiType::Void)
+            } else {
+                Self::Status
+            };
+        }
+
         if matches!(error_transport, ErrorTransport::Encoded { .. }) {
             return Self::from_abi_type(&AbiType::OwnedBuffer);
         }
 
         match &return_shape.transport {
-            None => {
-                if matches!(error_transport, ErrorTransport::StatusCode) {
-                    Self::Status
-                } else {
-                    Self::from_abi_type(&AbiType::Void)
-                }
-            }
+            None => unreachable!("handled above"),
             Some(Transport::Scalar(origin)) => Self::Primitive(origin.primitive()),
             Some(Transport::Composite(layout)) => {
                 Self::from_abi_type(&AbiType::Struct(layout.record_id.clone()))
@@ -338,5 +357,65 @@ impl DartType {
             DartType::Custom(custom_type_id) => custom_type_id.to_string(),
             DartType::Builtin(builtin_id) => emit::builtin_dart_type(builtin_id),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ir::{ReadOp, ReadSeq, SizeExpr, WireShape};
+
+    fn encoded_error() -> ErrorTransport {
+        ErrorTransport::Encoded {
+            decode_ops: ReadSeq {
+                size: SizeExpr::Fixed(0),
+                ops: Vec::<ReadOp>::new(),
+                shape: WireShape::Value,
+            },
+            encode_ops: None,
+        }
+    }
+
+    // Regression: a `Void` ok value used to map its native ABI type by
+    // checking `ErrorTransport::Encoded` *before* checking whether the ok
+    // side even carries a transport at all, so `Result<(), SomeStructError>`
+    // (void ok, encoded error) picked `OwnedBuffer` instead of `Status` — a
+    // real ABI mismatch against the exported symbol, since the macro's own
+    // codegen always compiles a unit-ok `Result` down to `-> FfiStatus`
+    // regardless of the error shape.
+    #[test]
+    fn void_ok_with_encoded_error_maps_to_status_not_owned_buffer() {
+        let native = DartNativeType::from_return_shape_and_error_transport(
+            &ReturnShape::void(),
+            &encoded_error(),
+        );
+        assert!(
+            matches!(native, DartNativeType::Status),
+            "expected Status, got {native:?}"
+        );
+    }
+
+    #[test]
+    fn void_ok_with_status_code_error_maps_to_status() {
+        let native = DartNativeType::from_return_shape_and_error_transport(
+            &ReturnShape::void(),
+            &ErrorTransport::StatusCode,
+        );
+        assert!(
+            matches!(native, DartNativeType::Status),
+            "expected Status, got {native:?}"
+        );
+    }
+
+    #[test]
+    fn void_ok_with_no_error_maps_to_void() {
+        let native = DartNativeType::from_return_shape_and_error_transport(
+            &ReturnShape::void(),
+            &ErrorTransport::None,
+        );
+        assert!(
+            matches!(native, DartNativeType::Void),
+            "expected Void, got {native:?}"
+        );
     }
 }
