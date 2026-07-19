@@ -292,6 +292,7 @@ impl<'a> TypeScriptLowerer<'a> {
         Ok(TsModule {
             module_name: self.module_name.clone(),
             abi_version: 1,
+            native_async: self.experimental.native_async,
             records,
             enums,
             error_exceptions,

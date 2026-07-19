@@ -24,6 +24,12 @@ pub fn ts_doc_block(doc: &Option<String>, indent: &str) -> String {
 #[template(path = "render_typescript/preamble.txt", escape = "none")]
 pub struct PreambleTemplate {
     pub abi_version: u32,
+    /// Selects the native bootstrap (`instantiateBoltFFINative`/`NativeBoltFFIModule`) over the
+    /// default wasm one (`instantiateBoltFFI`/`BoltFFIModule`) — see `TsModule::native_async`'s
+    /// doc. Consumers previously had to mechanically patch this preamble by hand after
+    /// generation (`scripts/patch-react-native-bootstrap.mjs` in the parse-core-sdks repo); this
+    /// flag makes that patch unnecessary.
+    pub native_async: bool,
 }
 
 #[derive(Template)]
@@ -183,6 +189,7 @@ impl TypeScriptEmitter {
         output.push_str(
             &PreambleTemplate {
                 abi_version: module.abi_version,
+                native_async: module.native_async,
             }
             .render()
             .unwrap(),
@@ -699,7 +706,28 @@ mod tests {
 
     #[test]
     fn snapshot_preamble() {
-        let output = PreambleTemplate { abi_version: 1 }.render().unwrap();
+        let output = PreambleTemplate {
+            abi_version: 1,
+            native_async: false,
+        }
+        .render()
+        .unwrap();
+        insta::assert_snapshot!(output);
+    }
+
+    #[test]
+    fn snapshot_preamble_native_async() {
+        // The react-native track's stage-4 gap this closes: native_async generation used to emit
+        // the byte-identical wasm bootstrap (`instantiateBoltFFI`/`BoltFFIModule`), requiring the
+        // consumer repo to hand-patch it after every generation
+        // (`scripts/patch-react-native-bootstrap.mjs`). This snapshot pins the native bootstrap
+        // this flag now emits instead.
+        let output = PreambleTemplate {
+            abi_version: 1,
+            native_async: true,
+        }
+        .render()
+        .unwrap();
         insta::assert_snapshot!(output);
     }
 
@@ -1076,14 +1104,12 @@ mod tests {
     }
 
     #[test]
-    fn native_async_param_needing_wasm_wrapper_code_is_a_loud_unsupported_error_not_a_crash() {
-        // Adversarial-review finding (react-native track stage 2): a non-empty `wrapper_code`
-        // means some parameter needs wasm-linear-memory allocation
-        // (`_module.allocString`/`allocBytes`/`allocWriter`, ...), which `NativeBoltFFIModule`
-        // has no methods for. Before this test/fix, native_async mode emitted the wrapper_code
-        // unconditionally anyway, producing a call that throws a confusing
-        // "_module.allocString is not a function" at the allocation site instead of a clear
-        // "native async mode does not yet support this" error.
+    fn native_async_param_needing_wasm_wrapper_code_now_dispatches_through_pollasyncnative() {
+        // Stage 4 (docs/tracks/react-native.md) closed the stage-2 gap this test used to pin:
+        // `NativeBoltFFIModule` (`@boltffi/runtime`'s native.ts) now implements the full
+        // `allocString`/`allocBytes`/`allocWriter`/... surface `BoltFFIModule` has, against its
+        // own native memory arena -- so a param needing wrapper_code renders exactly like any
+        // other native_async call, not a loud "unsupported" throw.
         let doc: Option<String> = None;
         let return_route = TsOutputRoute::async_scalar(String::new());
         let mut template = native_async_scalar_template(&[], &doc, &return_route, "");
@@ -1091,25 +1117,27 @@ mod tests {
         template.wrapper_code = param_alloc_statement;
         let rendered = template.render().unwrap();
 
-        assert!(rendered.contains(
-            "native async mode does not yet support parameters requiring wasm-linear-memory allocation"
-        ));
-        // The actual param-allocation statement itself must never reach the output -- only the
-        // guard's own doc comment (which names the method group for the reader's benefit) may
-        // mention `_module.allocString` in the abstract.
-        assert!(!rendered.contains(param_alloc_statement));
-        assert!(!rendered.contains("pollAsyncNative("));
+        assert!(rendered.contains(param_alloc_statement));
+        assert!(rendered.contains("pollAsyncNative("));
+        assert!(!rendered.contains("does not yet support parameters requiring"));
     }
 
     #[test]
-    fn native_async_buffer_encoded_return_is_a_loud_unsupported_error_not_silently_wrong() {
+    fn native_async_buffer_encoded_return_now_decodes_through_the_shared_buf_descriptor_path() {
+        // Stage 4 closed the stage-2 gap this test used to pin: `_module.allocBufDescriptor`/
+        // `completeAsync`/`readerFromBuf`/`freeBuf` are backend-agnostic (`NativeBoltFFIModule`
+        // implements the same surface as `BoltFFIModule`), so a packed/buffer-encoded async
+        // return route now decodes for real instead of throwing.
         let doc: Option<String> = None;
         let return_route = TsOutputRoute::packed("ResponseCodec.decode(reader)".to_string());
         let rendered = native_async_scalar_template(&[], &doc, &return_route, "")
             .render()
             .unwrap();
 
-        assert!(rendered.contains("does not yet support buffer-encoded return routes"));
+        assert!(rendered.contains("_module.allocBufDescriptor()"));
+        assert!(rendered.contains("_module.readerFromBuf(outPtr)"));
+        assert!(rendered.contains("ResponseCodec.decode(reader)"));
+        assert!(!rendered.contains("does not yet support buffer-encoded return routes"));
     }
 
     #[test]
@@ -1907,7 +1935,8 @@ mod tests {
     }
 
     #[test]
-    fn class_native_async_buffer_encoded_return_is_a_loud_unsupported_error() {
+    fn class_native_async_buffer_encoded_return_now_decodes_through_the_shared_buf_descriptor_path() {
+        // Stage 4 closed the gap this test used to pin (see the free-function equivalent's doc).
         let class = class_with_native_async_method(
             true,
             TsOutputRoute::packed("reader.readI32()".to_string()),
@@ -1916,11 +1945,17 @@ mod tests {
         );
         let rendered = ClassTemplate { cls: &class }.render().unwrap();
 
-        assert!(rendered.contains("does not yet support buffer-encoded return routes"));
+        assert!(rendered.contains("_module.allocBufDescriptor()"));
+        assert!(rendered.contains("_module.readerFromBuf(outPtr)"));
+        assert!(rendered.contains("reader.readI32()"));
+        assert!(!rendered.contains("does not yet support buffer-encoded return routes"));
     }
 
     #[test]
-    fn class_native_async_wrapper_code_param_is_a_loud_unsupported_error() {
+    fn class_native_async_wrapper_code_param_now_dispatches_through_pollasyncnative() {
+        // Stage 4 closed the gap this test used to pin (see the free-function equivalent's doc):
+        // `NativeBoltFFIModule.allocString` now exists, so a String param renders and dispatches
+        // normally instead of hitting the (now permanently-false) wrapper guard.
         let class = class_with_native_async_method(
             true,
             TsOutputRoute::async_scalar(String::new()),
@@ -1933,25 +1968,20 @@ mod tests {
         );
         let rendered = ClassTemplate { cls: &class }.render().unwrap();
 
-        assert!(rendered.contains(
-            "native async mode does not yet support parameters requiring wasm-linear-memory allocation"
-        ));
-        assert!(!rendered.contains("pollAsyncNative("));
-        assert!(!rendered.contains("_module.allocString"));
+        assert!(rendered.contains("_module.allocString(sql)"));
+        assert!(rendered.contains("pollAsyncNative("));
+        assert!(!rendered.contains("does not yet support parameters requiring"));
     }
 
     #[test]
-    fn class_native_async_method_with_cleanup_needing_param_hits_the_wrapper_guard_not_a_crash() {
+    fn class_native_async_method_with_cleanup_needing_param_now_dispatches_through_pollasyncnative() {
         // Unlike a free function's `AsyncFunctionTemplate` (where `wrapper_code`/`cleanup_code`
         // are independent raw-string template fields a test can set separately), a class
         // method's `wrapper_code()`/`cleanup_code()` are both DERIVED from the same `TsParam`
         // list: every `TsInputRoute` that produces cleanup code (`String`, `Bytes`,
-        // `PrimitiveBuffer`, ...) also produces wrapper code for that same param. So the
-        // `cleanup_code().is_empty() == false` Async arm's native_async branch (mirrored into
-        // class.txt/value_type_companion.txt for structural symmetry with the wasm arm) can
-        // never actually be reached by real lowered output today -- any param that would need
-        // it trips `native_async_wrapper_unsupported()` first, which is the safe direction to
-        // fail in (a clear error beats silently ignoring the wasm-only allocation).
+        // `PrimitiveBuffer`, ...) also produces wrapper code for that same param, exercising the
+        // `cleanup_code().is_empty() == false` Async arm specifically (mirrored into
+        // class.txt/value_type_companion.txt for structural symmetry with the wasm arm).
         let class = class_with_native_async_method(
             true,
             TsOutputRoute::async_scalar(String::new()),
@@ -1964,10 +1994,9 @@ mod tests {
         );
         let rendered = ClassTemplate { cls: &class }.render().unwrap();
 
-        assert!(rendered.contains(
-            "native async mode does not yet support parameters requiring wasm-linear-memory allocation"
-        ));
-        assert!(!rendered.contains("pollAsyncNative("));
+        assert!(rendered.contains("_module.allocString(sql)"));
+        assert!(rendered.contains("pollAsyncNative("));
+        assert!(rendered.contains("_module.freeAlloc(sql_alloc);"));
     }
 
     #[test]

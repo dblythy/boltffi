@@ -11,12 +11,12 @@ export namespace {{ name }} {
 {%- elif constructor.return_route.is_direct() %}
     return (_exports.{{ constructor.ffi_name }} as Function)({{ constructor.ffi_call_args() }}){{ constructor.return_route.ts_cast() }};
 {%- elif constructor.return_route.is_struct_return_slot() %}
-    const __outPtr = _module.exports.boltffi_wasm_alloc({{ constructor.return_route.return_slot_size().unwrap() }});
+    const __outPtr = _module.allocScratch({{ constructor.return_route.return_slot_size().unwrap() }});
     try {
       (_exports.{{ constructor.ffi_name }} as Function)({% if constructor.ffi_call_args().is_empty() %}__outPtr{% else %}__outPtr, {{ constructor.ffi_call_args() }}{% endif %});
       return {{ constructor.return_route.decode_expr() }};
     } finally {
-      _module.exports.boltffi_wasm_free(__outPtr, {{ constructor.return_route.return_slot_size().unwrap() }});
+      _module.freeScratch(__outPtr, {{ constructor.return_route.return_slot_size().unwrap() }});
     }
 {%- elif constructor.return_route.is_void_slot() %}
     (_exports.{{ constructor.ffi_name }} as Function)({{ constructor.ffi_call_args() }});
@@ -39,12 +39,12 @@ export namespace {{ name }} {
 {%- elif constructor.return_route.is_direct() %}
       return (_exports.{{ constructor.ffi_name }} as Function)({{ constructor.ffi_call_args() }}){{ constructor.return_route.ts_cast() }};
 {%- elif constructor.return_route.is_struct_return_slot() %}
-      const __outPtr = _module.exports.boltffi_wasm_alloc({{ constructor.return_route.return_slot_size().unwrap() }});
+      const __outPtr = _module.allocScratch({{ constructor.return_route.return_slot_size().unwrap() }});
       try {
         (_exports.{{ constructor.ffi_name }} as Function)({% if constructor.ffi_call_args().is_empty() %}__outPtr{% else %}__outPtr, {{ constructor.ffi_call_args() }}{% endif %});
         return {{ constructor.return_route.decode_expr() }};
       } finally {
-        _module.exports.boltffi_wasm_free(__outPtr, {{ constructor.return_route.return_slot_size().unwrap() }});
+        _module.freeScratch(__outPtr, {{ constructor.return_route.return_slot_size().unwrap() }});
       }
 {%- elif constructor.return_route.is_void_slot() %}
       (_exports.{{ constructor.ffi_name }} as Function)({{ constructor.ffi_call_args() }});
@@ -98,12 +98,12 @@ export namespace {{ name }} {
     return (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }}){{ sync_method.return_route.ts_cast() }};
 {%- endif %}
 {%- elif sync_method.return_route.is_struct_return_slot() %}
-    const __outPtr = _module.exports.boltffi_wasm_alloc({{ sync_method.return_route.return_slot_size().unwrap() }});
+    const __outPtr = _module.allocScratch({{ sync_method.return_route.return_slot_size().unwrap() }});
     try {
       (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args_with_out() }});
       return {{ sync_method.return_route.decode_expr() }};
     } finally {
-      _module.exports.boltffi_wasm_free(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
+      _module.freeScratch(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
     }
 {%- elif sync_method.return_route.is_void_slot() %}
     (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }});
@@ -207,12 +207,12 @@ export namespace {{ name }} {
       return (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }}){{ sync_method.return_route.ts_cast() }};
 {%- endif %}
 {%- elif sync_method.return_route.is_struct_return_slot() %}
-      const __outPtr = _module.exports.boltffi_wasm_alloc({{ sync_method.return_route.return_slot_size().unwrap() }});
+      const __outPtr = _module.allocScratch({{ sync_method.return_route.return_slot_size().unwrap() }});
       try {
         (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args_with_out() }});
         return {{ sync_method.return_route.decode_expr() }};
       } finally {
-        _module.exports.boltffi_wasm_free(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
+        _module.freeScratch(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
       }
 {%- elif sync_method.return_route.is_void_slot() %}
       (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }});

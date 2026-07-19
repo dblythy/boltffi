@@ -25,6 +25,7 @@ export {
   NativeAsyncFutureManager,
   NativeContinuationSignal,
   NativeFfiStatus,
+  NativeBoltFFIModule,
   instantiateBoltFFINative,
   allocNativeStatusBuffer,
   readNativeStatusCode,
@@ -33,5 +34,7 @@ export type {
   NativeHandle,
   NativeTrampolineFactory,
   NativePollFn,
-  NativeBoltFFIModule,
+  NativeStringAlloc,
+  NativePrimitiveBufferAlloc,
 } from "./native.js";
+export { NativeMemoryArena, RETURN_SLOT_SIZE } from "./native_arena.js";

@@ -18,12 +18,12 @@
   return (_exports.{{ ffi_name }} as Function)({{ call_args }}){{ return_route.ts_cast() }};
 {%- endif %}
 {%- elif return_route.is_struct_return_slot() %}
-  const __outPtr = _module.exports.boltffi_wasm_alloc({{ return_route.return_slot_size().unwrap() }});
+  const __outPtr = _module.allocScratch({{ return_route.return_slot_size().unwrap() }});
   try {
     (_exports.{{ ffi_name }} as Function)({% if call_args.is_empty() %}__outPtr{% else %}__outPtr, {{ call_args }}{% endif %});
     return {{ return_route.decode_expr() }};
   } finally {
-    _module.exports.boltffi_wasm_free(__outPtr, {{ return_route.return_slot_size().unwrap() }});
+    _module.freeScratch(__outPtr, {{ return_route.return_slot_size().unwrap() }});
   }
 {%- elif return_route.is_void_slot() %}
   (_exports.{{ ffi_name }} as Function)({{ call_args }});
@@ -56,12 +56,12 @@
     return (_exports.{{ ffi_name }} as Function)({{ call_args }}){{ return_route.ts_cast() }};
 {%- endif %}
 {%- elif return_route.is_struct_return_slot() %}
-    const __outPtr = _module.exports.boltffi_wasm_alloc({{ return_route.return_slot_size().unwrap() }});
+    const __outPtr = _module.allocScratch({{ return_route.return_slot_size().unwrap() }});
     try {
       (_exports.{{ ffi_name }} as Function)({% if call_args.is_empty() %}__outPtr{% else %}__outPtr, {{ call_args }}{% endif %});
       return {{ return_route.decode_expr() }};
     } finally {
-      _module.exports.boltffi_wasm_free(__outPtr, {{ return_route.return_slot_size().unwrap() }});
+      _module.freeScratch(__outPtr, {{ return_route.return_slot_size().unwrap() }});
     }
 {%- elif return_route.is_void_slot() %}
     (_exports.{{ ffi_name }} as Function)({{ call_args }});

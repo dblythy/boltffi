@@ -112,12 +112,12 @@ class {{ callback.proxy_class_name }} implements {{ callback.interface_name }} {
     const reader = _module.takePackedBuffer(packed);
     return {{ method.proxy_return_route.decode_expr() }};
 {%- elif method.proxy_return_route.is_struct_return_slot() %}
-    const __outPtr = _module.exports.boltffi_wasm_alloc({{ method.proxy_return_route.return_slot_size().unwrap() }});
+    const __outPtr = _module.allocScratch({{ method.proxy_return_route.return_slot_size().unwrap() }});
     try {
       (_exports.{{ method.proxy_export_name }} as Function)(__outPtr, this._handle{% if !method.proxy_call_args().is_empty() %}, {{ method.proxy_call_args() }}{% endif %});
       return {{ method.proxy_return_route.decode_expr() }};
     } finally {
-      _module.exports.boltffi_wasm_free(__outPtr, {{ method.proxy_return_route.return_slot_size().unwrap() }});
+      _module.freeScratch(__outPtr, {{ method.proxy_return_route.return_slot_size().unwrap() }});
     }
 {%- else %}
     const packed = (_exports.{{ method.proxy_export_name }} as Function)(this._handle{% if !method.proxy_call_args().is_empty() %}, {{ method.proxy_call_args() }}{% endif %}) as bigint;
@@ -134,12 +134,12 @@ class {{ callback.proxy_class_name }} implements {{ callback.interface_name }} {
       const reader = _module.takePackedBuffer(packed);
       return {{ method.proxy_return_route.decode_expr() }};
 {%- elif method.proxy_return_route.is_struct_return_slot() %}
-      const __outPtr = _module.exports.boltffi_wasm_alloc({{ method.proxy_return_route.return_slot_size().unwrap() }});
+      const __outPtr = _module.allocScratch({{ method.proxy_return_route.return_slot_size().unwrap() }});
       try {
         (_exports.{{ method.proxy_export_name }} as Function)(__outPtr, this._handle{% if !method.proxy_call_args().is_empty() %}, {{ method.proxy_call_args() }}{% endif %});
         return {{ method.proxy_return_route.decode_expr() }};
       } finally {
-        _module.exports.boltffi_wasm_free(__outPtr, {{ method.proxy_return_route.return_slot_size().unwrap() }});
+        _module.freeScratch(__outPtr, {{ method.proxy_return_route.return_slot_size().unwrap() }});
       }
 {%- else %}
       const packed = (_exports.{{ method.proxy_export_name }} as Function)(this._handle{% if !method.proxy_call_args().is_empty() %}, {{ method.proxy_call_args() }}{% endif %}) as bigint;
