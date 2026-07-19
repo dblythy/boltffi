@@ -11,10 +11,33 @@
 #include <sstream>
 #include <thread>
 
+#include <cstring>
+
 #include "boltffi/abi_header.h"
 #include "test_harness.h"
 
 using namespace boltffi;
+
+// `trampolineScalarInBufOut` (the `fill`-shape trampoline) calls `makeFfiBufFromBytes`, which
+// `dlsym`s a REAL `boltffi_buf_from_bytes` -- normally exported by whatever Rust dylib is loaded.
+// This test binary never dlopens one (it exercises the JSI-independent core in isolation, like
+// every other test in this file), so it provides its own spy -- same convention
+// `ffi_buf_test.cpp` already uses for `boltffi_free_buf` (see that file's own header comment).
+// Declared with the REAL 32-byte `FfiBuf_u8` field layout so it round-trips through
+// `invokeGenericSret`'s aggregate-return convention exactly like the genuine Rust export would.
+extern "C" {
+struct SpyFfiBuf {
+  std::uint8_t* ptr;
+  std::uintptr_t len;
+  std::uintptr_t cap;
+  std::uintptr_t align;
+};
+SpyFfiBuf boltffi_buf_from_bytes(const std::uint8_t* ptr, std::uintptr_t len) {
+  auto* copy = new std::uint8_t[len];
+  if (len > 0) std::memcpy(copy, ptr, len);
+  return SpyFfiBuf{copy, len, len, 1};
+}
+}
 
 BOLTFFI_TEST(classifies_free_and_clone) {
   VTableFieldAbi freeField{"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}};
@@ -60,17 +83,25 @@ BOLTFFI_TEST(classifies_completion_shapes_by_inner_fn_ptr_arity) {
   BOLTFFI_CHECK(classifyVTableField(kvGet) == CallbackShape::CompletionStatusBuf1);
 }
 
-BOLTFFI_TEST(unrecognized_shape_returns_nullopt_not_a_guess) {
-  // `on_dropped`'s real shape (3 buffers + a scalar, sync void) -- documented as NOT YET covered.
+BOLTFFI_TEST(classifies_on_dropped_and_fill_the_former_gaps) {
+  // Finding 4, this session: these two shapes used to return `nullopt` (and `buildVTableBytes`
+  // silently installed a NULL vtable slot for them) -- now covered as `VoidBuf2Scalar1Buf1`/
+  // `ScalarInBufOut`.
   VTableFieldAbi onDropped{"on_dropped",
                            TypeRef{PrimKind::Void},
                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64},
                             TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}, TypeRef{PrimKind::I32},
                             TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}}};
-  BOLTFFI_CHECK(!classifyVTableField(onDropped).has_value());
+  BOLTFFI_CHECK(classifyVTableField(onDropped) == CallbackShape::VoidBuf2Scalar1Buf1);
+
+  TypeRef ffiBufReturn;
+  ffiBufReturn.kind = PrimKind::Aggregate;
+  ffiBufReturn.aggregateName = "FfiBuf_u8";
+  VTableFieldAbi fill{"fill", ffiBufReturn, {TypeRef{PrimKind::U64}, TypeRef{PrimKind::U32}}};
+  BOLTFFI_CHECK(classifyVTableField(fill) == CallbackShape::ScalarInBufOut);
 }
 
-BOLTFFI_TEST(classifies_every_real_vtable_field_except_the_documented_gap) {
+BOLTFFI_TEST(classifies_every_real_vtable_field_13_of_13) {
   std::string path = std::string(BOLTFFI_TEST_SOURCE_DIR) + "/tests/fixtures/parse_core_real_abi.h";
   std::ifstream f(path);
   std::stringstream ss;
@@ -87,30 +118,81 @@ BOLTFFI_TEST(classifies_every_real_vtable_field_except_the_documented_gap) {
       }
     }
   }
-  // Exactly two documented gaps: EventuallyQueueListener::on_dropped's 3-buffer+scalar shape, and
-  // RandomSource::fill's scalar-in/large-aggregate-out shape (see this file's module doc).
-  BOLTFFI_CHECK(unclassified == 2);
+  // Finding 4's fix closes both former gaps (EventuallyQueueListener::on_dropped,
+  // RandomSource::fill) -- every real vtable field now classifies.
+  BOLTFFI_CHECK(unclassified == 0);
 }
 
-BOLTFFI_TEST(exactly_the_two_documented_gaps_are_unclassified) {
-  std::string path = std::string(BOLTFFI_TEST_SOURCE_DIR) + "/tests/fixtures/parse_core_real_abi.h";
-  std::ifstream f(path);
-  std::stringstream ss;
-  ss << f.rdbuf();
-  auto abi = parseAbiHeader(ss.str());
+BOLTFFI_TEST(void_buf2_scalar1_buf1_trampoline_round_trip) {
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"on_dropped",
+                            TypeRef{PrimKind::Void},
+                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64},
+                             TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}, TypeRef{PrimKind::I32},
+                             TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}}});
+  auto slots = buildVTableBytes(vtable);
+  BOLTFFI_CHECK(slots.size() == 3);
+  for (void* s : slots) BOLTFFI_CHECK(s != nullptr);
 
-  bool foundOnDropped = false, foundFill = false;
-  for (const auto& vtable : abi.vtables) {
-    for (const auto& field : vtable.fields) {
-      if (!classifyVTableField(field)) {
-        std::string name = vtable.name + "::" + field.name;
-        if (name == "___EventuallyQueueListenerVTable::on_dropped") foundOnDropped = true;
-        if (name == "___RandomSourceVTable::fill") foundFill = true;
-      }
-    }
-  }
-  BOLTFFI_CHECK(foundOnDropped);
-  BOLTFFI_CHECK(foundFill);
+  std::vector<std::uint8_t> seenBuf0, seenBuf1, seenBuf2;
+  std::int32_t seenScalar = -1;
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["on_dropped"] = [&](const GenericMethodCall& call, std::function<void(CallbackCompletion)>,
+                                             CallbackResult&) {
+    seenBuf0 = call.bufArgs[0];
+    seenBuf1 = call.bufArgs[1];
+    seenBuf2 = call.bufArgs[2];
+    seenScalar = static_cast<std::int32_t>(call.scalarArg);
+  };
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  auto onDroppedFn = reinterpret_cast<void (*)(std::uint64_t, const std::uint8_t*, std::uintptr_t,
+                                                const std::uint8_t*, std::uintptr_t, std::int32_t,
+                                                const std::uint8_t*, std::uintptr_t)>(slots[2]);
+  std::uint8_t buf0[] = {1, 2, 3};
+  std::uint8_t buf1[] = {4, 5};
+  std::uint8_t buf2[] = {6};
+  onDroppedFn(handle, buf0, sizeof(buf0), buf1, sizeof(buf1), 42, buf2, sizeof(buf2));
+
+  BOLTFFI_CHECK((seenBuf0 == std::vector<std::uint8_t>{1, 2, 3}));
+  BOLTFFI_CHECK((seenBuf1 == std::vector<std::uint8_t>{4, 5}));
+  BOLTFFI_CHECK((seenBuf2 == std::vector<std::uint8_t>{6}));
+  BOLTFFI_CHECK(seenScalar == 42);
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
+  freeFn(handle);
+}
+
+BOLTFFI_TEST(scalar_in_buf_out_trampoline_round_trip) {
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  TypeRef ffiBufReturn;
+  ffiBufReturn.kind = PrimKind::Aggregate;
+  ffiBufReturn.aggregateName = "FfiBuf_u8";
+  vtable.fields.push_back({"fill", ffiBufReturn, {TypeRef{PrimKind::U64}, TypeRef{PrimKind::U32}}});
+  auto slots = buildVTableBytes(vtable);
+  BOLTFFI_CHECK(slots.size() == 3);
+  for (void* s : slots) BOLTFFI_CHECK(s != nullptr);
+
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["fill"] = [](const GenericMethodCall& call, std::function<void(CallbackCompletion)>,
+                                      CallbackResult& result) {
+    BOLTFFI_CHECK(call.hasScalarArg);
+    result.bytes.assign(call.scalarArg, static_cast<std::uint8_t>(0xAB));
+  };
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  auto fillFn = reinterpret_cast<detail::FfiBufReturn (*)(std::uint64_t, std::uint32_t)>(slots[2]);
+  detail::FfiBufReturn out = fillFn(handle, 5);
+  BOLTFFI_CHECK(out.len == 5);
+  BOLTFFI_CHECK(out.ptr != nullptr);
+  for (std::uintptr_t i = 0; i < out.len; ++i) BOLTFFI_CHECK(out.ptr[i] == 0xAB);
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
+  freeFn(handle);
 }
 
 BOLTFFI_TEST(scalar_return_trampoline_round_trip) {
@@ -170,6 +252,92 @@ BOLTFFI_TEST(completion_status0_trampoline_delivers_off_thread) {
   BOLTFFI_CHECK(received.load() == 0);
 
   auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
+  freeFn(handle);
+}
+
+BOLTFFI_TEST(missing_registration_reports_cancelled_not_ok) {
+  // Finding 7, this session: a completion trampoline racing teardown (the registered object was
+  // already freed, or the method was never registered) used to call back with a
+  // default-constructed `CallbackCompletion{}` -- `statusCode == 0`, `FFI_STATUS_OK` -- reporting
+  // success for an operation that never ran. It must report `FFI_STATUS_CANCELLED` (4) instead.
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  TypeRef statusOnly;
+  statusOnly.kind = PrimKind::FnPtr;
+  statusOnly.fnPtrArity = 2;
+  vtable.fields.push_back(
+      {"clear2", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}, statusOnly, TypeRef{PrimKind::PtrMut}}});
+  auto slots = buildVTableBytes(vtable);
+
+  std::atomic<int32_t> received{-1};
+  auto clearFn = reinterpret_cast<void (*)(std::uint64_t, detail::CompletionStatusFn, void*)>(slots[2]);
+  auto completion = +[](void* ud, std::int32_t status) { *reinterpret_cast<std::atomic<int32_t>*>(ud) = status; };
+  // NEVER inserted into CallbackRegistry -- handle 0xDEAD is guaranteed not found.
+  clearFn(0xDEADULL, completion, &received);
+  BOLTFFI_CHECK(received.load() == kFfiStatusCancelled);
+}
+
+BOLTFFI_TEST(slot_allocation_is_cached_per_shape_and_method_not_exhausted_by_reregistration) {
+  // Finding 6, this session: registering the SAME (shape, method name) pair repeatedly (e.g.
+  // multiple `ParseClient` instances installing the same `SessionStorage`-shaped trait, or a hot
+  // reload) used to burn a fresh SlotId from the fixed `kMaxCallbackSlots` budget every single
+  // time, exhausting it under nothing more exotic than ordinary repeated use. Re-registering it
+  // far more than `kMaxCallbackSlots` times must never throw, and must always yield the identical
+  // trampoline pointer.
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"factor", TypeRef{PrimKind::I32}, {TypeRef{PrimKind::U64}}});
+
+  void* first = buildCallbackTrampoline(CallbackShape::ScalarReturn, "factor");
+  for (int i = 0; i < 4 * static_cast<int>(kMaxCallbackSlots); ++i) {
+    void* again = buildCallbackTrampoline(CallbackShape::ScalarReturn, "factor");
+    BOLTFFI_CHECK(again == first);
+  }
+
+  // A DIFFERENT method name under the same shape must still get its OWN (cached) slot.
+  void* other = buildCallbackTrampoline(CallbackShape::ScalarReturn, "now_ms");
+  BOLTFFI_CHECK(other != first);
+  void* otherAgain = buildCallbackTrampoline(CallbackShape::ScalarReturn, "now_ms");
+  BOLTFFI_CHECK(otherAgain == other);
+}
+
+BOLTFFI_TEST(registered_vtable_survives_the_registering_functions_return) {
+  // Finding 5, this session: the real generated `boltffi_register_callback_*` stores the raw
+  // pointer it's given in a process-wide `static AtomicPtr` and dereferences it on every
+  // subsequent trait call FOREVER (verified against the actual codegen,
+  // `boltffi_macros/src/experimental/wrapper/callback.rs`'s `#register_ident`) -- there is no copy
+  // and no teardown call. `registerVTableForProcessLifetime` must hand back a pointer that stays
+  // valid long after the function that built the `VTableAbi` returns (a plain
+  // `buildVTableBytes(vtable)` local variable would NOT survive this).
+  auto buildAndRegister = []() -> const void* {
+    VTableAbi vtable;
+    vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+    vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+    vtable.fields.push_back({"factor", TypeRef{PrimKind::I32}, {TypeRef{PrimKind::U64}}});
+    return registerVTableForProcessLifetime(vtable);
+    // `vtable` (the input VTableAbi) goes out of scope here -- irrelevant, since
+    // `registerVTableForProcessLifetime` only reads it to build its OWN heap-owned copy.
+  };
+  const void* vtablePtr = buildAndRegister();
+
+  // Encourage stack/heap reuse that would surface a dangling pointer if the storage were NOT
+  // process-lifetime (a plain local `std::vector` returned by address would be a textbook UAF
+  // here, likely to get its memory reused by the allocations below).
+  std::vector<std::vector<int>> churn;
+  for (int i = 0; i < 64; ++i) churn.emplace_back(64, i);
+
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["factor"] = [](const GenericMethodCall&, std::function<void(CallbackCompletion)>,
+                                        CallbackResult& result) { result.scalar = 9; };
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  const auto* slotArray = reinterpret_cast<void* const*>(vtablePtr);
+  auto factorFn = reinterpret_cast<std::uint64_t (*)(std::uint64_t)>(slotArray[2]);
+  BOLTFFI_CHECK(factorFn(handle) == 9);
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slotArray[0]);
   freeFn(handle);
 }
 

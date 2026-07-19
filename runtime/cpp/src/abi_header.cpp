@@ -448,7 +448,15 @@ ParsedAbi parseAbiHeader(std::string_view source) {
       std::string name = trim(rest.substr(lastSpace + 1));
       TypeRef resolved = resolveParamOrReturnType(typeText, aliases);
       if (resolved.kind == PrimKind::PtrConst || resolved.kind == PrimKind::PtrMut) {
-        aliases.aliases[name] = resolved.kind;
+        // A NAMED typedef alias resolving to a bare pointer type (`typedef const void
+        // *RustFutureHandle;`, the real header's only instance) is an OPAQUE, Rust-managed handle
+        // -- never a real inline pointer a generic caller may rebase against a bound arena. Every
+        // OTHER `PtrConst`/`PtrMut` classification in this parser comes from an inline `T *`
+        // spelling at the actual use site (`const uint8_t *key_ptr` in a param list), which never
+        // goes through this branch -- so recording `OpaqueHandle` here, instead of collapsing back
+        // to the same `PtrConst`/`PtrMut` kind the inline case uses, is what lets
+        // `isArenaPointerKind` tell the two apart later without guessing from a parameter's name.
+        aliases.aliases[name] = PrimKind::OpaqueHandle;
       } else {
         aliases.aliases[name] = resolved.kind;
       }
@@ -468,6 +476,51 @@ ParsedAbi parseAbiHeader(std::string_view source) {
   }
 
   return result;
+}
+
+namespace {
+
+/// `true` iff `param` is exactly the 16-byte `BoltFFICallbackHandle` by-value shape -- the ONLY
+/// by-value aggregate PARAMETER this dispatcher's register-level plan knows how to expand. Checks
+/// the actual resolved record size (not just the name) so a future header that reused the name for
+/// a differently-shaped record would be rejected rather than silently mis-expanded.
+bool isTwoWordCallbackHandleParam(const TypeRef& param, const ParsedAbi& abi) {
+  if (param.kind != PrimKind::Aggregate) return false;
+  const RecordAbi* record = abi.findRecord(param.aggregateName);
+  return record != nullptr && record->byteSize == 16;
+}
+
+}  // namespace
+
+std::optional<std::vector<RegisterSlot>> planFunctionCall(const FunctionAbi& fn, const ParsedAbi& abi) {
+  std::vector<RegisterSlot> plan;
+  plan.reserve(fn.params.size() + 1);
+  for (std::size_t i = 0; i < fn.params.size(); ++i) {
+    const TypeRef& param = fn.params[i];
+    if (param.kind == PrimKind::F64) {
+      plan.push_back({RegisterSlotKind::Float, i});
+    } else if (param.kind == PrimKind::Aggregate) {
+      if (!isTwoWordCallbackHandleParam(param, abi)) {
+        // Outside the closed shape space (e.g. `boltffi_free_string`/`boltffi_free_buf`'s own
+        // >16-byte by-value parameters) -- `fn` must never be routed through this dispatcher.
+        return std::nullopt;
+      }
+      plan.push_back({RegisterSlotKind::TwoWordLow, i});
+      plan.push_back({RegisterSlotKind::TwoWordHigh, i});
+    } else {
+      plan.push_back({RegisterSlotKind::Scalar, i});
+    }
+  }
+  return plan;
+}
+
+ReturnPlan planFunctionReturn(const FunctionAbi& fn, const ParsedAbi& abi) {
+  if (fn.returnType.kind != PrimKind::Aggregate) return ReturnPlan::Scalar;
+  const RecordAbi* record = abi.findRecord(fn.returnType.aggregateName);
+  std::size_t byteSize = record != nullptr ? record->byteSize : 0;
+  if (byteSize <= 8) return ReturnPlan::Scalar;
+  if (byteSize == 16) return ReturnPlan::TwoWord;
+  return ReturnPlan::Sret;
 }
 
 }  // namespace boltffi

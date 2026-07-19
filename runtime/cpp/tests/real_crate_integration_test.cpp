@@ -115,12 +115,16 @@ BOLTFFI_TEST(generic_callback_vtable_drives_real_synchronous_multiplier) {
 
   for (auto& f : vtable.fields) BOLTFFI_CHECK(classifyVTableField(f).has_value());
 
-  std::vector<void*> slots = buildVTableBytes(vtable);
-  BOLTFFI_CHECK(slots.size() == 3);
-  for (void* s : slots) BOLTFFI_CHECK(s != nullptr);
+  // Registers via `registerVTableForProcessLifetime` (finding 5's fix), NOT a function-local
+  // `buildVTableBytes(vtable)` vector -- the real generated `boltffi_register_callback_*` stores
+  // this exact pointer in a process-wide `static AtomicPtr` and dereferences it on every
+  // subsequent `Multiplier`/`clone`/`factor` call for as long as the process runs (verified
+  // against the actual codegen), so the slot storage must outlive this whole test function, not
+  // just the registration call.
+  const void* vtablePtr = registerVTableForProcessLifetime(vtable);
 
   void* registerFn = resolve("boltffi_register_callback_rn_poc_multiplier");
-  CValue registerArgs[1] = {CValue::ofPtr(slots.data())};
+  CValue registerArgs[1] = {CValue::ofPtr(vtablePtr)};
   invokeGenericVoid(registerFn, registerArgs, 1);
 
   auto registration = std::make_shared<RegisteredCallbackObject>();
@@ -133,7 +137,7 @@ BOLTFFI_TEST(generic_callback_vtable_drives_real_synchronous_multiplier) {
   std::uint64_t counter = invokeGenericScalar(ctor, ctorArgs, 1);
 
   void* setMultiplier = resolve("boltffi_method_class_rn_poc_counter_set_multiplier");
-  CValue setArgs[3] = {CValue::ofU64(counter), CValue::ofU64(callbackHandle), CValue::ofPtr(slots.data())};
+  CValue setArgs[3] = {CValue::ofU64(counter), CValue::ofU64(callbackHandle), CValue::ofPtr(vtablePtr)};
   invokeGenericVoid(setMultiplier, setArgs, 3);
 
   void* scaled = resolve("boltffi_method_class_rn_poc_counter_scaled");
@@ -163,10 +167,10 @@ BOLTFFI_TEST(generic_callback_vtable_drives_real_async_completion_kv_get) {
   for (auto& f : vtable.fields) BOLTFFI_CHECK(classifyVTableField(f).has_value());
   BOLTFFI_CHECK(*classifyVTableField(vtable.fields[2]) == CallbackShape::CompletionStatusBuf0);
 
-  std::vector<void*> slots = buildVTableBytes(vtable);
+  const void* asyncKvVtablePtr = registerVTableForProcessLifetime(vtable);
 
   void* registerFn = resolve("boltffi_register_callback_rn_poc_async_kv");
-  CValue registerArgs[1] = {CValue::ofPtr(slots.data())};
+  CValue registerArgs[1] = {CValue::ofPtr(asyncKvVtablePtr)};
   invokeGenericVoid(registerFn, registerArgs, 1);
 
   auto registration = std::make_shared<RegisteredCallbackObject>();
@@ -196,7 +200,7 @@ BOLTFFI_TEST(generic_callback_vtable_drives_real_async_completion_kv_get) {
   std::uint64_t counter = invokeGenericScalar(ctor, ctorArgs, 1);
 
   void* setKv = resolve("boltffi_method_class_rn_poc_counter_set_kv");
-  CValue setKvArgs[3] = {CValue::ofU64(counter), CValue::ofU64(callbackHandle), CValue::ofPtr(slots.data())};
+  CValue setKvArgs[3] = {CValue::ofU64(counter), CValue::ofU64(callbackHandle), CValue::ofPtr(asyncKvVtablePtr)};
   invokeGenericVoid(setKv, setKvArgs, 3);
 
   void* entry = resolve("boltffi_method_class_rn_poc_counter_kv_get");
@@ -246,6 +250,88 @@ BOLTFFI_TEST(generic_callback_vtable_drives_real_async_completion_kv_get) {
   BOLTFFI_CHECK(resultBuf.size() == 5 + len);
   std::string decoded(reinterpret_cast<const char*>(resultBuf.data() + 5), len);
   BOLTFFI_CHECK(decoded == "registered-value");
+}
+
+// ---- (C) the closed-shape-space call planner, driven end to end against a REAL callback handle
+// ---- (findings 1+2, this session): constructs a genuine `BoltFFICallbackHandle` via
+// `boltffi_create_callback_rn_poc_multiplier` (a 16-byte, two-register aggregate RETURN --
+// finding 2's gap: before this session's fix, the generic host object's return-classification
+// only special-cased aggregates >16 bytes, so a 16-byte return silently fell through to the
+// plain-scalar path and lost the `vtable` word), then feeds that value BACK into
+// `set_multiplier` through `planFunctionCall`/`buildRegisterArgs` -- the SAME expansion path
+// findings 1's fix adds -- using a hand-built `FunctionAbi` that declares the parameter as ONE
+// logical `BoltFFICallbackHandle` (matching the real header's `BoltFFICallbackHandle transport`-
+// style by-value parameter shape, e.g. `set_http_transport`/`live_query_client_new`) rather than
+// the two raw scalars the OTHER `set_multiplier` test above passes by hand. If either the
+// register-count/order (finding 1) or the 16-byte return decoding (finding 2) regressed, this
+// would call through the WRONG registers or read a garbage vtable pointer and crash/misbehave
+// (Multiplier::factor would either never be invoked correctly or -- worse -- dereference garbage).
+BOLTFFI_TEST(closed_shape_planner_constructs_and_consumes_a_real_callback_handle) {
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["factor"] = [](const GenericMethodCall&, std::function<void(CallbackCompletion)>,
+                                        CallbackResult& result) { result.scalar = static_cast<std::uint64_t>(4); };
+  std::uint64_t callbackHandle = CallbackRegistry::instance().insert(registration);
+
+  VTableAbi vtable;
+  vtable.name = "MultiplierVTable";
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"factor", TypeRef{PrimKind::I32}, {TypeRef{PrimKind::U64}}});
+  const void* vtablePtr = registerVTableForProcessLifetime(vtable);
+
+  void* registerFn = resolve("boltffi_register_callback_rn_poc_multiplier");
+  CValue registerArgs[1] = {CValue::ofPtr(vtablePtr)};
+  invokeGenericVoid(registerFn, registerArgs, 1);
+
+  // Finding 2's fix: `boltffi_create_callback_rn_poc_multiplier(uint64_t) -> BoltFFICallbackHandle`
+  // is a genuine 16-byte, two-INTEGER-eightbyte aggregate return -- dispatch through
+  // `invokeGenericTwoWord`, never `invokeGenericScalar` (which would drop the `vtable` word).
+  void* createFn = resolve("boltffi_create_callback_rn_poc_multiplier");
+  CValue createArgs[1] = {CValue::ofU64(callbackHandle)};
+  TwoWord handle = invokeGenericTwoWord(createFn, createArgs, 1);
+  BOLTFFI_CHECK(handle.a == callbackHandle);
+  BOLTFFI_CHECK(handle.b != 0);  // the real vtable pointer Rust just handed back
+
+  // Finding 1's fix: describe `set_multiplier` with a HAND-BUILT ABI declaring its callback
+  // parameter as ONE logical `BoltFFICallbackHandle` (the real header's actual shape for this kind
+  // of setter, e.g. `set_http_transport`), then let `planFunctionCall`/`buildRegisterArgs` expand
+  // it into the two physical registers -- rather than the test above's hand-flattened `CValue`
+  // array, this exercises the GENERIC path a real ABI-driven host object would take.
+  ParsedAbi abi;
+  abi.records.push_back(RecordAbi{"BoltFFICallbackHandle", 16});
+  FunctionAbi setMultiplier;
+  setMultiplier.name = "boltffi_method_class_rn_poc_counter_set_multiplier";
+  setMultiplier.returnType = TypeRef{PrimKind::Void};
+  TypeRef receiverParam;
+  receiverParam.kind = PrimKind::U64;
+  TypeRef callbackParam;
+  callbackParam.kind = PrimKind::Aggregate;
+  callbackParam.aggregateName = "BoltFFICallbackHandle";
+  setMultiplier.params = {receiverParam, callbackParam};
+
+  auto plan = planFunctionCall(setMultiplier, abi);
+  BOLTFFI_CHECK(plan.has_value());
+  BOLTFFI_CHECK(plan->size() == 3);  // receiver (1) + BoltFFICallbackHandle (2)
+
+  void* ctor = resolve("boltffi_init_class_rn_poc_counter_new");
+  CValue ctorArgs[1] = {CValue::ofU64(6)};
+  std::uint64_t counter = invokeGenericScalar(ctor, ctorArgs, 1);
+
+  std::vector<LogicalArg> logicalArgs(2);
+  logicalArgs[0].u64 = counter;
+  logicalArgs[1].u64 = handle.a;   // BoltFFICallbackHandle.handle
+  logicalArgs[1].high = handle.b;  // BoltFFICallbackHandle.vtable -- NEVER arena-translated
+  auto identityTranslate = [](const TypeRef&, CValue v) { return v; };
+  std::vector<CValue> registerArgsBuilt = buildRegisterArgs(setMultiplier, *plan, logicalArgs, identityTranslate);
+  BOLTFFI_CHECK(registerArgsBuilt.size() == 3);
+
+  void* setMultiplierFn = resolve(setMultiplier.name.c_str());
+  invokeGenericVoid(setMultiplierFn, registerArgsBuilt.data(), registerArgsBuilt.size());
+
+  void* scaled = resolve("boltffi_method_class_rn_poc_counter_scaled");
+  CValue scaledArgs[1] = {CValue::ofU64(counter)};
+  auto result = invokeGenericScalar(scaled, scaledArgs, 1);
+  BOLTFFI_CHECK(static_cast<std::int32_t>(result) == 24);  // 6 * factor(4)
 }
 
 }  // namespace
