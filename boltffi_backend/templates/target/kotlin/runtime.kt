@@ -630,7 +630,7 @@ private const val MAX_CACHED_WIRE_WRITER_BYTES: Int = 1024 * 1024
     }
 }
 
-private inline fun <K, V> Map<K, V>.wireSize(
+{% if split_data_package %}internal{% else %}private{% endif %} inline fun <K, V> Map<K, V>.wireSize(
     keySize: (K) -> Int,
     valueSize: (V) -> Int,
 ): Int = 4 + entries.sumOf { entry -> keySize(entry.key) + valueSize(entry.value) }

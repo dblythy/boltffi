@@ -213,6 +213,12 @@ fn kotlin_target_splits_data_records_and_enums_into_a_separate_package() {
     pub struct Profile {
         pub name: String,
         pub mode: Mode,
+        // A Map-typed field routes wireSize() through the shared `Map<K, V>.wireSize` runtime
+        // extension (runtime.kt) — this is the one helper the split's first cut of the
+        // private -> internal widening missed (caught by adversarial review): unlike every other
+        // codec helper it wasn't gated on `split_data_package`, so a Map field on a record in the
+        // split-out data file failed with "unresolved reference: wireSize".
+        pub tags: std::collections::HashMap<String, String>,
     }
 
     #[data(impl)]
@@ -234,7 +240,7 @@ fn kotlin_target_splits_data_records_and_enums_into_a_separate_package() {
     impl ParseObject {
         pub fn new(id: i32) -> Self { Self { id } }
         pub fn profile(&self) -> Profile {
-            Profile { name: "demo".to_string(), mode: Mode::Fast }
+            Profile { name: "demo".to_string(), mode: Mode::Fast, tags: std::collections::HashMap::new() }
         }
     }
 
@@ -357,7 +363,7 @@ import com.parsecore.*
 // `com.parsecore.ffi.*` — to work with every generated DTO kind (record, enum, and a data
 // record with its own #[data(impl)] method).
 object Reach {
-    fun makeProfile(): Profile = Profile("demo", Mode.FAST)
+    fun makeProfile(): Profile = Profile("demo", Mode.FAST, emptyMap())
 
     fun describe(profile: Profile): String = profile.describe()
 
