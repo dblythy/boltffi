@@ -25,7 +25,8 @@
     "build": "tsc",
     "prepare": "tsc",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "test:native": "bun test test/native.bun.test.ts"
   },
   "devDependencies": {
     "typescript": "^5.0.0",

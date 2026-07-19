@@ -1,0 +1,20 @@
+[package]
+name = "rn_poc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone fixture crate for the react-native native-backend PoC (docs/tracks/react-native.md,
+# parse-core-sdks repo). Deliberately excluded from the boltffi workspace (root Cargo.toml
+# `exclude`), mirroring examples/demo, so `cargo test --workspace` never builds it — it is built
+# on demand by runtime/typescript/test/fixtures/build-rn-poc.sh, driven through the
+# BindingExpansion path (same real path apple/android/kmp/csharp build their shipped artifacts
+# through) so the compiled dylib has the real experimental-macro native async/callback ABI,
+# including `_panic_message`, not the narrower stable-macro-only surface a plain `cargo build`
+# would produce.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+boltffi = { path = "../../../../../boltffi" }
