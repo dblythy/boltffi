@@ -4,6 +4,45 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
 {% endif %}
 {% if cleanup_code.is_empty() %}
   const handle = (_exports.{{ entry_ffi_name }} as Function)({{ call_args }});
+{% if native_async %}
+  const awaitedHandle = await _module.asyncManager.pollAsyncNative(
+    handle,
+    (h: bigint, callbackData: bigint, callback: unknown) =>
+      (_exports.{{ poll_ffi_name }} as Function)(h, callbackData, callback)
+  );
+
+{% if return_route.is_void() %}
+  try {
+    // FfiStatus is a single little-endian i32 `code` field (header.h) -- a native `_complete`
+    // export takes a raw pointer to it as an out-param; a plain JS buffer already IS valid
+    // native memory (native and JS share one process address space, unlike wasm), so no
+    // allocator call is needed the way wasm's `allocStatus` requires.
+    const statusBuf = new Uint8Array(4);
+    (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
+    const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+    if (statusCode !== 0) {
+      throw new Error(`native async call failed with status ${statusCode}`);
+    }
+  } finally {
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% elif return_route.is_async_scalar() %}
+  try {
+    const statusBuf = new Uint8Array(4);
+    const result = (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ return_route.ts_cast() }};
+    const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+    if (statusCode !== 0) {
+      throw new Error(`native async call failed with status ${statusCode}`);
+    }
+    return result;
+  } finally {
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% else %}
+  (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  throw new Error("native async mode does not yet support buffer-encoded return routes");
+{% endif %}
+{% else %}
   const awaitedHandle = await _module.asyncManager.pollAsync(
     handle,
     (h: number) => (_exports.{{ poll_sync_ffi_name }} as Function)(h),
@@ -48,9 +87,45 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
   (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
   throw new Error("Unsupported async return route: RawPacked {{ return_route.decode_expr() }}");
 {% endif %}
+{% endif %}
 {% else %}
   try {
     const handle = (_exports.{{ entry_ffi_name }} as Function)({{ call_args }});
+{% if native_async %}
+    const awaitedHandle = await _module.asyncManager.pollAsyncNative(
+      handle,
+      (h: bigint, callbackData: bigint, callback: unknown) =>
+        (_exports.{{ poll_ffi_name }} as Function)(h, callbackData, callback)
+    );
+
+{% if return_route.is_void() %}
+    try {
+      const statusBuf = new Uint8Array(4);
+      (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
+      const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+      if (statusCode !== 0) {
+        throw new Error(`native async call failed with status ${statusCode}`);
+      }
+    } finally {
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% elif return_route.is_async_scalar() %}
+    try {
+      const statusBuf = new Uint8Array(4);
+      const result = (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ return_route.ts_cast() }};
+      const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
+      if (statusCode !== 0) {
+        throw new Error(`native async call failed with status ${statusCode}`);
+      }
+      return result;
+    } finally {
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% else %}
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    throw new Error("native async mode does not yet support buffer-encoded return routes");
+{% endif %}
+{% else %}
     const awaitedHandle = await _module.asyncManager.pollAsync(
       handle,
       (h: number) => (_exports.{{ poll_sync_ffi_name }} as Function)(h),
@@ -94,6 +169,7 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
 {% else %}
     (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
     throw new Error("Unsupported async return route: RawPacked {{ return_route.decode_expr() }}");
+{% endif %}
 {% endif %}
   } finally {
     {{ cleanup_code }}

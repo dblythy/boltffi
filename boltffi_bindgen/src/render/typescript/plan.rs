@@ -29,10 +29,19 @@ pub struct TsAsyncFunction {
     pub name: String,
     pub entry_ffi_name: String,
     pub poll_sync_ffi_name: String,
+    /// The native-protocol registration symbol (`{base}_poll`, distinct from
+    /// `poll_sync_ffi_name`'s wasm-only `{base}_poll_sync`) — only referenced by the generated
+    /// output when `native_async` is set.
+    pub poll_ffi_name: String,
     pub complete_ffi_name: String,
     pub panic_message_ffi_name: String,
     pub cancel_ffi_name: String,
     pub free_ffi_name: String,
+    /// Selects the native-async dispatch mode (`@boltffi/runtime`'s `pollAsyncNative`) over the
+    /// default wasm `pollAsync`/`poll_sync` convention in `async_function.txt`
+    /// (docs/tracks/react-native.md, parse-core-sdks repo, stage 2). Defaults to `false`
+    /// (`TypeScriptExperimental::default()`), so every existing caller's output is unchanged.
+    pub native_async: bool,
     pub params: Vec<TsParam>,
     pub return_type: Option<String>,
     pub return_route: TsOutputRoute,

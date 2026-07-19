@@ -208,6 +208,13 @@ impl<'a> TsValueTypeMemberDef<'a> {
 #[derive(Debug, Clone, Default)]
 pub struct TypeScriptExperimental {
     pub async_streams: bool,
+    /// Emits top-level async functions against `@boltffi/runtime`'s native backend
+    /// (`NativeAsyncFutureManager.pollAsyncNative`, `native.ts`) instead of the wasm backend's
+    /// `pollAsync`/`poll_sync` convention (docs/tracks/react-native.md, parse-core-sdks repo,
+    /// stage 2). Scoped to top-level functions only so far — class methods and value-type
+    /// methods share the identical five-field async shape and need the same treatment, tracked
+    /// as follow-up rather than half-wired here.
+    pub native_async: bool,
 }
 
 pub struct TypeScriptLowerer<'a> {
@@ -1338,10 +1345,12 @@ impl<'a> TypeScriptLowerer<'a> {
             name: emit::escape_ts_keyword(&func_name),
             entry_ffi_name: base_ffi_name.clone(),
             poll_sync_ffi_name: format!("{}_poll_sync", base_ffi_name),
+            poll_ffi_name: format!("{}_poll", base_ffi_name),
             complete_ffi_name: format!("{}_complete", base_ffi_name),
             panic_message_ffi_name: format!("{}_panic_message", base_ffi_name),
             cancel_ffi_name: format!("{}_cancel", base_ffi_name),
             free_ffi_name: format!("{}_free", base_ffi_name),
+            native_async: self.experimental.native_async,
             params,
             return_type,
             return_route,
@@ -2438,6 +2447,16 @@ mod tests {
 
     fn lower_contract(contract: &FfiContract) -> TsModule {
         lower_contract_result(contract).expect("typescript lowering should succeed")
+    }
+
+    fn lower_contract_with_experimental(
+        contract: &FfiContract,
+        experimental: TypeScriptExperimental,
+    ) -> TsModule {
+        let abi = IrLowerer::new(contract).to_abi_contract();
+        TypeScriptLowerer::new(contract, &abi, "Test".to_string(), experimental)
+            .lower()
+            .expect("typescript lowering should succeed")
     }
 
     fn sync_return_route(returns: &ReturnShape) -> TsOutputRoute {
@@ -4508,5 +4527,42 @@ mod tests {
         assert_eq!(function.return_type.as_deref(), Some("number"));
         assert!(function.return_route.is_async_scalar());
         assert_eq!(function.return_route.ts_cast(), "");
+        // Default TypeScriptExperimental (native_async unset) must leave every existing caller's
+        // output byte-identical -- react-native track, stage 2.
+        assert!(!function.native_async);
+        assert_eq!(function.poll_sync_ffi_name, "boltffi_async_add_poll_sync");
+    }
+
+    #[test]
+    fn native_async_flag_populates_native_poll_symbol_and_marker() {
+        let mut contract = empty_contract();
+        contract.functions.push(function(
+            "async_add",
+            vec![
+                primitive_param("a", PrimitiveType::I32),
+                primitive_param("b", PrimitiveType::I32),
+            ],
+            ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::I32)),
+            ExecutionKind::Async,
+        ));
+
+        let module = lower_contract_with_experimental(
+            &contract,
+            TypeScriptExperimental {
+                native_async: true,
+                ..TypeScriptExperimental::default()
+            },
+        );
+        let function = module
+            .async_functions
+            .iter()
+            .find(|function| function.name == "asyncAdd")
+            .expect("async function should be lowered");
+
+        assert!(function.native_async);
+        assert_eq!(function.poll_ffi_name, "boltffi_async_add_poll");
+        // The wasm-only symbol is still computed (cheap, and other backends of this same struct
+        // may want it later) but the native template branch never references it.
+        assert_eq!(function.poll_sync_ffi_name, "boltffi_async_add_poll_sync");
     }
 }
