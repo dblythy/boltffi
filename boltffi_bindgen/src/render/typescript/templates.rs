@@ -1085,7 +1085,34 @@ mod tests {
         assert!(!rendered.contains("poll_sync"));
         assert!(!rendered.contains("panic_message"));
         assert!(!rendered.contains("_module.completeAsync"));
-        assert!(rendered.contains("new DataView(statusBuf.buffer).getInt32(0, true)"));
+        assert!(rendered.contains("_module.checkStatus(_module.readStatusCode(statusBuf))"));
+    }
+
+    #[test]
+    fn native_async_void_and_scalar_share_completeasyncs_status_taxonomy() {
+        // Codex finding 5 (MEDIUM status semantics): the native_async void/scalar branches used to
+        // hand-roll their own `statusCode !== 0` check inline, which always threw a generic
+        // `Error` -- never `BoltFFICancelledError` for status 4, never recognizing status 3 at
+        // all, unlike the packed route's `_module.completeAsync`/`checkStatus`. Both branches must
+        // now delegate to the SAME `_module.checkStatus` helper `completeAsync` uses, so
+        // cancellation/invalid-argument report identically regardless of return route.
+        let doc: Option<String> = None;
+        for return_route in [
+            TsOutputRoute::void(),
+            TsOutputRoute::async_scalar(String::new()),
+        ] {
+            let rendered = native_async_scalar_template(&[], &doc, &return_route, "")
+                .render()
+                .unwrap();
+            assert!(
+                rendered.contains("_module.checkStatus(_module.readStatusCode(statusBuf))"),
+                "expected the shared status-check helper for route {return_route:?}, got:\n{rendered}"
+            );
+            assert!(
+                !rendered.contains("if (statusCode !== 0)"),
+                "must not hand-roll its own status check for route {return_route:?}, got:\n{rendered}"
+            );
+        }
     }
 
     #[test]
@@ -1344,6 +1371,55 @@ mod tests {
         };
         let template = ClassTemplate { cls: &class };
         insta::assert_snapshot!(template.render().unwrap());
+    }
+
+    #[test]
+    fn class_sync_struct_return_slot_route_pins_the_unified_alloc_scratch_call() {
+        // Codex finding 4 (MEDIUM wasm byte-identity): stage 4 (8de23d4c) replaced this route's
+        // hardcoded `_module.exports.boltffi_wasm_alloc`/`boltffi_wasm_free` calls with the
+        // backend-agnostic `_module.allocScratch`/`freeScratch` -- changing wasm-mode's generated
+        // TEXT (though not its runtime behaviour: `BoltFFIModule.allocScratch`/`freeScratch` in
+        // module.ts are a 1:1 delegate to the exact same two wasm exports). The merge commit
+        // claimed wasm output "stays byte-identical when the flag is off" -- true of every OTHER
+        // route this stage touched, but not of this one. No codegen test caught the discrepancy
+        // because no test exercised the sync struct-return-slot route at all.
+        //
+        // Deliberate resolution (not a bug fix): keep the unified call. Gating this one route on
+        // a backend flag would special-case the ONE route stage 4 left inconsistent, reintroducing
+        // exactly the per-backend branching the rest of this design eliminates, for a difference
+        // that is textual only -- module.ts's `allocScratch`/`freeScratch` calls the identical two
+        // wasm exports, in the identical order, with the identical arguments. This test pins that
+        // reality (rather than the stale "byte-identical" claim) so it can't silently drift again.
+        let class = TsClass {
+            class_name: "Grid".to_string(),
+            ffi_free: "boltffi_grid_free".to_string(),
+            constructors: vec![],
+            methods: vec![TsClassMethod {
+                ts_name: "cells".to_string(),
+                ffi_name: "boltffi_grid_cells".to_string(),
+                is_static: false,
+                params: vec![],
+                return_type: Some("Int32Array".to_string()),
+                return_handle: None,
+                return_callback: None,
+                mode: TsClassMethodMode::Sync(TsClassSyncMethod {
+                    return_route: TsOutputRoute::struct_return_slot(
+                        16,
+                        "_module.takeSlotI32Array()".to_string(),
+                    ),
+                }),
+                throws: false,
+                doc: None,
+            }],
+            doc: None,
+        };
+
+        let rendered = ClassTemplate { cls: &class }.render().unwrap();
+
+        assert!(rendered.contains("_module.allocScratch(16)"));
+        assert!(rendered.contains("_module.freeScratch(__outPtr, 16)"));
+        assert!(!rendered.contains("boltffi_wasm_alloc"));
+        assert!(!rendered.contains("boltffi_wasm_free"));
     }
 
     #[test]
@@ -1912,7 +1988,25 @@ mod tests {
         assert!(!rendered.contains("poll_sync"));
         assert!(!rendered.contains("panic_message"));
         assert!(!rendered.contains("_module.completeAsync"));
-        assert!(rendered.contains("new DataView(statusBuf.buffer).getInt32(0, true)"));
+        assert!(rendered.contains("_module.checkStatus(_module.readStatusCode(statusBuf))"));
+    }
+
+    #[test]
+    fn class_native_async_void_and_scalar_share_completeasyncs_status_taxonomy() {
+        // Same Codex finding-5 fix as the free-function test above, for class methods.
+        for return_route in [
+            TsOutputRoute::void(),
+            TsOutputRoute::async_scalar(String::new()),
+        ] {
+            let class =
+                class_with_native_async_method(true, return_route.clone(), vec![], None);
+            let rendered = ClassTemplate { cls: &class }.render().unwrap();
+            assert!(
+                rendered.contains("_module.checkStatus(_module.readStatusCode(statusBuf))"),
+                "expected the shared status-check helper for route {return_route:?}, got:\n{rendered}"
+            );
+            assert!(!rendered.contains("if (statusCode !== 0)"));
+        }
     }
 
     #[test]
@@ -2066,6 +2160,30 @@ mod tests {
         assert!(rendered.contains("boltffi_method_value_type_point_delayed_scale_free"));
         assert!(!rendered.contains("poll_sync"));
         assert!(!rendered.contains("_module.completeAsync"));
+    }
+
+    #[test]
+    fn value_type_native_async_void_and_scalar_share_completeasyncs_status_taxonomy() {
+        // Same Codex finding-5 fix as the free-function/class tests above, for value-type
+        // companion methods.
+        for return_route in [
+            TsOutputRoute::void(),
+            TsOutputRoute::async_scalar(String::new()),
+        ] {
+            let (name, methods) = record_with_native_async_method(true, return_route.clone());
+            let rendered = ValueTypeCompanionTemplate {
+                name: &name,
+                constructors: &[],
+                methods: &methods,
+            }
+            .render()
+            .unwrap();
+            assert!(
+                rendered.contains("_module.checkStatus(_module.readStatusCode(statusBuf))"),
+                "expected the shared status-check helper for route {return_route:?}, got:\n{rendered}"
+            );
+            assert!(!rendered.contains("if (statusCode !== 0)"));
+        }
     }
 
     #[test]

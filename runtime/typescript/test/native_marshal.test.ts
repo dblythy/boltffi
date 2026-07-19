@@ -6,7 +6,12 @@
 // that was previously entirely missing: string/bytes/primitive-array/record allocation and every
 // buffer-encoded return route (packed bigint, buf descriptor, return slot, last-error-message).
 import { describe, expect, it } from "vitest";
-import { NativeBoltFFIModule, instantiateBoltFFINative } from "../src/native.js";
+import {
+  NativeAsyncFutureManager,
+  NativeBoltFFIModule,
+  NativeContinuationSignal,
+  instantiateBoltFFINative,
+} from "../src/native.js";
 import { NativeMemoryArena, RETURN_SLOT_SIZE } from "../src/native_arena.js";
 import { WireReader } from "../src/wire.js";
 
@@ -65,6 +70,22 @@ describe("NativeMemoryArena", () => {
     const ptr = arena.alloc(16);
     expect(arena.realloc(ptr, 16, 8)).toBe(ptr);
     expect(arena.realloc(ptr, 16, 16)).toBe(ptr);
+  });
+
+  it("regression: every allocation is 8-byte aligned, even right after an odd-length allocation (Codex finding 2, HIGH alignment -- the native side reads i64/f64/descriptor slots as typed pointers, which is UB when misaligned)", () => {
+    const arena = new NativeMemoryArena();
+    arena.alloc(1); // odd-length string-like allocation, mimicking allocString("x")
+    const followUp = arena.alloc(8); // an i64/f64 array or a 16-byte buf descriptor slot
+    expect(followUp % 8).toBe(0);
+  });
+
+  it("regression: alignment survives a free/reuse cycle through the first-fit free list", () => {
+    const arena = new NativeMemoryArena();
+    arena.alloc(3);
+    const a = arena.alloc(5); // deliberately odd-sized so a naive splitter could misalign the remainder
+    arena.free(a, 5);
+    const reused = arena.alloc(8);
+    expect(reused % 8).toBe(0);
   });
 });
 
@@ -162,6 +183,31 @@ describe("NativeBoltFFIModule: buffer descriptors + packed returns", () => {
     const reader = module_.readerFromBuf(descriptor);
     expect(reader.readU32()).toBe(42);
     expect(() => module_.freeBuf(descriptor)).not.toThrow();
+  });
+
+  it("regression: takeBufI32Array must not free the payload itself -- the generated finally's freeBuf owns that, or two unrelated later allocations alias the same pointer (Codex finding 1, HIGH double-free)", () => {
+    const module_ = makeModule();
+    const alloc = module_.allocPrimitiveBuffer([1, 2, 3], "i32"); // 12 bytes
+    const descriptor = module_.allocBufDescriptor();
+    module_.writeBufDescriptor(descriptor, alloc.ptr, alloc.allocationSize, alloc.allocationSize);
+
+    // Mirrors class.txt/async_function.txt's generated async packed-return route exactly:
+    // `const reader = _module.readerFromBuf(outPtr); const result = <decode_expr>;` followed by
+    // the surrounding `finally { if (completeCompleted) _module.freeBuf(outPtr); }`. For a
+    // Vec<i32> return, decode_expr is literally `_module.takeBufI32Array(outPtr)` (lower.rs's
+    // direct_vec_output_route buf_decode table) -- so both calls below fire on the SAME
+    // descriptor in every generated caller, not just in this test.
+    const decoded = module_.takeBufI32Array(descriptor);
+    expect(Array.from(decoded)).toEqual([1, 2, 3]);
+    module_.freeBuf(descriptor);
+
+    // If the payload pointer was freed twice, the free-list holds two identical (ptr, len)
+    // entries (coalescing only merges *adjacent* blocks, not identical/duplicate ones), so two
+    // unrelated 12-byte allocations right after would both be handed the same stale pointer --
+    // silent aliasing between two live buffers.
+    const other1 = module_.allocU8Array(new Uint8Array(12));
+    const other2 = module_.allocU8Array(new Uint8Array(12));
+    expect(other1.ptr).not.toBe(other2.ptr);
   });
 
   it("takePackedUtf8String decodes and frees a manually packed string allocation", () => {
@@ -287,6 +333,33 @@ describe("NativeBoltFFIModule: scratch alloc + completeAsync", () => {
       })
     ).toThrow(/status 7/);
   });
+
+  it("regression: completeAsync throws 'invalid argument' for status 3, matching wasm's BoltFFIModule.checkStatus (Codex finding 5, MEDIUM status semantics)", () => {
+    const module_ = makeModule();
+    expect(() =>
+      module_.completeAsync((statusPtr) => {
+        module_.writeToMemory(statusPtr, new Uint8Array(new Int32Array([3]).buffer));
+        return undefined;
+      })
+    ).toThrow(/invalid argument/i);
+  });
+
+  it.each([
+    [0, null] as const,
+    [3, /invalid argument/i] as const,
+    [4, /cancelled/i] as const,
+    [7, /status 7/] as const,
+  ])(
+    "regression: checkStatus(%d) matches completeAsync's own taxonomy exactly (single source of truth, no per-route drift)",
+    (status, expected) => {
+      const module_ = makeModule();
+      if (expected === null) {
+        expect(() => module_.checkStatus(status)).not.toThrow();
+      } else {
+        expect(() => module_.checkStatus(status)).toThrow(expected);
+      }
+    }
+  );
 });
 
 describe("NativeBoltFFIModule: takeLastErrorMessage", () => {
@@ -315,11 +388,74 @@ describe("NativeBoltFFIModule: takeLastErrorMessage", () => {
   });
 });
 
+describe("NativeAsyncFutureManager: reentrant MaybeReady signals", () => {
+  it("regression: repeated SYNCHRONOUS MaybeReady signals (a self-waking/cooperative-yield Rust future) must not recurse through the JS call stack once per re-poll (Codex finding 6, recursion)", async () => {
+    // Mirrors boltffi_core's real contract exactly (continuation.rs's `store_continuation` +
+    // future.rs's `RustFuture::poll`): `poll()` invokes its continuation callback SYNCHRONOUSLY,
+    // at most once per call, with Ready or MaybeReady. MaybeReady fires synchronously whenever
+    // `ContinuationScheduler` is already in the `Waked` state the instant `store_continuation`
+    // runs -- not just a rare cross-thread race, but the deterministic, EVERY-poll outcome for any
+    // future that (re)wakes itself before returning `Poll::Pending` (a legitimate pattern, e.g.
+    // one built on a cooperative-yield primitive). `onSignal` re-issuing `poll()` synchronously in
+    // that case, forever, recurses one JS + one "native" stack frame per iteration.
+    let onSignal: ((callbackData: bigint, signal: NativeContinuationSignal) => void) | null = null;
+    const manager = new NativeAsyncFutureManager<null>((signal) => {
+      onSignal = signal;
+      return null;
+    });
+
+    const TOTAL_ITERATIONS = 50_000;
+    let pollCount = 0;
+    const poll = (_handle: bigint, callbackData: bigint) => {
+      pollCount += 1;
+      if (pollCount >= TOTAL_ITERATIONS) {
+        onSignal!(callbackData, NativeContinuationSignal.Ready);
+      } else {
+        onSignal!(callbackData, NativeContinuationSignal.MaybeReady);
+      }
+    };
+
+    const result = await manager.pollAsyncNative(1n, poll);
+    expect(result).toBe(1n);
+    expect(pollCount).toBe(TOTAL_ITERATIONS);
+  });
+});
+
 describe("instantiateBoltFFINative wiring", () => {
   it("pairs raw exports with a NativeAsyncFutureManager, exports staying unaugmented", () => {
     const rawExports = { boltffi_foo: () => 1 };
     const module_ = instantiateBoltFFINative(rawExports, () => ({}));
     expect(module_.exports).toBe(rawExports);
     expect(module_.asyncManager).toBeDefined();
+  });
+
+  it("regression: binds the arena's initial backing buffer to the host via __boltffi_native_bind_arena at construction time (Codex finding 3, HIGH growth binding)", () => {
+    const boundBuffers: ArrayBuffer[] = [];
+    const rawExports = {
+      __boltffi_native_bind_arena: (buffer: ArrayBuffer) => boundBuffers.push(buffer),
+    };
+    const arena = new NativeMemoryArena(16);
+    const module_ = new NativeBoltFFIModule(rawExports, () => ({}), arena);
+    void module_;
+
+    expect(boundBuffers).toEqual([arena.buffer]);
+  });
+
+  it("regression: re-binds the NEW backing buffer to the host every time the arena grows -- otherwise a real native adapter reads stale/freed memory for offsets issued after a grow", () => {
+    const boundBuffers: ArrayBuffer[] = [];
+    const rawExports = {
+      __boltffi_native_bind_arena: (buffer: ArrayBuffer) => boundBuffers.push(buffer),
+    };
+    const arena = new NativeMemoryArena(16);
+    const module_ = new NativeBoltFFIModule(rawExports, () => ({}), arena);
+
+    module_.allocScratch(1024); // forces a grow
+
+    expect(boundBuffers.length).toBeGreaterThanOrEqual(2);
+    expect(boundBuffers.at(-1)).toBe(arena.buffer);
+  });
+
+  it("tolerates a host exports object with no __boltffi_native_bind_arena (e.g. the Bun scalar-only test harness)", () => {
+    expect(() => new NativeBoltFFIModule({}, () => ({}))).not.toThrow();
   });
 });
