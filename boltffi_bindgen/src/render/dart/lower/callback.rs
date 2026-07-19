@@ -183,8 +183,12 @@ fn decode_input_args(params: &[AbiParam]) -> DecodedArgs {
                     unreachable!("an Encoded callback param always carries decode_ops");
                 };
                 let base = NamingConvention::param_name(param.name.as_str());
-                let ptr_name = format!("{base}Ptr");
-                let len_name = NamingConvention::param_name(&format!("{}_len", param.name.as_str()));
+                // Must match `native_function.rs::lower_native_function_param`'s
+                // naming for this same `AbiParam` exactly — that's what
+                // declares these identifiers in the enclosing native
+                // signature this body is spliced into.
+                let ptr_name = super::native_function::encoded_ptr_name(param.name.as_str());
+                let len_name = super::native_function::encoded_len_name(param.name.as_str());
                 let reader_var = format!("_p$r${base}");
                 setup.push(format!(
                     "final {reader_var} = _$$WireReader({ptr_name}, {len_name});"
@@ -208,6 +212,27 @@ fn decode_input_args(params: &[AbiParam]) -> DecodedArgs {
 struct CompletionBody {
     try_body: String,
     catch_body: String,
+}
+
+/// Fails generation loudly for a callback return shape this renderer has no
+/// encoding for (a raw, non-encoded span, or a handle/callback return — the
+/// wire-codec layer itself has no representation for the latter:
+/// `ir::lower::abi::codec_from_transport` panics on `Transport::Handle`/
+/// `Transport::Callback` rather than silently miscoding them).
+///
+/// This used to compile a Dart method body that `throw`s an
+/// `UnsupportedError` the instant a real caller reaches it — passing
+/// `dart analyze` and every build step, and only failing the first time
+/// production code actually invokes that specific callback method. Panicking
+/// here instead means the trait definition's author hits this the moment
+/// they generate bindings for it, not after it ships.
+fn unsupported_callback_return_shape(method_id: &crate::ir::MethodId) -> ! {
+    panic!(
+        "boltffi dart codegen: callback method `{}` returns a shape this renderer has no encoding \
+         for (a raw/non-encoded span, or a handle/callback return) — this callback return shape is \
+         not yet supported by this renderer",
+        method_id.as_str()
+    )
 }
 
 fn render_sync_completion(
@@ -236,8 +261,7 @@ fn render_sync_completion(
                     "final _p$value = {call_expr};\n{encode_block}\n_p$outPtr.value = _p$w.ptr;\n_p$outLen.value = _p$w.len;\n_p$outStatus.ref.code = 0;"
                 )
             }
-            None => "throw UnsupportedError('this callback return shape is not yet supported by this renderer');"
-                .to_string(),
+            None => unsupported_callback_return_shape(&m.id),
         },
     };
 
@@ -284,8 +308,7 @@ fn render_async_completion(
                         "final _p$value = await {call_expr};\n{encode_block}\n{invoke}(_p$callbackData, _p$w.ptr, _p$w.len, 0);"
                     )
                 }
-                None => "throw UnsupportedError('this callback return shape is not yet supported by this renderer');"
-                    .to_string(),
+                None => unsupported_callback_return_shape(&m.id),
             };
             CompletionBody {
                 try_body,
@@ -532,7 +555,7 @@ mod tests {
             native.body
         );
         assert!(
-            native.body.contains("_$$WireReader(textPtr, textLen)"),
+            native.body.contains("_$$WireReader(_p$textPtr, _p$textLen)"),
             "body: {}",
             native.body
         );
@@ -593,6 +616,67 @@ mod tests {
             "body: {}",
             native.body
         );
+    }
+
+    // Regression (Codex review finding, 2026-07-20): a callback method
+    // returning a handle (an exported class) has no `encode_ops` —
+    // `ir::lower::abi::return_shape_from_transport`'s `Transport::Handle`
+    // arm leaves it `None`, and the wire-codec layer itself has no
+    // representation for this shape at all (`codec_from_transport` panics
+    // on `Transport::Handle`/`Transport::Callback` rather than silently
+    // miscoding them — there's no codec to "just implement" here without a
+    // parallel non-codec, handle-registration path). This renderer's
+    // `render_sync_completion` used to emit a Dart body that compiles
+    // cleanly and `throw`s an `UnsupportedError` the instant it's actually
+    // invoked. Failing loudly at generation time — the moment this trait
+    // definition is compiled/scanned — is preferable to shipping a Dart
+    // method that silently throws only when a real caller first reaches it
+    // in production.
+    #[test]
+    #[should_panic(expected = "this callback return shape is not yet supported")]
+    fn sync_handle_return_fails_at_generation_time_instead_of_compiling_a_throw() {
+        lower_first_native_method(CallbackMethodDef {
+            execution_kind: ExecutionKind::Sync,
+            id: crate::ir::MethodId::new("make_widget"),
+            params: vec![],
+            returns: ReturnDef::Value(TypeExpr::Handle(crate::ir::ClassId::new("Widget"))),
+            doc: None,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "this callback return shape is not yet supported")]
+    fn async_callback_handle_return_fails_at_generation_time_instead_of_compiling_a_throw() {
+        let mut ffi = test::empty_contract();
+        // The returned callback type must itself resolve in the catalog —
+        // unrelated to the shape under test here, `DartType::from_type_expr`
+        // needs it for the callback's own *public* method signature.
+        ffi.catalog.insert_callback(CallbackTraitDef {
+            id: CallbackId::new("Other"),
+            methods: vec![CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: crate::ir::MethodId::new("call"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: CallbackKind::Trait,
+            doc: None,
+        });
+        ffi.catalog.insert_callback(callback_with_method(CallbackMethodDef {
+            execution_kind: ExecutionKind::Async,
+            id: crate::ir::MethodId::new("make_listener"),
+            params: vec![],
+            returns: ReturnDef::Value(TypeExpr::Callback(CallbackId::new("Other"))),
+            doc: None,
+        }));
+        let library = test::lower(&ffi);
+        let listener = library
+            .callbacks
+            .iter()
+            .find(|cb| cb.class_name == "Listener")
+            .expect("Listener callback lowered");
+        let _ = &listener.native.methods[0];
     }
 
     #[test]

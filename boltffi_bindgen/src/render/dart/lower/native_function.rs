@@ -8,6 +8,20 @@ use crate::{
     },
 };
 
+/// The hygienic native ptr param name for an encoded param whose *logical*
+/// (Rust-derived) name is `base` — shared with the callback trampoline
+/// renderer (`callback.rs`'s `decode_input_args`), which must reference the
+/// exact same identifier this function declares in the native signature.
+pub(super) fn encoded_ptr_name(base: &str) -> String {
+    format!("_p${}Ptr", NamingConvention::param_name(base))
+}
+
+/// The hygienic native len param name for an encoded param whose *logical*
+/// (Rust-derived) name is `base` — see [`encoded_ptr_name`].
+pub(super) fn encoded_len_name(base: &str) -> String {
+    format!("_p${}Len", NamingConvention::param_name(base))
+}
+
 impl<'a> super::DartLowerer<'a> {
     pub(super) fn lower_native_function_param(
         &self,
@@ -18,14 +32,20 @@ impl<'a> super::DartLowerer<'a> {
                 ParamValueStrategy::DirectBuffer(..)
                 | ParamValueStrategy::WireEncoded(..)
                 | ParamValueStrategy::Utf8String
-                | ParamValueStrategy::CompositeValue => {
-                    format!(
-                        "{}Ptr",
-                        NamingConvention::param_name(abi_param.name.as_str())
-                    )
-                }
+                | ParamValueStrategy::CompositeValue => encoded_ptr_name(abi_param.name.as_str()),
                 _ => NamingConvention::param_name(abi_param.name.as_str()),
             },
+            // A derived ptr/len name is invented by suffixing the *source*
+            // param's own name — a real Rust param can legitimately be named
+            // e.g. `payload_ptr`/`payload_len` and would otherwise collide
+            // with the ptr/len pair this renderer invents for an unrelated
+            // encoded param named `payload`. `_p$` can't appear in a Rust
+            // identifier (`NamingConvention::param_name` never produces it),
+            // so prefixing every *invented* name with it — the same hygiene
+            // marker used for every other synthetic local in this renderer
+            // (`_p$handle`, `_p$outStatus`, `_p$value`, ...) — makes the
+            // collision structurally impossible rather than merely unlikely.
+            ParamRole::SyntheticLen { for_param } => encoded_len_name(for_param.as_str()),
             ParamRole::OutDirect => String::from("_p$outPtr"),
             ParamRole::OutLen { .. } => String::from("_p$outLen"),
             _ => NamingConvention::param_name(abi_param.name.as_str()),
@@ -196,6 +216,55 @@ mod tests {
         assert_eq!(
             library.native.functions[0].return_type.dart_sub_type(),
             "void".to_string()
+        );
+    }
+
+    // Regression: an encoded param named `payload` derives its native ptr/len
+    // names by suffixing the param's own name (`payloadPtr`/`payloadLen`,
+    // pre-fix). A second, literally-named param `payload_ptr` lower-camel
+    // cases to that exact same identifier, so the two params silently
+    // collide in the generated native function's parameter list — Codex
+    // review finding (2026-07-20).
+    #[test]
+    pub fn encoded_param_ptr_name_does_not_collide_with_a_literally_named_param() {
+        let mut ffi = test::empty_contract();
+        ffi.functions.insert(
+            0,
+            FunctionDef {
+                id: FunctionId::new("send"),
+                params: vec![
+                    ParamDef {
+                        name: ParamName::new("payload"),
+                        type_expr: TypeExpr::String,
+                        passing: ParamPassing::Value,
+                        doc: None,
+                    },
+                    ParamDef {
+                        name: ParamName::new("payload_ptr"),
+                        type_expr: TypeExpr::Primitive(PrimitiveType::U64),
+                        passing: ParamPassing::Value,
+                        doc: None,
+                    },
+                ],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            },
+        );
+
+        let library = test::lower(&ffi);
+
+        let names: Vec<&str> = library.native.functions[0]
+            .params
+            .iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "duplicate native param names, generated code will fail to compile: {names:?}"
         );
     }
 

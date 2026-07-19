@@ -1,6 +1,5 @@
 ---
 source: boltffi_bindgen/src/render/dart/templates.rs
-assertion_line: 286
 expression: template.render().unwrap()
 ---
 @$$ffi.Native<
@@ -17,8 +16,8 @@ external void _f$boltffi_person_free($$ffi.Pointer<$$ffi.Void> handle);
     )
 >(symbol: 'boltffi_person_new', isLeaf: true)
 external $$ffi.Pointer<$$ffi.Void> _f$boltffi_person_new(
-  $$ffi.Pointer<$$ffi.Uint8> namePtr,
-  int nameLen,
+  $$ffi.Pointer<$$ffi.Uint8> _p$namePtr,
+  int _p$nameLen,
   int age,
 );
 
@@ -29,8 +28,8 @@ external $$ffi.Pointer<$$ffi.Void> _f$boltffi_person_new(
     )
 >(symbol: 'boltffi_person_new_with_default_age', isLeaf: true)
 external $$ffi.Pointer<$$ffi.Void> _f$boltffi_person_new_with_default_age(
-  $$ffi.Pointer<$$ffi.Uint8> namePtr,
-  int nameLen,
+  $$ffi.Pointer<$$ffi.Uint8> _p$namePtr,
+  int _p$nameLen,
 );
 
 @$$ffi.Native<

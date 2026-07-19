@@ -59,20 +59,50 @@ final class {{ cb.handle_map_class_name }} implements $$ffi.Finalizable {
   late final $$ffi.Pointer<{{ cb.native.vtable_struct_name }}> _vtable;
   static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer($$extffi.calloc.nativeFree);
 
+  // `free` is void — its native call site never reads anything back — so
+  // it dispatches through `NativeCallable.listener` like the qualifying
+  // methods below (`DartNativeCallbackMethod::dispatch_via_listener`),
+  // safe to invoke from any thread that drops the last `Foreign` handle.
+  // Kept alive for as long as `_vtable` is (closed in `dispose()`).
+  late final $$ffi.NativeCallable<$$ffi.Void Function($$ffi.Uint64)> _c$free;
+{%- for method in cb.native.methods %}
+{%- if method.dispatch_via_listener() %}
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+{%- for param in method.params %}
+      {{ param.native_type.native_type() }},
+{%- endfor %}
+    )
+  >
+  _c${{ method.vtable_field_name }};
+{%- endif %}
+{%- endfor %}
+
   {{ cb.handle_map_class_name }}() {
     _vtable = $$extffi.calloc<{{ cb.native.vtable_struct_name }}>();
 
-    _vtable.ref.free = $$ffi.Pointer.fromFunction(
-      {{ cb.impl_class_name }}.free
-    );
+    _c$free = $$ffi.NativeCallable.listener({{ cb.impl_class_name }}.free);
+    _vtable.ref.free = _c$free.nativeFunction;
+    // `clone` returns a real handle value the Rust caller reads
+    // synchronously — `NativeCallable.listener` can't deliver that
+    // (it defers the call; Rust would read a stale/default value
+    // immediately). It keeps `Pointer.fromFunction` and relies on the
+    // host never cloning a `Foreign` handle off the mutator thread.
     _vtable.ref.clone = $$ffi.Pointer.fromFunction(
       {{ cb.impl_class_name }}.clone,
       0
     );
 {%- for method in cb.native.methods %}
+{%- if method.dispatch_via_listener() %}
+    _c${{ method.vtable_field_name }} = $$ffi.NativeCallable.listener(
+      {{ cb.impl_class_name }}.{{ method.vtable_field_name }},
+    );
+    _vtable.ref.{{ method.vtable_field_name }} = _c${{ method.vtable_field_name }}.nativeFunction;
+{%- else %}
     _vtable.ref.{{ method.vtable_field_name }} = $$ffi.Pointer.fromFunction(
       {{ cb.impl_class_name }}.{{ method.vtable_field_name }},
     );
+{%- endif %}
 {% endfor %}
     _vtableFinalizer.attach(
       this,
@@ -84,6 +114,12 @@ final class {{ cb.handle_map_class_name }} implements $$ffi.Finalizable {
   void dispose() {
     _vtableFinalizer.detach(this);
     $$extffi.calloc.free(_vtable);
+    _c$free.close();
+{%- for method in cb.native.methods %}
+{%- if method.dispatch_via_listener() %}
+    _c${{ method.vtable_field_name }}.close();
+{%- endif %}
+{%- endfor %}
   }
 
   int insert({{ cb.class_name }} value) {

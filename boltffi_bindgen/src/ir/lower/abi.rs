@@ -500,6 +500,7 @@ impl<'c> Lowerer<'c> {
             ReturnPlan::Fallible {
                 ok: Transport::Handle { class_id, .. },
                 err_codec,
+                ..
             } => (
                 ReturnShape {
                     contract: ReturnContract::new(
@@ -518,8 +519,19 @@ impl<'c> Lowerer<'c> {
                     encode_ops: None,
                 },
             ),
-            ReturnPlan::Fallible { ok, err_codec } => {
-                let ok_codec = self.codec_from_transport(ok);
+            ReturnPlan::Fallible {
+                ok,
+                err_codec,
+                ok_codec,
+            } => {
+                // `ok_codec` is the codec built directly from the original
+                // `TypeExpr` (see `ReturnPlan::Fallible`'s doc) — falling
+                // back to `codec_from_transport(ok)` only where nothing
+                // built one (every non-`lower_return` construction site,
+                // none of which can produce a lossy void-as-scalar `ok`).
+                let ok_codec = ok_codec
+                    .clone()
+                    .unwrap_or_else(|| self.codec_from_transport(ok));
                 let result_codec = CodecPlan::Result {
                     ok: Box::new(ok_codec),
                     err: Box::new(err_codec.clone()),

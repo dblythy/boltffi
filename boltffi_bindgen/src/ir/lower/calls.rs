@@ -94,6 +94,7 @@ impl<'c> Lowerer<'c> {
                     nullable: false,
                 },
                 err_codec: CodecPlan::String,
+                ok_codec: None,
             }
         } else {
             ReturnPlan::Value(Transport::Handle {
@@ -177,6 +178,7 @@ impl<'c> Lowerer<'c> {
             ReturnPlan::Fallible {
                 ok: transport,
                 err_codec: CodecPlan::String,
+                ok_codec: None,
             }
         } else if ctor.is_optional() {
             let inner_codec = self.codec_from_transport(&transport);
@@ -471,10 +473,27 @@ impl<'c> Lowerer<'c> {
         match returns {
             ReturnDef::Void => ReturnPlan::Void,
             ReturnDef::Value(type_expr) => ReturnPlan::Value(self.classify_type(type_expr)),
-            ReturnDef::Result { ok, err } => ReturnPlan::Fallible {
-                ok: self.classify_type(ok),
-                err_codec: self.build_codec(err),
-            },
+            ReturnDef::Result { ok, err } => {
+                let ok_transport = self.classify_type(ok);
+                // `build_codec` panics on a `Transport::Handle`/`Callback`
+                // shape (it can't be wire-encoded — `return_shape_and_error`
+                // handles that `ok` case separately and never consults
+                // `ok_codec`). Every other `ok` — including `TypeExpr::Void`,
+                // the one shape `classify_type` can't represent losslessly
+                // as a `Transport` — has a real codec built straight from
+                // the original `TypeExpr`, sidestepping that lossy
+                // round-trip entirely.
+                let ok_codec = (!matches!(
+                    ok_transport,
+                    Transport::Handle { .. } | Transport::Callback { .. }
+                ))
+                .then(|| self.build_codec(ok));
+                ReturnPlan::Fallible {
+                    ok: ok_transport,
+                    err_codec: self.build_codec(err),
+                    ok_codec,
+                }
+            }
         }
     }
 
