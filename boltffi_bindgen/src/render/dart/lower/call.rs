@@ -408,21 +408,7 @@ fn last_error_throw_stmt() -> String {
 /// always `BoltFFIResult<Ok, Err>` (`DartType::from_return_def`), so it
 /// always returns the decoded `BoltFFIResult` as-is, regardless of
 /// `dart_return.throws` (which governs the unrelated null-handle case below).
-/// Fails generation loudly for a return shape this renderer has no client
-/// wrapper for yet. A *returned* callback handle needs a generated "remote"
-/// implementation of the callback interface that forwards each call back
-/// through the stored native vtable (the JNI bridge's `CallbackHandleMethod`
-/// is the worked example of this direction) — a real, larger feature this
-/// renderer hasn't built, not a data-shape gap `encode_ops` could close. This
-/// used to compile a Dart method that `throw`s an `UnsupportedError` the
-/// instant a real caller reaches it; failing at generation time surfaces the
-/// gap immediately instead.
-fn unsupported_return_shape(symbol: &str, detail: &str) -> ! {
-    panic!("boltffi dart codegen: `{symbol}` returns a shape this renderer does not yet support — {detail}")
-}
-
 fn decode_return(
-    symbol: &str,
     result_expr: &str,
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
@@ -515,10 +501,10 @@ fn decode_return(
                 "{setup}\ntry {{\n{body}\n}} finally {{ _f$boltffi_free_buf({result_expr}); }}"
             )
         }
-        DartNativeType::CallbackHandle => unsupported_return_shape(
-            symbol,
-            "callback-handle returns are not yet supported by this renderer",
-        ),
+        DartNativeType::CallbackHandle => {
+            "throw UnsupportedError('callback-handle returns are not yet supported by this renderer');"
+                .to_string()
+        }
         DartNativeType::Pointer(_)
         | DartNativeType::Composite(_)
         | DartNativeType::Function { .. } => {
@@ -607,7 +593,6 @@ fn render_sync_body(
     };
 
     let mut decode = decode_return(
-        abi_call.symbol.as_str(),
         result_expr,
         native_return,
         dart_return,
@@ -694,7 +679,6 @@ fn render_async_body(
     let complete_call = format!("{complete_fn}(handle, _p$asyncStatus)");
 
     let decode = decode_return(
-        abi_call.symbol.as_str(),
         if needs_result_var { "_p$asyncResult" } else { "" },
         complete_native_return,
         dart_return,
@@ -1200,13 +1184,19 @@ mod tests {
     // caller, as opposed to a callback *param* — this renderer has no
     // "returned callback" client wrapper yet, unlike e.g. the JNI bridge's
     // dedicated `CallbackHandleMethod` machinery for exactly this
-    // direction) used to compile a Dart method that `throw`s an
-    // `UnsupportedError` the instant it's actually called. Failing loudly
-    // at generation time surfaces the gap immediately instead of shipping a
-    // method that only fails once a real caller invokes it.
+    // direction) compiles a Dart method that `throw`s an `UnsupportedError`
+    // the instant it's actually called.
+    //
+    // A generation-time panic was tried and reverted: it aborts the whole
+    // render pass for the entire crate, not just this one function —
+    // confirmed against the fork's own `examples/demo` fixture
+    // (`make_incrementing_callback`, exactly this shape), whose Dart target
+    // stopped generating at all. Reverted to the established per-function
+    // runtime-throw convention this file already uses in several other
+    // "unsupported shape" arms (`ImplTrait` closure params, out-parameter
+    // returns, ...).
     #[test]
-    #[should_panic(expected = "callback-handle returns are not yet supported")]
-    fn function_returning_a_callback_handle_fails_at_generation_time() {
+    fn function_returning_a_callback_handle_still_throws_at_runtime_not_generation_time() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_callback(callback_trait("Listener", "on_event"));
         ffi.functions.push(FunctionDef {
@@ -1218,7 +1208,13 @@ mod tests {
             deprecated: None,
         });
 
-        test::lower(&ffi);
+        let library = test::lower(&ffi);
+        let body = &library.functions[0].body;
+
+        assert!(
+            body.contains("throw UnsupportedError('callback-handle returns are not yet supported by this renderer');"),
+            "body: {body}"
+        );
     }
 
     // Regression guard: a closure-style (`ImplTrait`) callback param must

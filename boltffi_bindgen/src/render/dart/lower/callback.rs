@@ -214,27 +214,6 @@ struct CompletionBody {
     catch_body: String,
 }
 
-/// Fails generation loudly for a callback return shape this renderer has no
-/// encoding for (a raw, non-encoded span, or a handle/callback return — the
-/// wire-codec layer itself has no representation for the latter:
-/// `ir::lower::abi::codec_from_transport` panics on `Transport::Handle`/
-/// `Transport::Callback` rather than silently miscoding them).
-///
-/// This used to compile a Dart method body that `throw`s an
-/// `UnsupportedError` the instant a real caller reaches it — passing
-/// `dart analyze` and every build step, and only failing the first time
-/// production code actually invokes that specific callback method. Panicking
-/// here instead means the trait definition's author hits this the moment
-/// they generate bindings for it, not after it ships.
-fn unsupported_callback_return_shape(method_id: &crate::ir::MethodId) -> ! {
-    panic!(
-        "boltffi dart codegen: callback method `{}` returns a shape this renderer has no encoding \
-         for (a raw/non-encoded span, or a handle/callback return) — this callback return shape is \
-         not yet supported by this renderer",
-        method_id.as_str()
-    )
-}
-
 fn render_sync_completion(
     call_expr: &str,
     m: &AbiCallbackMethod,
@@ -261,7 +240,8 @@ fn render_sync_completion(
                     "final _p$value = {call_expr};\n{encode_block}\n_p$outPtr.value = _p$w.ptr;\n_p$outLen.value = _p$w.len;\n_p$outStatus.ref.code = 0;"
                 )
             }
-            None => unsupported_callback_return_shape(&m.id),
+            None => "throw UnsupportedError('this callback return shape is not yet supported by this renderer');"
+                .to_string(),
         },
     };
 
@@ -308,7 +288,8 @@ fn render_async_completion(
                         "final _p$value = await {call_expr};\n{encode_block}\n{invoke}(_p$callbackData, _p$w.ptr, _p$w.len, 0);"
                     )
                 }
-                None => unsupported_callback_return_shape(&m.id),
+                None => "throw UnsupportedError('this callback return shape is not yet supported by this renderer');"
+                    .to_string(),
             };
             CompletionBody {
                 try_body,
@@ -625,28 +606,37 @@ mod tests {
     // representation for this shape at all (`codec_from_transport` panics
     // on `Transport::Handle`/`Transport::Callback` rather than silently
     // miscoding them — there's no codec to "just implement" here without a
-    // parallel non-codec, handle-registration path). This renderer's
-    // `render_sync_completion` used to emit a Dart body that compiles
-    // cleanly and `throw`s an `UnsupportedError` the instant it's actually
-    // invoked. Failing loudly at generation time — the moment this trait
-    // definition is compiled/scanned — is preferable to shipping a Dart
-    // method that silently throws only when a real caller first reaches it
-    // in production.
+    // parallel non-codec, handle-registration path).
+    //
+    // A generation-time panic was tried and reverted: unlike this file's
+    // other "unsupported shape" arms (which degrade *per method*, so the
+    // rest of the crate still generates), a panic here aborts the whole
+    // render pass — confirmed against the fork's own `examples/demo` fixture
+    // (`make_incrementing_callback`, a function that *returns* a callback),
+    // which stopped generating at all. Reverted to the established
+    // per-method runtime-throw convention this file already uses ~7 other
+    // places for a genuinely out-of-scope shape.
     #[test]
-    #[should_panic(expected = "this callback return shape is not yet supported")]
-    fn sync_handle_return_fails_at_generation_time_instead_of_compiling_a_throw() {
-        lower_first_native_method(CallbackMethodDef {
+    fn sync_handle_return_still_throws_at_runtime_not_generation_time() {
+        let native = lower_first_native_method(CallbackMethodDef {
             execution_kind: ExecutionKind::Sync,
             id: crate::ir::MethodId::new("make_widget"),
             params: vec![],
             returns: ReturnDef::Value(TypeExpr::Handle(crate::ir::ClassId::new("Widget"))),
             doc: None,
         });
+
+        assert!(
+            native
+                .body
+                .contains("throw UnsupportedError('this callback return shape is not yet supported by this renderer');"),
+            "body: {}",
+            native.body
+        );
     }
 
     #[test]
-    #[should_panic(expected = "this callback return shape is not yet supported")]
-    fn async_callback_handle_return_fails_at_generation_time_instead_of_compiling_a_throw() {
+    fn async_callback_handle_return_still_throws_at_runtime_not_generation_time() {
         let mut ffi = test::empty_contract();
         // The returned callback type must itself resolve in the catalog —
         // unrelated to the shape under test here, `DartType::from_type_expr`
@@ -676,7 +666,14 @@ mod tests {
             .iter()
             .find(|cb| cb.class_name == "Listener")
             .expect("Listener callback lowered");
-        let _ = &listener.native.methods[0];
+
+        assert!(
+            listener.native.methods[0]
+                .body
+                .contains("throw UnsupportedError('this callback return shape is not yet supported by this renderer');"),
+            "body: {}",
+            listener.native.methods[0].body
+        );
     }
 
     #[test]
