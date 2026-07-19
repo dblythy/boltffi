@@ -1,1 +1,0 @@
-/usr/bin/c++ -g -arch arm64 -Wl,-search_paths_first -Wl,-headerpad_max_install_names CMakeFiles/boltffi_jsi_adapter_linkcheck.dir/jsi/linkcheck_main.cpp.o -o boltffi_jsi_adapter_linkcheck  libboltffi_jsi_adapter.a libboltffi_jsi_core.a libboltffi_jsi_facebook.a
