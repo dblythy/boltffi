@@ -7,6 +7,12 @@ use crate::render::typescript::emit;
 pub struct TsModule {
     pub module_name: String,
     pub abi_version: u32,
+    /// Mirrors `TypeScriptExperimental::native_async` (`lower.rs`) — set when this whole
+    /// generation targets the native-async backend (react-native track), so the preamble emits
+    /// `instantiateBoltFFINative`/`NativeBoltFFIModule` instead of the wasm bootstrap
+    /// (`instantiateBoltFFI`/`BoltFFIModule`). Module-level (not per-method) because the
+    /// bootstrap is emitted once per generated file, before any method exists to ask.
+    pub native_async: bool,
     pub records: Vec<TsRecord>,
     pub enums: Vec<TsEnum>,
     pub error_exceptions: Vec<TsErrorException>,
@@ -174,18 +180,16 @@ impl TsClassMethod {
         matches!(self.mode, TsClassMethodMode::Async(_))
     }
 
-    /// True when this method's `native_async` dispatch would emit an unusable call: a wasm-only
-    /// param wrapper (`_module.allocString`/`allocBytes`/`allocWriter`, ...) that
-    /// `NativeBoltFFIModule` has no method for. Mirrors `async_function.txt`'s free-function
-    /// guard — fail loudly before rendering the call, not with a confusing "not a function"
-    /// TypeError at the allocation site (react-native track, stage 3).
+    /// Historically true when this method's `native_async` dispatch would emit an unusable call:
+    /// a wasm-only param wrapper (`_module.allocString`/`allocBytes`/`allocWriter`, ...) that
+    /// `NativeBoltFFIModule` had no method for (react-native track, stage 3). Stage 4 closed that
+    /// gap — `NativeBoltFFIModule` (`@boltffi/runtime`'s native.ts) now implements the full
+    /// `BoltFFIModule` alloc surface against a native memory arena, so every wrapper_code shape
+    /// is supported on both backends. Kept as a method (always `false` now) rather than deleted
+    /// outright so the call sites/templates that gate on it don't need editing — a future,
+    /// genuinely-unsupported param shape can flip this back to a real check in one place.
     pub fn native_async_wrapper_unsupported(&self) -> bool {
-        match &self.mode {
-            TsClassMethodMode::Async(async_method) => {
-                async_method.native_async && !self.wrapper_code().is_empty()
-            }
-            TsClassMethodMode::Sync(_) => false,
-        }
+        false
     }
 }
 
@@ -473,14 +477,10 @@ impl TsValueTypeMethod {
         matches!(self.mode, TsValueTypeMethodMode::Async(_))
     }
 
-    /// Mirrors `TsClassMethod::native_async_wrapper_unsupported` — see its doc.
+    /// Mirrors `TsClassMethod::native_async_wrapper_unsupported` — see its doc. Always `false`
+    /// since stage 4 (`NativeBoltFFIModule` has full alloc-surface parity with `BoltFFIModule`).
     pub fn native_async_wrapper_unsupported(&self) -> bool {
-        match &self.mode {
-            TsValueTypeMethodMode::Async(async_method) => {
-                async_method.native_async && !self.wrapper_code().is_empty()
-            }
-            TsValueTypeMethodMode::Sync(_) => false,
-        }
+        false
     }
 }
 

@@ -123,12 +123,12 @@ export class {{ cls.class_name }} {
     return (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }}){{ sync_method.return_route.ts_cast() }};
 {%- endif %}
 {%- elif sync_method.return_route.is_struct_return_slot() %}
-    const __outPtr = _module.exports.boltffi_wasm_alloc({{ sync_method.return_route.return_slot_size().unwrap() }});
+    const __outPtr = _module.allocScratch({{ sync_method.return_route.return_slot_size().unwrap() }});
     try {
       (_exports.{{ method.ffi_name }} as Function)({% if method.ffi_call_args().is_empty() %}__outPtr{% else %}__outPtr, {{ method.ffi_call_args() }}{% endif %});
       return {{ sync_method.return_route.decode_expr() }};
     } finally {
-      _module.exports.boltffi_wasm_free(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
+      _module.freeScratch(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
     }
 {%- elif sync_method.return_route.is_nan_boxed_optional() %}
     const packed = (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }}) as number;
@@ -172,9 +172,39 @@ export class {{ cls.class_name }} {
     } finally {
       (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
     }
+{%- elif async_method.return_route.is_packed() %}
+    const outPtr = _module.allocBufDescriptor();
+    let completeCompleted = false;
+    try {
+      _module.completeAsync((statusPtr: number) => (_exports.{{ async_method.complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+      completeCompleted = true;
+      const reader = _module.readerFromBuf(outPtr);
+      const result = {{ async_method.return_route.decode_expr() }};
+{%- if let Some(handle_return) = method.return_handle %}
+{%- if method.throws %}
+      if (result === 0) {
+        throw new Error(_module.takeLastErrorMessage());
+      }
+{%- elif handle_return.nullable %}
+      if (result === 0) {
+        return null;
+      }
+{%- endif %}
+      return {{ handle_return.class_name }}._fromHandle(result);
+{%- else %}
+      return result;
+{%- endif %}
+    } finally {
+      if (completeCompleted) {
+        _module.freeBuf(outPtr);
+      } else {
+        _module.freeBufDescriptor(outPtr);
+      }
+      (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+    }
 {%- else %}
     (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
-    throw new Error("native async mode does not yet support buffer-encoded return routes");
+    throw new Error("Unsupported native async return route{{ async_method.return_route.ts_cast() }}");
 {%- endif %}
 {%- else %}
     const awaitedHandle = await _module.asyncManager.pollAsync(
@@ -266,12 +296,12 @@ export class {{ cls.class_name }} {
       return (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }}){{ sync_method.return_route.ts_cast() }};
 {%- endif %}
 {%- elif sync_method.return_route.is_struct_return_slot() %}
-      const __outPtr = _module.exports.boltffi_wasm_alloc({{ sync_method.return_route.return_slot_size().unwrap() }});
+      const __outPtr = _module.allocScratch({{ sync_method.return_route.return_slot_size().unwrap() }});
       try {
         (_exports.{{ method.ffi_name }} as Function)({% if method.ffi_call_args().is_empty() %}__outPtr{% else %}__outPtr, {{ method.ffi_call_args() }}{% endif %});
         return {{ sync_method.return_route.decode_expr() }};
       } finally {
-        _module.exports.boltffi_wasm_free(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
+        _module.freeScratch(__outPtr, {{ sync_method.return_route.return_slot_size().unwrap() }});
       }
 {%- elif sync_method.return_route.is_nan_boxed_optional() %}
       const packed = (_exports.{{ method.ffi_name }} as Function)({{ method.ffi_call_args() }}) as number;
@@ -319,9 +349,39 @@ export class {{ cls.class_name }} {
       } finally {
         (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
       }
+{%- elif async_method.return_route.is_packed() %}
+      const outPtr = _module.allocBufDescriptor();
+      let completeCompleted = false;
+      try {
+        _module.completeAsync((statusPtr: number) => (_exports.{{ async_method.complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+        completeCompleted = true;
+        const reader = _module.readerFromBuf(outPtr);
+        const result = {{ async_method.return_route.decode_expr() }};
+{%- if let Some(handle_return) = method.return_handle %}
+{%- if method.throws %}
+        if (result === 0) {
+          throw new Error(_module.takeLastErrorMessage());
+        }
+{%- elif handle_return.nullable %}
+        if (result === 0) {
+          return null;
+        }
+{%- endif %}
+        return {{ handle_return.class_name }}._fromHandle(result);
+{%- else %}
+        return result;
+{%- endif %}
+      } finally {
+        if (completeCompleted) {
+          _module.freeBuf(outPtr);
+        } else {
+          _module.freeBufDescriptor(outPtr);
+        }
+        (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
+      }
 {%- else %}
       (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
-      throw new Error("native async mode does not yet support buffer-encoded return routes");
+      throw new Error("Unsupported native async return route{{ async_method.return_route.ts_cast() }}");
 {%- endif %}
 {%- else %}
       const awaitedHandle = await _module.asyncManager.pollAsync(

@@ -1,17 +1,5 @@
 {{ crate::render::typescript::templates::ts_doc_block(doc, "") -}}
 export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type }}{% if !loop.last %}, {% endif %}{% endfor %}): Promise<{{ return_type_str }}> {
-{% if native_async && !wrapper_code.is_empty() %}
-  // A non-empty `wrapper_code` means at least one parameter needs wasm-linear-memory
-  // allocation (`_module.allocString`/`allocBytes`/`allocWriter`, ...) before the call --
-  // `NativeBoltFFIModule` has no such methods (native and JS share one process address space;
-  // there is nothing to allocate into). Failing loudly here beats generating a call that
-  // throws a confusing "not a function" TypeError at the allocation site instead of at the
-  // point that actually explains why (react-native track stage 2 -- adversarial review finding).
-  throw new Error(
-    "native async mode does not yet support parameters requiring wasm-linear-memory allocation ({{ name }})"
-  );
-}
-{% else %}
 {% if !wrapper_code.is_empty() %}  {{ wrapper_code }}
 {% endif %}
 {% if cleanup_code.is_empty() %}
@@ -50,9 +38,30 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
   } finally {
     (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
   }
+{% elif return_route.is_packed() %}
+  // Same packed-buffer handling as the non-native-async branch below: `_module.allocBufDescriptor`/
+  // `completeAsync`/`readerFromBuf`/`freeBuf` are all backend-agnostic (`NativeBoltFFIModule`
+  // implements the same surface as `BoltFFIModule`, against its own arena) -- only the poll
+  // convention above (`pollAsyncNative`) differs between backends.
+  const outPtr = _module.allocBufDescriptor();
+  let completeCompleted = false;
+  try {
+    _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+    completeCompleted = true;
+    const reader = _module.readerFromBuf(outPtr);
+    const result = {{ return_route.decode_expr() }};
+    return result;
+  } finally {
+    if (completeCompleted) {
+      _module.freeBuf(outPtr);
+    } else {
+      _module.freeBufDescriptor(outPtr);
+    }
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
 {% else %}
   (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
-  throw new Error("native async mode does not yet support buffer-encoded return routes");
+  throw new Error("Unsupported native async return route{{ return_route.ts_cast() }}");
 {% endif %}
 {% else %}
   const awaitedHandle = await _module.asyncManager.pollAsync(
@@ -133,9 +142,26 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
     } finally {
       (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
     }
+{% elif return_route.is_packed() %}
+    const outPtr = _module.allocBufDescriptor();
+    let completeCompleted = false;
+    try {
+      _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+      completeCompleted = true;
+      const reader = _module.readerFromBuf(outPtr);
+      const result = {{ return_route.decode_expr() }};
+      return result;
+    } finally {
+      if (completeCompleted) {
+        _module.freeBuf(outPtr);
+      } else {
+        _module.freeBufDescriptor(outPtr);
+      }
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
 {% else %}
     (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
-    throw new Error("native async mode does not yet support buffer-encoded return routes");
+    throw new Error("Unsupported native async return route{{ return_route.ts_cast() }}");
 {% endif %}
 {% else %}
     const awaitedHandle = await _module.asyncManager.pollAsync(
@@ -188,4 +214,3 @@ export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type
   }
 {% endif %}
 }
-{% endif %}
