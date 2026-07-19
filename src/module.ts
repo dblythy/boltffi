@@ -3,6 +3,9 @@ import type { WasmWireWriterAllocator } from "./wire.js";
 
 const FFI_BUF_DESCRIPTOR_SIZE = 16;
 const FFI_STATUS_SIZE = 4;
+// FfiString is `{ ptr: *mut u8, len: usize, cap: usize }` (boltffi_core::types::string) —
+// 3 wasm32 words, raw (non length-prefixed) bytes at `ptr`.
+const FFI_STRING_SIZE = 12;
 const MIN_WRITER_CAPACITY = 64;
 const MAX_WRITERS_PER_CAPACITY = 32;
 
@@ -122,6 +125,13 @@ export interface BoltFFIExports {
   boltffi_wasm_realloc: (ptr: number, oldSize: number, newSize: number) => number;
   boltffi_wasm_free_string_return: (ptr: number, len: number) => void;
   boltffi_wasm_return_slot_addr: () => number;
+  /** Writes the thread-local last-error message (set by any failed fallible call
+   * that has no other wire channel for its error, e.g. a `Result<Self, Error>`
+   * constructor) as an FfiString into `outPtr`. Always present in every compiled
+   * artifact (boltffi_core::lib::boltffi_last_error_message) — not a per-crate symbol. */
+  boltffi_last_error_message: (outPtr: number) => number;
+  /** Frees the FfiString written by boltffi_last_error_message. */
+  boltffi_free_string: (ptr: number) => void;
   [key: string]: WebAssembly.ExportValue;
 }
 
@@ -542,6 +552,41 @@ export class BoltFFIModule {
     const { ptr, len } = this.readBufDescriptor(bufPtr);
     if (ptr === 0) return new Uint8Array(0);
     return this.getBytes().subarray(ptr, ptr + len).slice();
+  }
+
+  /**
+   * Reads and clears the thread-local last-error message set by a failed
+   * fallible call whose success payload is an object handle (e.g. a
+   * `Result<Self, Error>` constructor) — a handle return has no wire buffer to
+   * carry an encoded error, so the message crosses through this separate
+   * channel instead. Returns an empty string if no error was set.
+   */
+  takeLastErrorMessage(): string {
+    const outPtr = this.exports.boltffi_wasm_alloc(FFI_STRING_SIZE);
+    if (outPtr === 0) {
+      throw new Error("Failed to allocate memory for last-error message");
+    }
+    try {
+      // boltffi_wasm_alloc returns uninitialized memory. boltffi_last_error_message
+      // writes its FfiString result via `*out = FfiString::from(message)`, which
+      // first drops whatever FfiString was previously at `out` — garbage bytes read
+      // as a non-null pointer/capacity there trigger an invalid deallocation. Zero
+      // the slot first (ptr: u32, len: u32, cap: u32 on wasm32) so that implicit
+      // drop sees a valid, no-op empty FfiString.
+      this.getBytes().fill(0, outPtr, outPtr + FFI_STRING_SIZE);
+      this.exports.boltffi_last_error_message(outPtr);
+      const view = this.getView();
+      const strPtr = view.getUint32(outPtr, true);
+      const strLen = view.getUint32(outPtr + 4, true);
+      const message =
+        strPtr === 0 || strLen === 0
+          ? ""
+          : this._decoder.decode(this.getBytes().subarray(strPtr, strPtr + strLen));
+      this.exports.boltffi_free_string(outPtr);
+      return message;
+    } finally {
+      this.exports.boltffi_wasm_free(outPtr, FFI_STRING_SIZE);
+    }
   }
 
   takeBufI8Array(bufPtr: number): Int8Array {
