@@ -31,6 +31,20 @@ interface FreeBlock {
 }
 
 const DEFAULT_INITIAL_SIZE = 4096;
+/** Every allocation is rounded up to this many bytes, both in address and reserved size -- the
+ * native side reads decoded values (i64/f64 arrays, the 16-byte buf-descriptor/return-slot
+ * layout) as typed pointers through a real native ABI, where an unaligned read is UB (unlike a
+ * JS `DataView`, which tolerates any byte offset). Rounding the SIZE up too (not just the
+ * returned pointer) keeps every free-list block's `ptr` a multiple of `ALIGNMENT` forever, even
+ * after a partial split hands back the front of a larger block -- `ptr + alignedSize` stays
+ * aligned because both operands are. 8 covers every primitive this runtime ever hands the native
+ * side (i64/u64/f64 are the widest). */
+const ALIGNMENT = 8;
+
+function alignUp(n: number): number {
+  return (n + ALIGNMENT - 1) & ~(ALIGNMENT - 1);
+}
+
 /** Reserved header region at offset 0, mirroring wasm's `boltffi_wasm_return_slot_addr` -- a
  * fixed scratch slot for the one active "return slot" struct decode in flight. Never handed out
  * by `alloc`. */
@@ -84,24 +98,28 @@ export class NativeMemoryArena {
 
   alloc(size: number): number {
     if (size === 0) return 0;
-    const fitIndex = this.freeBlocks.findIndex((block) => block.len >= size);
+    const alignedSize = alignUp(size);
+
+    const fitIndex = this.freeBlocks.findIndex((block) => block.len >= alignedSize);
     if (fitIndex !== -1) {
       const block = this.freeBlocks[fitIndex];
       const ptr = block.ptr;
-      if (block.len === size) {
+      if (block.len === alignedSize) {
         this.freeBlocks.splice(fitIndex, 1);
       } else {
-        block.ptr += size;
-        block.len -= size;
+        // `ptr` was already a multiple of ALIGNMENT (every block ptr ever handed out is), and
+        // `alignedSize` is one too, so the residual block's ptr stays aligned.
+        block.ptr += alignedSize;
+        block.len -= alignedSize;
       }
       return ptr;
     }
 
-    if (this.highWaterMark + size > this.buf.byteLength) {
-      this.grow(this.highWaterMark + size);
+    const ptr = alignUp(this.highWaterMark);
+    if (ptr + alignedSize > this.buf.byteLength) {
+      this.grow(ptr + alignedSize);
     }
-    const ptr = this.highWaterMark;
-    this.highWaterMark += size;
+    this.highWaterMark = ptr + alignedSize;
     return ptr;
   }
 

@@ -136,10 +136,7 @@ export const {{ name }} = {
     try {
       const statusBuf = new Uint8Array(4);
       (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
-      const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
-      if (statusCode !== 0) {
-        throw new Error(`native async call failed with status ${statusCode}`);
-      }
+      _module.checkStatus(_module.readStatusCode(statusBuf));
     } finally {
       (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
     }
@@ -147,10 +144,7 @@ export const {{ name }} = {
     try {
       const statusBuf = new Uint8Array(4);
       const result = (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ async_method.return_route.ts_cast() }};
-      const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
-      if (statusCode !== 0) {
-        throw new Error(`native async call failed with status ${statusCode}`);
-      }
+      _module.checkStatus(_module.readStatusCode(statusBuf));
       return result;
     } finally {
       (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
@@ -294,10 +288,7 @@ export const {{ name }} = {
       try {
         const statusBuf = new Uint8Array(4);
         (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
-        const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
-        if (statusCode !== 0) {
-          throw new Error(`native async call failed with status ${statusCode}`);
-        }
+        _module.checkStatus(_module.readStatusCode(statusBuf));
       } finally {
         (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
       }
@@ -305,10 +296,7 @@ export const {{ name }} = {
       try {
         const statusBuf = new Uint8Array(4);
         const result = (_exports.{{ async_method.complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ async_method.return_route.ts_cast() }};
-        const statusCode = new DataView(statusBuf.buffer).getInt32(0, true);
-        if (statusCode !== 0) {
-          throw new Error(`native async call failed with status ${statusCode}`);
-        }
+        _module.checkStatus(_module.readStatusCode(statusBuf));
         return result;
       } finally {
         (_exports.{{ async_method.free_ffi_name }} as Function)(awaitedHandle);
