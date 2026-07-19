@@ -582,6 +582,12 @@ impl Config {
             })
     }
 
+    /// Package for generated Kotlin records/enums, mirroring [`Config::csharp_data_namespace`].
+    /// `None` when unset, so the Kotlin host falls back to `android_kotlin_package()`.
+    pub fn android_kotlin_data_package(&self) -> Option<&str> {
+        self.targets.android.kotlin.data_package.as_deref()
+    }
+
     pub fn android_kotlin_module_name(&self) -> String {
         self.targets
             .android
@@ -2329,6 +2335,56 @@ library_name = "configured-library"
             config.resolved_android_kotlin_desktop_library_name(),
             "configured_library"
         );
+    }
+
+    #[test]
+    fn android_kotlin_data_package_defaults_to_unset() {
+        let config = parse_config(
+            r#"
+[package]
+name = "my-lib"
+
+[targets.android.kotlin]
+package = "com.parsecore.ffi"
+"#,
+        );
+
+        assert_eq!(config.android_kotlin_data_package(), None);
+    }
+
+    #[test]
+    fn rejects_unknown_android_kotlin_config_keys() {
+        // Regression guard: `data_package` (the DTO-leak fix) shipped in the Kotlin backend
+        // before its CLI config plumbing existed, and sat silently ignored under
+        // `[targets.android.kotlin]` because `KotlinConfig` tolerated unknown keys — the same
+        // gap would swallow any future typo'd or unwired key just as quietly.
+        let parsed = toml::from_str::<Config>(
+            r#"
+[package]
+name = "mylib"
+
+[targets.android.kotlin]
+data_pacakge = "com.parsecore"
+"#,
+        );
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn android_kotlin_data_package_reads_configured_override() {
+        let config = parse_config(
+            r#"
+[package]
+name = "my-lib"
+
+[targets.android.kotlin]
+package = "com.parsecore.ffi"
+data_package = "com.parsecore"
+"#,
+        );
+
+        assert_eq!(config.android_kotlin_data_package(), Some("com.parsecore"));
     }
 
     #[test]

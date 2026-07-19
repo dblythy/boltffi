@@ -54,6 +54,7 @@ pub struct Generation {
     java_desktop_loader: JavaDesktopLoader,
     java_version: JavaVersion,
     kotlin_package: Option<String>,
+    kotlin_data_package: Option<String>,
     kotlin_file: Option<String>,
     kotlin_android_library: Option<String>,
     kotlin_desktop_jni_library: Option<String>,
@@ -101,6 +102,7 @@ impl Generation {
             java_desktop_loader: JavaDesktopLoader::default(),
             java_version: JavaVersion::default(),
             kotlin_package: None,
+            kotlin_data_package: None,
             kotlin_file: None,
             kotlin_android_library: None,
             kotlin_desktop_jni_library: None,
@@ -249,6 +251,13 @@ impl Generation {
     /// Sets the generated Kotlin package name.
     pub fn kotlin_package(mut self, package: impl Into<String>) -> Self {
         self.kotlin_package = Some(package.into());
+        self
+    }
+
+    /// Sets the package for generated Kotlin records/enums. Falls back to
+    /// [`Self::kotlin_package`] when unset.
+    pub fn kotlin_data_package(mut self, data_package: Option<String>) -> Self {
+        self.kotlin_data_package = data_package;
         self
     }
 
@@ -504,6 +513,13 @@ impl Generation {
             .desktop_loader(self.kotlin_desktop_loader)
             .api_style(self.kotlin_api_style)
             .factory_style(self.kotlin_factory_style);
+        let host = self
+            .kotlin_data_package
+            .as_deref()
+            .map(|data_package| host.clone().data_package(data_package))
+            .transpose()
+            .map_err(GenerationError::Render)?
+            .unwrap_or(host);
         let host = self
             .kotlin_custom_mappings
             .iter()
@@ -963,6 +979,25 @@ mod tests {
         assert!(file(&output, "jni/jni_glue.c").contains(
             "JNIEXPORT jint JNICALL Java_com_boltffi_demo_Native_boltffi_1function_1demo_1add"
         ));
+    }
+
+    #[test]
+    fn kotlin_generation_threads_configured_data_package_into_the_kotlin_host() {
+        let host = Generation::new("Cargo.toml")
+            .kotlin_data_package(Some("com.parsecore".to_string()))
+            .kotlin_host("com.parsecore.ffi", "ParseCore")
+            .expect("kotlin host should build with a configured data package");
+
+        assert_eq!(host.resolved_data_package().as_str(), "com.parsecore");
+    }
+
+    #[test]
+    fn kotlin_generation_without_data_package_falls_back_to_the_kotlin_package() {
+        let host = Generation::new("Cargo.toml")
+            .kotlin_host("com.parsecore.ffi", "ParseCore")
+            .expect("kotlin host should build without a configured data package");
+
+        assert_eq!(host.resolved_data_package().as_str(), "com.parsecore.ffi");
     }
 
     #[test]
