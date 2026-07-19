@@ -330,6 +330,25 @@ mod tests {
             "body: {}",
             function.body
         );
+        // Regression (consumer-repo finding, 2026-07-20): `Ok(())`'s wire
+        // payload is zero bytes — the response buffer for a void-ok Result
+        // is exactly the 1-byte tag `readResult` already consumed before
+        // calling this closure. The Ok arm used to read a phantom extra
+        // byte (`readU8()`), throwing `StateError: Buffer overflow` against
+        // every real void-returning fallible call (save/fetch/destroy,
+        // setAcl, or/and/nor, every set*Storage free function, ...) the
+        // instant it ran against a real response. The Ok arm for a void
+        // Result must read nothing.
+        assert!(
+            !function.body.contains("readU8()"),
+            "the Ok arm of a void Result must not read a phantom byte: {}",
+            function.body
+        );
+        assert!(
+            function.body.contains("(_p$reader) {},\n  (_p$reader) => ParseError._m$wireDecode(_p$reader)"),
+            "the Ok arm of a void Result must be a true no-op read: {}",
+            function.body
+        );
     }
 
     fn boxed_dyn_callback(id: &str) -> CallbackTraitDef {

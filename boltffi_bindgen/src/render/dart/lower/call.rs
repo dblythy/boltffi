@@ -43,6 +43,13 @@ struct CallPlan {
     /// explicit, immediate free (wire-buffer scratch values do not: see
     /// `render_sync_body`).
     has_status_scratch: bool,
+    /// Whether `setup` registers at least one callback handle
+    /// (`Transport::Callback { style: BoxedDyn, .. }`). When true, `setup`
+    /// also contains one `_p$cleanup.add(...)` line per registration, and
+    /// the renderer must wrap the whole setup sequence so a later setup
+    /// statement's failure rolls every already-registered handle back
+    /// (see [`render_setup`]) instead of leaking it in the handle map.
+    has_callback_handles: bool,
 }
 
 fn buffer_var(param_name: &str) -> String {
@@ -51,6 +58,66 @@ fn buffer_var(param_name: &str) -> String {
 
 fn status_var() -> &'static str {
     "_p$status"
+}
+
+/// The rollback queue's name — a plain `List<void Function()>`, not a
+/// `final` bound to any one handle, so referencing it from the `catch` block
+/// [`wrap_with_cleanup`] wraps the body in is always well-defined regardless
+/// of which statement threw.
+fn cleanup_queue_var() -> &'static str {
+    "_p$cleanup"
+}
+
+/// Renders `plan.setup` as flat statements, in order. Each callback-handle
+/// registration is immediately followed (same position, same `plan.setup`
+/// entry list) by a rollback-queue registration — see [`wrap_with_cleanup`],
+/// which wraps the *caller's* full assembled body (setup and everything
+/// after it) so those queued closures actually get a chance to run.
+fn emit_setup(plan: &CallPlan) -> String {
+    let mut body = String::new();
+    for stmt in &plan.setup {
+        body.push_str(stmt);
+        body.push('\n');
+    }
+    body
+}
+
+/// Wraps a fully-assembled method body in a rollback `try`/`catch` when its
+/// setup registered one or more callback handles.
+///
+/// `createHandle` inserts into the handle map's `_map` immediately, before
+/// the native call. Without this wrapper, a *later* setup statement throwing
+/// (an encoded-buffer write, another `createHandle`, ...) would leave that
+/// insertion in place forever — nothing else ever calls `.remove()` on it,
+/// so the boxed listener stays reachable (and pinned) for the process's
+/// lifetime. Each callback-handle setup line (`emit_setup`) is immediately
+/// followed by a closure registration
+/// (`_p$cleanup.add(() => <handleMap>.remove(<handle>))`) — the closure
+/// captures the just-declared `final` local, which is only ever reachable
+/// once its own declaration has already run, so this holds regardless of
+/// where a later statement fails. The `catch` drains that queue in reverse
+/// (matching normal drop order) and rethrows, so the original failure still
+/// reaches the caller.
+///
+/// This must wrap the *whole* body — setup through the native call and
+/// decode — not just `setup` on its own: `setup`'s `final` locals (the
+/// wire-writer buffers, the boxed callback handles, ...) are declared with
+/// block scope, so a `try { setup } catch { ... }` that closes before the
+/// native call would take those declarations out of scope right where the
+/// call needs to read them (an `undefined_identifier` `dart analyze` error
+/// on every method with a callback param, caught by a real-generation
+/// regen against parse-core-rs — a live-fixture-only mistake unit tests over
+/// string contents alone couldn't catch, since the wrap and its content were
+/// individually well-formed).
+fn wrap_with_cleanup(plan: &CallPlan, body: String) -> String {
+    if !plan.has_callback_handles {
+        return body;
+    }
+
+    let queue = cleanup_queue_var();
+    format!(
+        "final {queue} = <void Function()>[];\ntry {{\n{body}}} catch (e) {{\nfor (final _p$c in {queue}.reversed) {{\n_p$c();\n}}\nrethrow;\n}}\n"
+    )
 }
 
 /// Replaces the standalone identifier `self` with `this` in a generated
@@ -89,6 +156,7 @@ fn is_ident_byte(b: u8) -> bool {
 fn plan_call(abi_call: &AbiCall) -> CallPlan {
     let mut setup = Vec::new();
     let mut has_status_scratch = false;
+    let mut has_callback_handles = false;
     let mut slots = Vec::new();
     let mut len_exprs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
 
@@ -237,6 +305,11 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                             create_expr
                         };
                         setup.push(format!("final {var} = {expr};"));
+                        setup.push(format!(
+                            "{}.add(() => {handle_map}.remove({var}.handle));",
+                            cleanup_queue_var()
+                        ));
+                        has_callback_handles = true;
                         slots.push(ArgSlot::Expr(var));
                     }
                     Transport::Callback {
@@ -310,6 +383,7 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
         setup,
         args,
         has_status_scratch,
+        has_callback_handles,
     }
 }
 
@@ -505,11 +579,7 @@ fn render_sync_body(
     let plan = plan_call(abi_call);
     let symbol_fn = format!("_f${}", abi_call.symbol);
 
-    let mut out = String::new();
-    for stmt in &plan.setup {
-        out.push_str(stmt);
-        out.push('\n');
-    }
+    let mut out = emit_setup(&plan);
 
     let call_expr = format!("{symbol_fn}({})", plan.args.join(", "));
 
@@ -562,7 +632,7 @@ fn render_sync_body(
         out.push('\n');
     }
 
-    out
+    wrap_with_cleanup(&plan, out)
 }
 
 /// Renders the full Dart source body for an async native call, driving the
@@ -593,11 +663,7 @@ fn render_async_body(
     let cancel_fn = format!("_f${}", async_call.cancel);
     let free_fn = format!("_f${}", async_call.free);
 
-    let mut out = String::new();
-    for stmt in &plan.setup {
-        out.push_str(stmt);
-        out.push('\n');
-    }
+    let mut out = emit_setup(&plan);
 
     let create_args = plan.args.join(", ");
 
@@ -638,7 +704,7 @@ fn render_async_body(
         "return _$$BoltFFIAsync.create(\n  createFuture: () => {symbol_fn}({create_args}),\n  pollFuture: {poll_fn},\n  completeFuture: (handle) {{\n{complete_stmt}\n  }},\n  freeFuture: {free_fn},\n  cancelFuture: {cancel_fn},\n);\n"
     ));
 
-    out
+    wrap_with_cleanup(&plan, out)
 }
 
 /// `is_constructor` matters because Dart `factory` constructors cannot be
@@ -676,8 +742,9 @@ mod tests {
 
     use crate::{
         ir::{
-            ClassDef, ClassId, ConstructorDef, MethodDef, MethodId, ParamDef, ParamName,
-            ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef, TypeExpr,
+            ClassDef, ClassId, ConstructorDef, FunctionDef, FunctionId, MethodDef, MethodId,
+            ParamDef, ParamName, ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef,
+            TypeExpr,
         },
         render::dart::test,
     };
@@ -970,6 +1037,102 @@ mod tests {
         assert!(!body.contains("UnsupportedError"), "body: {body}");
     }
 
+    // Regression: `createHandle` inserts into the handle map's `_map` before
+    // the native call happens. If the call has a *second* param whose own
+    // setup throws (an encoded-buffer write, another `createHandle`, ...),
+    // the first handle is already inserted and nothing ever calls
+    // `.remove()` on it — a leaked entry pinning the Dart listener object
+    // forever. Codex review finding (2026-07-20): the setup sequence must
+    // roll back any handle it already registered before letting the
+    // exception propagate.
+    #[test]
+    fn boxed_dyn_callback_param_setup_registers_a_rollback_on_later_setup_failure() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog
+            .insert_callback(callback_trait("Listener", "on_event"));
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Subject"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new("subscribe"),
+                receiver: Receiver::RefSelf,
+                params: vec![
+                    ParamDef {
+                        name: ParamName::new("listener"),
+                        type_expr: TypeExpr::Callback(crate::ir::CallbackId::new("Listener")),
+                        passing: ParamPassing::BoxedDyn,
+                        doc: None,
+                    },
+                    ParamDef {
+                        name: ParamName::new("label"),
+                        type_expr: TypeExpr::String,
+                        passing: ParamPassing::Value,
+                        doc: None,
+                    },
+                ],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].methods[0].body;
+
+        // The handle is registered, and a rollback closure for it is queued
+        // immediately after — before any later param's own setup (which
+        // might throw) runs.
+        let create_pos = body
+            .find("_k$ListenerHandleMap.createHandle(listener)")
+            .expect(body);
+        let cleanup_add_pos = body.find("_p$cleanup.add(").expect(body);
+        assert!(
+            cleanup_add_pos > create_pos,
+            "the rollback closure must be queued right after the handle is created: {body}"
+        );
+        assert!(
+            body.contains("_k$ListenerHandleMap.remove("),
+            "the rollback closure must call the same handle map's remove: {body}"
+        );
+        // The whole setup sequence (including the later param's own writer
+        // setup) runs inside a try whose catch drains the rollback queue —
+        // in reverse, matching normal drop order — then rethrows so the
+        // original failure still surfaces to the caller.
+        assert!(body.contains("try {"), "body: {body}");
+        assert!(
+            body.contains("_p$cleanup.reversed"),
+            "body: {body}"
+        );
+        assert!(body.contains("rethrow;"), "body: {body}");
+        // Regression: an earlier version of this fix wrapped only the
+        // *setup* statements in `try { ... }`, closing the block — and
+        // taking `final _p$w$listener`/`_p$w$label` out of scope — before
+        // the native call that reads them. Undetectable by string-content
+        // assertions alone (a real `dart analyze` regen against
+        // parse-core-rs caught it as ~49 `undefined_identifier` errors);
+        // pin the structural fact directly: the native call site must be
+        // textually *inside* the try block, not after it closes.
+        let try_pos = body.find("try {").expect(body);
+        let call_pos = body
+            .find("_f$boltffi_subject_subscribe(")
+            .expect(body);
+        let try_close_pos = body.rfind("} catch (e) {").expect(body);
+        assert!(
+            try_pos < call_pos && call_pos < try_close_pos,
+            "the native call must be inside the try block, not after its locals go out of scope: {body}"
+        );
+    }
+
     #[test]
     fn nullable_boxed_dyn_callback_param_falls_back_to_a_zero_handle() {
         let mut ffi = test::empty_contract();
@@ -1014,6 +1177,44 @@ mod tests {
             "body: {body}"
         );
         assert!(body.contains("..handle = 0"), "body: {body}");
+    }
+
+    // Regression (Codex review finding, 2026-07-20): a function/method that
+    // *returns* a callback handle (`Box<dyn Trait>` handed back to the
+    // caller, as opposed to a callback *param* — this renderer has no
+    // "returned callback" client wrapper yet, unlike e.g. the JNI bridge's
+    // dedicated `CallbackHandleMethod` machinery for exactly this
+    // direction) compiles a Dart method that `throw`s an `UnsupportedError`
+    // the instant it's actually called.
+    //
+    // A generation-time panic was tried and reverted: it aborts the whole
+    // render pass for the entire crate, not just this one function —
+    // confirmed against the fork's own `examples/demo` fixture
+    // (`make_incrementing_callback`, exactly this shape), whose Dart target
+    // stopped generating at all. Reverted to the established per-function
+    // runtime-throw convention this file already uses in several other
+    // "unsupported shape" arms (`ImplTrait` closure params, out-parameter
+    // returns, ...).
+    #[test]
+    fn function_returning_a_callback_handle_still_throws_at_runtime_not_generation_time() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_callback(callback_trait("Listener", "on_event"));
+        ffi.functions.push(FunctionDef {
+            id: FunctionId::new("make_listener"),
+            params: vec![],
+            returns: ReturnDef::Value(TypeExpr::Callback(crate::ir::CallbackId::new("Listener"))),
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.functions[0].body;
+
+        assert!(
+            body.contains("throw UnsupportedError('callback-handle returns are not yet supported by this renderer');"),
+            "body: {body}"
+        );
     }
 
     // Regression guard: a closure-style (`ImplTrait`) callback param must

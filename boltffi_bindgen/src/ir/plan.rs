@@ -192,5 +192,30 @@ pub enum CallbackStyle {
 pub enum ReturnPlan {
     Void,
     Value(Transport),
-    Fallible { ok: Transport, err_codec: CodecPlan },
+    Fallible {
+        ok: Transport,
+        err_codec: CodecPlan,
+        /// The wire codec for the `Ok` payload, built directly from the
+        /// original `TypeExpr` (`Lowerer::build_codec`) rather than
+        /// re-derived from `ok`.
+        ///
+        /// `classify_type` maps a bare `TypeExpr::Void` to
+        /// `Transport::Scalar(ScalarOrigin::Primitive(PrimitiveType::U8))`
+        /// — a fine placeholder everywhere else `Transport` is consumed,
+        /// but re-deriving a codec from *that* (`codec_from_transport`)
+        /// loses the fact it was ever void and produces a real one-byte
+        /// `CodecPlan::Primitive(U8)`. For `Result<(), E>` — the only
+        /// return shape where `TypeExpr::Void` can appear as a nested type
+        /// (the scanner rejects it everywhere else: `Box<()>` returns, `()`
+        /// params) — that phantom byte doesn't exist on the wire: `Ok(())`
+        /// is exactly the 1-byte tag `readResult` already consumes, nothing
+        /// more. Reading it back anyway threw `StateError: Buffer overflow`
+        /// on every real void-returning fallible call (consumer-repo
+        /// finding, 2026-07-20).
+        ///
+        /// `None` where `ok` is `Transport::Handle` (a fallible
+        /// constructor) — that arm never wire-encodes the Ok side at all
+        /// (see `return_shape_and_error`), so no override is needed.
+        ok_codec: Option<CodecPlan>,
+    },
 }
