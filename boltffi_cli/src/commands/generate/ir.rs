@@ -395,6 +395,7 @@ fn generate_kotlin(config: &Config, options: &GenerateOptions) -> Result<()> {
     expansion
         .generation()
         .kotlin_package(config.android_kotlin_package())
+        .kotlin_data_package(config.android_kotlin_data_package().map(str::to_owned))
         .kotlin_file(config.android_kotlin_module_name())
         .kotlin_api_style(kotlin_api_style(config.android_kotlin_api_style()))
         .kotlin_factory_style(kotlin_factory_style(config.android_kotlin_factory_style()))
