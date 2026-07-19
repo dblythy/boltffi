@@ -147,11 +147,40 @@ TypeText splitTypeText(const std::string& text) {
   return out;
 }
 
+/// Counts the top-level comma-separated parts of an inline function-pointer type's OWN parameter
+/// list, e.g. `void (*)(void *, FfiStatus, FfiBuf_u8)` -> 3 -- used only to disambiguate the real
+/// header's completion-callback shapes (see `TypeRef::fnPtrArity`'s doc); never recurses into those
+/// parameters' own types.
+int countFnPtrArity(const std::string& fnPtrText) {
+  std::size_t starParenPos = fnPtrText.find("(*");
+  std::size_t nameClose = fnPtrText.find(')', starParenPos);
+  std::size_t argsOpen = fnPtrText.find('(', nameClose);
+  int depth = 0;
+  std::size_t open = std::string::npos, close = std::string::npos;
+  for (std::size_t i = argsOpen; i < fnPtrText.size(); ++i) {
+    if (fnPtrText[i] == '(') {
+      if (depth == 0) open = i;
+      ++depth;
+    } else if (fnPtrText[i] == ')') {
+      --depth;
+      if (depth == 0) {
+        close = i;
+        break;
+      }
+    }
+  }
+  if (open == std::string::npos || close == std::string::npos) return 0;
+  std::string inner = trim(fnPtrText.substr(open + 1, close - open - 1));
+  if (inner.empty() || inner == "void") return 0;
+  return static_cast<int>(splitTopLevelCommas(inner).size());
+}
+
 TypeRef resolveParamOrReturnType(const std::string& text, const AliasTable& aliases) {
   std::string trimmed = trim(text);
   if (looksLikeFnPtrType(trimmed)) {
     TypeRef ref;
     ref.kind = PrimKind::FnPtr;
+    ref.fnPtrArity = countFnPtrArity(trimmed);
     return ref;
   }
   TypeText parts = splitTypeText(trimmed);

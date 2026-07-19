@@ -49,6 +49,11 @@ struct TypeRef {
   std::string aggregateName;  // populated iff kind == Aggregate
   std::string name;           // the C parameter name (function params only; empty for vtable
                                // field param types, which the header never names)
+  int fnPtrArity = -1;        // populated iff kind == FnPtr: the inline function pointer's OWN
+                               // param count (e.g. 2 for `void (*)(void *, FfiStatus)`, 3 for
+                               // `void (*)(void *, FfiStatus, FfiBuf_u8)`) -- enough to distinguish
+                               // the real header's two completion-callback shapes without a full
+                               // recursive parse of the nested signature's own param TYPES.
 
   bool isAggregate() const { return kind == PrimKind::Aggregate; }
 };

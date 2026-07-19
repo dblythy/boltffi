@@ -63,6 +63,9 @@ BOLTFFI_TEST(parses_void_return_and_out_param_pointer) {
 
 BOLTFFI_TEST(parses_double_param) {
   auto abi = parseAbiHeader(
+      "typedef struct {\n"
+      "    int32_t code;\n"
+      "} FfiStatus;\n"
       "FfiStatus boltffi_method_class_x_object_increment(uint64_t receiver, const uint8_t *key_ptr, "
       "uintptr_t key_len, double amount);\n");
   const auto& fn = abi.functions[0];
