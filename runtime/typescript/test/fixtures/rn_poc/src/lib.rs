@@ -5,6 +5,18 @@
 //! thread (`delayed_add`, mirroring `boltffi_core::runtime::future`'s own
 //! `delayed_wake_future_completes_through_exported_handle` test), and a host-implemented
 //! callback trait (`Multiplier`) the host registers and Rust calls back into synchronously.
+//!
+//! `AsyncKv` (added for the jsi-dispatch session's item B, docs/tracks/react-native.md's
+//! "Host->native callbacks" risk) mirrors `parse-core-rs`'s real `SessionStorage` trait
+//! (`src/ffi/transport.rs`) exactly -- same shape (`#[export] #[async_trait::async_trait]`,
+//! `async fn get(&self) -> Option<String>` / `async fn set(&self, value: String)`), which compiles
+//! to the SAME vtable-field convention `header.h` shows for `___SessionStorageVTable`: a trailing
+//! `(completion function pointer, opaque userdata)` pair instead of a directly returned value. This
+//! is a materially different risk from `Multiplier::factor`'s synchronous return-a-value shape
+//! (flagged, not identical, by the design doc): the completion fires asynchronously, possibly much
+//! later and from an arbitrary thread (a real async host operation, e.g. `AsyncStorage.getItem()`),
+//! needing the SAME off-thread-safety discipline `Counter::delayed_add`'s future continuation
+//! already proves, just on the host-callback side instead of the async-future side.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,6 +29,13 @@ use std::time::Duration;
 #[boltffi::export]
 pub trait Multiplier: Send + Sync {
     fn factor(&self) -> i32;
+}
+
+#[boltffi::export]
+#[async_trait::async_trait]
+pub trait AsyncKv: Send + Sync {
+    async fn get(&self) -> Option<String>;
+    async fn set(&self, value: String);
 }
 
 struct DelayedAddState {
@@ -72,6 +91,7 @@ impl Future for DelayedAdd {
 pub struct Counter {
     value: AtomicI32,
     multiplier: Mutex<Option<Box<dyn Multiplier>>>,
+    kv: Mutex<Option<Box<dyn AsyncKv>>>,
 }
 
 #[boltffi::export]
@@ -80,6 +100,7 @@ impl Counter {
         Self {
             value: AtomicI32::new(start),
             multiplier: Mutex::new(None),
+            kv: Mutex::new(None),
         }
     }
 
@@ -110,5 +131,36 @@ impl Counter {
             .map(|m| m.factor())
             .unwrap_or(1);
         self.value.load(Ordering::SeqCst) * factor
+    }
+
+    /// Registers a host (JS)-implemented async key/value callback: proves the async-completion
+    /// host-callback round trip (item B).
+    pub fn set_kv(&self, kv: Box<dyn AsyncKv>) {
+        *self.kv.lock().unwrap() = Some(kv);
+    }
+
+    /// Calls back into the host-registered `AsyncKv::get`, awaiting its (possibly off-thread,
+    /// possibly-much-later) completion.
+    pub async fn kv_get(&self) -> Option<String> {
+        let kv = self.kv.lock().unwrap().take();
+        let result = match &kv {
+            Some(k) => k.get().await,
+            None => None,
+        };
+        if let Some(k) = kv {
+            *self.kv.lock().unwrap() = Some(k);
+        }
+        result
+    }
+
+    /// Calls back into the host-registered `AsyncKv::set`, awaiting its completion.
+    pub async fn kv_set(&self, value: String) {
+        let kv = self.kv.lock().unwrap().take();
+        if let Some(k) = &kv {
+            k.set(value).await;
+        }
+        if let Some(k) = kv {
+            *self.kv.lock().unwrap() = Some(k);
+        }
     }
 }
