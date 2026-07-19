@@ -18,6 +18,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 boltffi = { path = "../../../../../boltffi" }
+async-trait = "0.1"
 
 # Empty table: makes this crate its own standalone workspace root instead of relying on the
 # nearest ancestor's `exclude` to stop cargo's upward workspace search. Without it, cargo's search
