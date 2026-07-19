@@ -62,35 +62,54 @@ fn status_var() -> &'static str {
 
 /// The rollback queue's name — a plain `List<void Function()>`, not a
 /// `final` bound to any one handle, so referencing it from the `catch` block
-/// [`render_setup`] wraps `setup` in is always well-defined regardless of
-/// which setup statement threw.
+/// [`wrap_with_cleanup`] wraps the body in is always well-defined regardless
+/// of which statement threw.
 fn cleanup_queue_var() -> &'static str {
     "_p$cleanup"
 }
 
-/// Renders `plan.setup`, wrapped in a rollback `try`/`catch` when it
-/// registers one or more callback handles.
+/// Renders `plan.setup` as flat statements, in order. Each callback-handle
+/// registration is immediately followed (same position, same `plan.setup`
+/// entry list) by a rollback-queue registration — see [`wrap_with_cleanup`],
+/// which wraps the *caller's* full assembled body (setup and everything
+/// after it) so those queued closures actually get a chance to run.
+fn emit_setup(plan: &CallPlan) -> String {
+    let mut body = String::new();
+    for stmt in &plan.setup {
+        body.push_str(stmt);
+        body.push('\n');
+    }
+    body
+}
+
+/// Wraps a fully-assembled method body in a rollback `try`/`catch` when its
+/// setup registered one or more callback handles.
 ///
 /// `createHandle` inserts into the handle map's `_map` immediately, before
 /// the native call. Without this wrapper, a *later* setup statement throwing
 /// (an encoded-buffer write, another `createHandle`, ...) would leave that
 /// insertion in place forever — nothing else ever calls `.remove()` on it,
 /// so the boxed listener stays reachable (and pinned) for the process's
-/// lifetime. Each callback-handle setup line is immediately followed by a
-/// closure registration (`_p$cleanup.add(() => <handleMap>.remove(<handle>))`)
-/// pushed into `plan.setup` at that same position — the closure captures the
-/// just-declared `final` local, which is only ever reachable here once its
-/// own declaration has already run, so this holds regardless of where a
-/// later statement fails. The `catch` drains that queue in reverse (matching
-/// normal drop order) and rethrows, so the original failure still reaches
-/// the caller.
-fn render_setup(plan: &CallPlan) -> String {
-    let mut body = String::new();
-    for stmt in &plan.setup {
-        body.push_str(stmt);
-        body.push('\n');
-    }
-
+/// lifetime. Each callback-handle setup line (`emit_setup`) is immediately
+/// followed by a closure registration
+/// (`_p$cleanup.add(() => <handleMap>.remove(<handle>))`) — the closure
+/// captures the just-declared `final` local, which is only ever reachable
+/// once its own declaration has already run, so this holds regardless of
+/// where a later statement fails. The `catch` drains that queue in reverse
+/// (matching normal drop order) and rethrows, so the original failure still
+/// reaches the caller.
+///
+/// This must wrap the *whole* body — setup through the native call and
+/// decode — not just `setup` on its own: `setup`'s `final` locals (the
+/// wire-writer buffers, the boxed callback handles, ...) are declared with
+/// block scope, so a `try { setup } catch { ... }` that closes before the
+/// native call would take those declarations out of scope right where the
+/// call needs to read them (an `undefined_identifier` `dart analyze` error
+/// on every method with a callback param, caught by a real-generation
+/// regen against parse-core-rs — a live-fixture-only mistake unit tests over
+/// string contents alone couldn't catch, since the wrap and its content were
+/// individually well-formed).
+fn wrap_with_cleanup(plan: &CallPlan, body: String) -> String {
     if !plan.has_callback_handles {
         return body;
     }
@@ -574,7 +593,7 @@ fn render_sync_body(
     let plan = plan_call(abi_call);
     let symbol_fn = format!("_f${}", abi_call.symbol);
 
-    let mut out = render_setup(&plan);
+    let mut out = emit_setup(&plan);
 
     let call_expr = format!("{symbol_fn}({})", plan.args.join(", "));
 
@@ -628,7 +647,7 @@ fn render_sync_body(
         out.push('\n');
     }
 
-    out
+    wrap_with_cleanup(&plan, out)
 }
 
 /// Renders the full Dart source body for an async native call, driving the
@@ -659,7 +678,7 @@ fn render_async_body(
     let cancel_fn = format!("_f${}", async_call.cancel);
     let free_fn = format!("_f${}", async_call.free);
 
-    let mut out = render_setup(&plan);
+    let mut out = emit_setup(&plan);
 
     let create_args = plan.args.join(", ");
 
@@ -701,7 +720,7 @@ fn render_async_body(
         "return _$$BoltFFIAsync.create(\n  createFuture: () => {symbol_fn}({create_args}),\n  pollFuture: {poll_fn},\n  completeFuture: (handle) {{\n{complete_stmt}\n  }},\n  freeFuture: {free_fn},\n  cancelFuture: {cancel_fn},\n);\n"
     ));
 
-    out
+    wrap_with_cleanup(&plan, out)
 }
 
 /// `is_constructor` matters because Dart `factory` constructors cannot be
@@ -1111,6 +1130,23 @@ mod tests {
             "body: {body}"
         );
         assert!(body.contains("rethrow;"), "body: {body}");
+        // Regression: an earlier version of this fix wrapped only the
+        // *setup* statements in `try { ... }`, closing the block — and
+        // taking `final _p$w$listener`/`_p$w$label` out of scope — before
+        // the native call that reads them. Undetectable by string-content
+        // assertions alone (a real `dart analyze` regen against
+        // parse-core-rs caught it as ~49 `undefined_identifier` errors);
+        // pin the structural fact directly: the native call site must be
+        // textually *inside* the try block, not after it closes.
+        let try_pos = body.find("try {").expect(body);
+        let call_pos = body
+            .find("_f$boltffi_subject_subscribe(")
+            .expect(body);
+        let try_close_pos = body.rfind("} catch (e) {").expect(body);
+        assert!(
+            try_pos < call_pos && call_pos < try_close_pos,
+            "the native call must be inside the try block, not after its locals go out of scope: {body}"
+        );
     }
 
     #[test]
