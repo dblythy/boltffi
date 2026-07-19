@@ -47,15 +47,7 @@ final class {{ cb.impl_class_name }} {
     {{ param.native_type.dart_sub_type() }} {{ param.name }},
 {%- endfor %}
   ){% if method.is_async() %} async{% endif %} {
-    final impl = {{ cb.handle_map_instance_name }}.get(_p$handle);
-
-    if (impl == null) {
-      throw _$$FFIException(-1, "{{ cb.class_name }}: invalid handle `${_p$handle}`");
-    }
-
-    try {
-    } catch (e) {
-    }
+    {{ method.body }}
   }
 {% endfor %}
 }
