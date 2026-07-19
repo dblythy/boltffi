@@ -23,6 +23,13 @@ type ExportFunction = (...args: number[]) => number | void;
 interface RuntimeHarness {
   module: BoltFFIModule;
   freedAllocations: Array<[number, number]>;
+  /** Bytes `boltffi_last_error_message` observed at its `outPtr` argument before
+   * writing to it — lets a test prove the caller zeroed uninitialized scratch
+   * memory first (real boltffi_core panics if it doesn't, see takeLastErrorMessage). */
+  lastErrorMessageSawAtOutPtr: number[];
+  freedStrings: number[];
+  /** Set to configure what the next `boltffi_last_error_message` call reports. */
+  nextLastErrorMessage: string;
 }
 
 function createHarness(): RuntimeHarness {
@@ -31,6 +38,9 @@ function createHarness(): RuntimeHarness {
   const allocations = new Map<number, number>();
   const returnSlotAddress = 16;
   let nextPointer = 256;
+  const lastErrorMessageSawAtOutPtr: number[] = [];
+  const freedStrings: number[] = [];
+  const harnessState = { nextLastErrorMessage: "" };
 
   const exports: Record<string, ExportFunction | WebAssembly.Memory> = {
     memory: wasmMemory,
@@ -89,11 +99,43 @@ function createHarness(): RuntimeHarness {
       allocations.delete(ptr);
     },
     boltffi_wasm_return_slot_addr: () => returnSlotAddress,
+    // Mirrors real boltffi_core::boltffi_last_error_message: writes an FfiString
+    // (ptr: u32, len: u32, cap: u32) at `outPtr`. Records the bytes it found
+    // there first, the way `*out = FfiString::from(message)` would implicitly
+    // drop whatever FfiString was already there before overwriting it.
+    boltffi_last_error_message: (outPtr: number) => {
+      lastErrorMessageSawAtOutPtr.push(
+        ...Array.from(new Uint8Array(wasmMemory.buffer, outPtr, 12))
+      );
+      const bytes = new TextEncoder().encode(harnessState.nextLastErrorMessage);
+      const stringPointer = nextPointer;
+      nextPointer += bytes.length;
+      new Uint8Array(wasmMemory.buffer, stringPointer, bytes.length).set(bytes);
+      const view = new DataView(wasmMemory.buffer);
+      view.setUint32(outPtr, bytes.length === 0 ? 0 : stringPointer, true);
+      view.setUint32(outPtr + 4, bytes.length, true);
+      view.setUint32(outPtr + 8, bytes.length, true);
+      return 0;
+    },
+    boltffi_free_string: (ptr: number) => {
+      freedStrings.push(ptr);
+    },
   };
 
   const instance = { exports } as unknown as WebAssembly.Instance;
   const asyncManager = new AsyncFutureManager();
-  return { module: new BoltFFIModule(instance, asyncManager), freedAllocations };
+  return {
+    module: new BoltFFIModule(instance, asyncManager),
+    freedAllocations,
+    lastErrorMessageSawAtOutPtr,
+    freedStrings,
+    get nextLastErrorMessage(): string {
+      return harnessState.nextLastErrorMessage;
+    },
+    set nextLastErrorMessage(value: string) {
+      harnessState.nextLastErrorMessage = value;
+    },
+  };
 }
 
 describe("WireReader and WireWriter", () => {
@@ -357,6 +399,33 @@ describe("BoltFFIModule memory operations", () => {
     const reusedWriter = module.allocWriter(8);
     expect(reusedWriter.ptr).toBe(pointer);
     expect(reusedWriter.len).toBe(0);
+  });
+
+  it("takeLastErrorMessage zeroes uninitialized scratch memory before reading the native write", () => {
+    // boltffi_wasm_alloc returns uninitialized memory in the real wasm build.
+    // boltffi_last_error_message writes its result via `*out =
+    // FfiString::from(message)`, which drops whatever FfiString was already at
+    // `out` first — non-zero garbage there reads as a bogus non-null
+    // pointer/capacity and crashes the real allocator (confirmed against a real
+    // compiled demo.wasm). Poison the slot the same way uninitialized memory
+    // would look, and prove takeLastErrorMessage zeroes it before the native
+    // call — this is the regression the real end-to-end run caught.
+    const harness = createHarness();
+    const { module, freedAllocations, freedStrings, lastErrorMessageSawAtOutPtr } = harness;
+    harness.nextLastErrorMessage = "boom";
+    module.writeToMemory(256, new Uint8Array(12).fill(0xff));
+
+    const message = module.takeLastErrorMessage();
+
+    expect(message).toBe("boom");
+    expect(lastErrorMessageSawAtOutPtr).toEqual(new Array(12).fill(0));
+    expect(freedStrings).toEqual([256]);
+    expect(freedAllocations).toContainEqual([256, 12]);
+  });
+
+  it("takeLastErrorMessage returns an empty string when no error was set", () => {
+    const { module } = createHarness();
+    expect(module.takeLastErrorMessage()).toBe("");
   });
 });
 

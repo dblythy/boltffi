@@ -21,3 +21,20 @@ export {
   BoltFFICancelledError,
   WasmPollStatus,
 } from "./module.js";
+export {
+  NativeAsyncFutureManager,
+  NativeContinuationSignal,
+  NativeFfiStatus,
+  NativeBoltFFIModule,
+  instantiateBoltFFINative,
+  allocNativeStatusBuffer,
+  readNativeStatusCode,
+} from "./native.js";
+export type {
+  NativeHandle,
+  NativeTrampolineFactory,
+  NativePollFn,
+  NativeStringAlloc,
+  NativePrimitiveBufferAlloc,
+} from "./native.js";
+export { NativeMemoryArena, RETURN_SLOT_SIZE } from "./native_arena.js";

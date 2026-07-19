@@ -320,6 +320,18 @@ export class BoltFFIModule {
     return this._cachedF64;
   }
 
+  /** Backend-agnostic scratch alloc/free, used by generated struct-return-slot routes instead of
+   * calling `exports.boltffi_wasm_alloc`/`_free` directly by name — the native backend has no
+   * such exports (see `NativeBoltFFIModule.allocScratch`), so codegen calls these instead of
+   * reaching through `.exports` for a wasm-specific symbol. */
+  allocScratch(size: number): number {
+    return this.exports.boltffi_wasm_alloc(size);
+  }
+
+  freeScratch(ptr: number, size: number): void {
+    this.exports.boltffi_wasm_free(ptr, size);
+  }
+
   allocString(value: string): StringAlloc {
     const encoded = this._encoder.encode(value);
     const ptr = this.exports.boltffi_wasm_alloc(encoded.length);
