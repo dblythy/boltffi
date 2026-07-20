@@ -87,6 +87,188 @@ describe("NativeMemoryArena", () => {
     const reused = arena.alloc(8);
     expect(reused % 8).toBe(0);
   });
+
+  // Second adversarial round, finding 2 (HIGH): pinning the arena's backing buffer for a call's
+  // duration (runtime/cpp's `boltffi_generic_host_object.cpp`) preserves the buffer's LIFETIME,
+  // not the COHERENCE of a write through an out-param pointer computed before a reentrant grow --
+  // concretely, `subscribe_with_listener(..., int32_t* return_out)` synchronously invokes
+  // `transport.send` (parse-core-rs's `livequery.rs`), which can allocate JS-side and grow this
+  // arena, replacing the buffer BEFORE Rust writes the request id through the pointer it was
+  // already handed (into the OLD buffer) -- JS then reads the offset out of the NEW buffer and
+  // sees garbage, not the value Rust wrote. `beginCall`/`endCall` close that gap by making
+  // `grow()` refuse to run at all while ANY call is in flight, so a reentrant allocation that
+  // would need more room fails LOUDLY instead of silently corrupting an in-flight call's already-
+  // translated addresses. The call-boundary marking itself belongs at the native-call dispatch
+  // site (native.ts's `NativeBoltFFIModule`/`NativeAsyncFutureManager`, wired below in this same
+  // file's "call-in-flight growth guard wiring" suite; the equivalent point in the C++ HostObject
+  // deliberately has no mirror, see that class's header doc) -- this describe block proves the
+  // enforced PRIMITIVE in isolation.
+  describe("NativeMemoryArena: call-in-flight growth guard (reentrant-growth coherence)", () => {
+    it("refuses to grow while a call is marked in-flight, instead of silently reallocating", () => {
+      const arena = new NativeMemoryArena(32);
+      arena.beginCall();
+      try {
+        expect(() => arena.alloc(1024)).toThrow(/in flight/i);
+      } finally {
+        arena.endCall();
+      }
+    });
+
+    it("an alloc that fits within existing capacity still succeeds during an active call -- only GROWTH is forbidden", () => {
+      const arena = new NativeMemoryArena(4096);
+      arena.beginCall();
+      try {
+        expect(arena.alloc(8)).toBeGreaterThanOrEqual(0);
+      } finally {
+        arena.endCall();
+      }
+    });
+
+    it("allows growth again once the call has ended", () => {
+      const arena = new NativeMemoryArena(32);
+      arena.beginCall();
+      arena.endCall();
+      expect(() => arena.alloc(1024)).not.toThrow();
+    });
+
+    it("nests correctly: growth stays forbidden until the OUTERMOST call ends (a reentrant call nested inside an outer one must not re-enable growth early)", () => {
+      const arena = new NativeMemoryArena(32);
+      arena.beginCall(); // outer call begins
+      arena.beginCall(); // a reentrant call nested inside it begins
+      arena.endCall(); // the reentrant call returns
+      expect(() => arena.alloc(1024)).toThrow(/in flight/i); // outer call is still active
+      arena.endCall(); // outer call returns
+      expect(() => arena.alloc(1024)).not.toThrow();
+    });
+
+    it("endCall() without a matching beginCall() throws loudly rather than going silently negative", () => {
+      const arena = new NativeMemoryArena(32);
+      expect(() => arena.endCall()).toThrow();
+    });
+  });
+
+  // Wiring the primitive above around the actual native-call dispatch sites (native.ts):
+  // `NativeAsyncFutureManager.dispatchPoll` (initial poll registration + every MaybeReady re-poll),
+  // `NativeBoltFFIModule.completeAsync`, and `takeLastErrorMessage`'s two calls. These tests prove
+  // the wiring actually catches the concrete scenario the second adversarial round's finding 2
+  // named: an out-param native call whose OWN synchronous host-callback reenters JS and allocates
+  // enough to force growth mid-call (`subscribe_with_listener`'s `transport.send` is the real
+  // example; these tests reproduce the shape generically since this suite has no real dylib).
+  describe("NativeBoltFFIModule/NativeAsyncFutureManager: call-in-flight growth guard wiring", () => {
+    it("regression: completeAsync brackets its native dispatch -- a reentrant callback that forces arena growth mid-call (the out-param call + reentrant allocating callback scenario) throws loudly instead of silently corrupting the pending status write", () => {
+      const arena = new NativeMemoryArena(32);
+      const module_ = new NativeBoltFFIModule({}, () => ({}), arena);
+      expect(() =>
+        module_.completeAsync((statusPtr) => {
+          void statusPtr;
+          // Mirrors a synchronous host callback (e.g. LiveQueryTransport::send) reentering JS and
+          // allocating enough to force a grow while `complete`'s own out-param write is pending.
+          arena.alloc(1024);
+          return undefined;
+        })
+      ).toThrow(/in flight/i);
+    });
+
+    it("regression: takeLastErrorMessage brackets both of its native dispatches -- a reentrant allocating host callback forcing growth while the ptr/len out-param write is pending throws loudly", () => {
+      const arena = new NativeMemoryArena(32);
+      const exports = {
+        boltffi_last_error_message: (outPtr: number) => {
+          void outPtr;
+          arena.alloc(1024); // reentrant growth attempt mid-call, before the out-param is written
+        },
+        boltffi_free_string: () => {},
+      };
+      const module_ = new NativeBoltFFIModule(exports, () => ({}), arena);
+      expect(() => module_.takeLastErrorMessage()).toThrow(/in flight/i);
+    });
+
+    it("regression: pollAsyncNative brackets its initial poll dispatch -- a reentrant allocating callback forcing growth mid-registration rejects the returned promise loudly rather than corrupting it", async () => {
+      const arena = new NativeMemoryArena(32);
+      const module_ = new NativeBoltFFIModule({}, () => ({}), arena);
+      const poll = () => {
+        arena.alloc(1024); // a synchronous host callback the registration call triggers
+      };
+      await expect(module_.asyncManager.pollAsyncNative(1n, poll)).rejects.toThrow(/in flight/i);
+    });
+
+    it("nested native dispatches (e.g. a synchronous host callback that itself registers another async poll before the outer call returns) keep growth forbidden until the OUTERMOST call ends", () => {
+      const arena = new NativeMemoryArena(32); // small on purpose: 1024 bytes always needs a grow
+      const module_ = new NativeBoltFFIModule({}, () => ({}), arena);
+      let innerRan = false;
+
+      const outerResult = module_.completeAsync((statusPtr) => {
+        void statusPtr;
+        // A reentrant nested dispatch through a DIFFERENT native.ts funnel -- the Promise
+        // executor (and thus `poll`) runs synchronously, so this proves nesting across funnels,
+        // not just within one.
+        void module_.asyncManager.pollAsyncNative(2n, () => {
+          innerRan = true;
+          expect(() => arena.alloc(1024)).toThrow(/in flight/i); // still forbidden: outer call active
+        });
+        return 42;
+      });
+
+      expect(innerRan).toBe(true);
+      expect(outerResult).toBe(42);
+      expect(() => arena.alloc(1024)).not.toThrow(); // legal again: both calls have returned
+    });
+
+    it("growth between an async poll's initial dispatch and its later completion (the await gap) is legal -- only the synchronous native-call window itself is protected", async () => {
+      const arena = new NativeMemoryArena(32);
+      let onSignal: ((callbackData: bigint, signal: NativeContinuationSignal) => void) | null = null;
+      const manager = new NativeAsyncFutureManager<null>((signal) => {
+        onSignal = signal;
+        return null;
+      }, arena);
+
+      const poll = () => {
+        // Registration only -- no growth attempted inside the call itself.
+      };
+      const promise = manager.pollAsyncNative(1n, poll);
+
+      // We're now in the await gap: the synchronous dispatch already returned, nothing is
+      // in flight, so growth here must be allowed.
+      expect(() => arena.alloc(1024)).not.toThrow();
+
+      onSignal!(1n, NativeContinuationSignal.Ready);
+      await expect(promise).resolves.toBe(1n);
+    });
+
+    it("regression: beginCall/endCall stay balanced across repeated queued MaybeReady re-polls -- each re-poll gets its OWN bracket, never one held open across the microtask hop (no depth leak, no cross-poll nesting)", async () => {
+      let onSignal: ((callbackData: bigint, signal: NativeContinuationSignal) => void) | null = null;
+      let depth = 0;
+      let maxDepthSeen = 0;
+      const callMarks = {
+        beginCall: () => {
+          depth += 1;
+          maxDepthSeen = Math.max(maxDepthSeen, depth);
+        },
+        endCall: () => {
+          depth -= 1;
+        },
+      };
+      const manager = new NativeAsyncFutureManager<null>((signal) => {
+        onSignal = signal;
+        return null;
+      }, callMarks);
+
+      const TOTAL_ITERATIONS = 1000;
+      let pollCount = 0;
+      const poll = (_handle: bigint, callbackData: bigint) => {
+        pollCount += 1;
+        if (pollCount >= TOTAL_ITERATIONS) {
+          onSignal!(callbackData, NativeContinuationSignal.Ready);
+        } else {
+          onSignal!(callbackData, NativeContinuationSignal.MaybeReady);
+        }
+      };
+
+      const result = await manager.pollAsyncNative(1n, poll);
+      expect(result).toBe(1n);
+      expect(depth).toBe(0);
+      expect(maxDepthSeen).toBe(1);
+    });
+  });
 });
 
 describe("NativeBoltFFIModule: string/bytes/primitive-array params", () => {
