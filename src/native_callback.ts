@@ -112,6 +112,52 @@ export function bootstrapCallbackVTable<Ptr>(
 }
 
 /**
+ * Reads `len` bytes starting at the RAW native address `ptr` -- NOT an offset into
+ * `NativeMemoryArena` (see `native_arena.ts`'s own doc: every arena offset is relative to a
+ * JS-owned buffer shared with the host, but a callback-vtable slot's incoming buffer parameter is
+ * a genuine process address `transfer_deferred_callback_bytes`/a Rust-stack-scoped borrow handed
+ * straight to the vtable's C function pointer -- unrelated to the arena's own address space).
+ * Reading arbitrary native memory by real address is an inherently host-specific capability (Bun's
+ * `toArrayBuffer(ptr, ...)`; a JSI adapter's own `memcpy` off a raw pointer JS passed through as a
+ * `bigint`) -- this file owns no mechanism of its own, matching `NativeCallbackTokenFactory`'s own
+ * "the host's job" discipline.
+ */
+export type NativeCallbackByteReader = (ptr: bigint, len: bigint) => Uint8Array;
+
+/**
+ * Wraps a RAW incoming native function pointer (`ptr`, matching `shape`) as a JS-callable
+ * function -- the inverse of `NativeCallbackTokenFactory` (which turns a JS closure INTO a native
+ * pointer). Needed for the async-completion half of the callback-vtable contract: a deferred
+ * dispatch slot (`AbiCallbackMethod::is_deferred_dispatch`) receives its own completion callback
+ * as a trailing `(fnPtr, userdata)` pair PASSED IN BY THE CALLER (Rust) on every invocation --
+ * there is no separately named `_complete` export to call later, unlike a class's own async
+ * method (`native.ts`'s `NativeAsyncFutureManager`/`completeAsync`, which poll/complete through
+ * fixed, per-method exports instead). Bun's `bun:ffi` `CFunction` is the concrete mechanism a Bun
+ * host supplies; a JSI adapter would resolve the raw pointer against its own generic invocation
+ * helper (`runtime/cpp/include/boltffi/generic_invoke.h`).
+ */
+export type NativeForeignFunctionWrapper = (
+  ptr: bigint,
+  shape: NativeCallbackShape
+) => (...args: readonly bigint[]) => bigint | void;
+
+/**
+ * Everything native-mode callback-vtable codegen (`callback.txt`'s `native_async` branch) needs
+ * from the host beyond the continuation-trampoline factory `native.ts` already threads through --
+ * bundled into one object so `instantiateBoltFFINative`'s signature grows by exactly one
+ * (optional) parameter regardless of how many callback traits a given module declares. Every field
+ * is a HOST capability (see each type's own doc) -- this module supplies only the
+ * backend-agnostic bookkeeping (`bootstrapCallbackVTable`, `NativeCallbackTraitRegistry`) built on
+ * top of them.
+ */
+export interface NativeCallbackHostAdapter<Ptr = unknown> {
+  readonly createToken: NativeCallbackTokenFactory<Ptr>;
+  readonly writeVTableBytes: (fieldPtrs: readonly bigint[]) => Ptr;
+  readonly readForeignBytes: NativeCallbackByteReader;
+  readonly wrapForeignFunction: NativeForeignFunctionWrapper;
+}
+
+/**
  * Per-trait instance registry -- mirrors `callback.txt`'s wasm-mode `_{{trait}}_registry`/
  * `_{{trait}}_ref_counts` Maps exactly (same id-allocation/ref-counting semantics: the FIRST
  * `register()` call for a given impl mints a fresh id with ref count 1; every further reference

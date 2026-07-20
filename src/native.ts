@@ -37,6 +37,7 @@ import type { WasmWireWriterAllocator } from "./wire.js";
 import { BoltFFICancelledError } from "./module.js";
 import type { PrimitiveBufferElementType } from "./module.js";
 import { NativeMemoryArena } from "./native_arena.js";
+import type { NativeCallbackHostAdapter } from "./native_callback.js";
 
 /**
  * Matches `boltffi_core::runtime::future::RustFuturePoll` (`extern "C" fn(u64, i8)`) — the ONLY
@@ -284,18 +285,61 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
   private readonly arena: NativeMemoryArena;
   private readonly encoder = new TextEncoder();
   private readonly decoder = new TextDecoder("utf-8");
+  private readonly hostCallbackAdapter?: NativeCallbackHostAdapter<Token>;
 
   constructor(
     exports: Exports,
     createContinuationTrampoline: NativeTrampolineFactory<Token>,
-    arena: NativeMemoryArena = new NativeMemoryArena()
+    arena: NativeMemoryArena = new NativeMemoryArena(),
+    callbackHost?: NativeCallbackHostAdapter<Token>
   ) {
     this.exports = exports;
     this.arena = arena;
+    this.hostCallbackAdapter = callbackHost;
     // `arena` itself satisfies `NativeCallMarks` (it has its own `beginCall`/`endCall`) -- every
     // poll dispatch the async manager makes shares THIS instance's own call-in-flight growth guard.
     this.asyncManager = new NativeAsyncFutureManager<Token>(createContinuationTrampoline, arena);
     this.bindArenaToHost();
+  }
+
+  /**
+   * The host-supplied callback-vtable bridge (`native_callback.ts`'s `NativeCallbackHostAdapter`)
+   * every `native_async` callback-trait's generated registration/dispatch code reads through --
+   * throws loudly rather than returning `undefined` silently, matching this file's own
+   * "throw rather than skip" discipline (`takeLastErrorMessage`'s missing-export branch is the ONE
+   * deliberate exception, because a last-error string is optional; a callback trait a consumer
+   * actually registers is not).
+   */
+  get callbackHost(): NativeCallbackHostAdapter<Token> {
+    if (!this.hostCallbackAdapter) {
+      throw new Error(
+        "boltffi: no NativeCallbackHostAdapter was supplied to instantiateBoltFFINative -- a " +
+          "callback trait cannot be registered without one (see native_callback.ts's own doc)."
+      );
+    }
+    return this.hostCallbackAdapter;
+  }
+
+  /**
+   * Frees a deferred callback-vtable parameter buffer via the real, always-exported
+   * `boltffi_free_deferred_callback_bytes` (`boltffi_core::callback::deferred_buffer` -- the SAME
+   * symbol `runtime/cpp`'s `generic_callback.h` dlsyms for its own JSI-independent trampolines).
+   * Unlike `readForeignBytes`/`wrapForeignFunction` (genuinely host-specific mechanisms), this is a
+   * real crate export reachable through `exports` like any other -- no host adapter needed, mirrors
+   * `takeLastErrorMessage`'s own "cross into a real named export directly" precedent. Only a
+   * DEFERRED callback slot's encoded parameter (`AbiCallbackMethod::is_deferred_dispatch`) is ever
+   * freed this way -- a non-deferred sync slot's buffer is Rust-stack-scoped and freeing it here
+   * would double-free once the caller's own stack frame unwinds.
+   */
+  freeDeferredCallbackBytes(ptr: bigint, len: bigint): void {
+    const exportsRecord = this.exports as Record<string, unknown>;
+    const freeFn = exportsRecord["boltffi_free_deferred_callback_bytes"] as
+      | ((ptr: bigint, len: bigint) => void)
+      | undefined;
+    if (!freeFn) {
+      throw new Error("boltffi: boltffi_free_deferred_callback_bytes export not found");
+    }
+    freeFn(ptr, len);
   }
 
   /**
@@ -1031,7 +1075,13 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
 
 export function instantiateBoltFFINative<Exports, Token = unknown>(
   exports: Exports,
-  createContinuationTrampoline: NativeTrampolineFactory<Token>
+  createContinuationTrampoline: NativeTrampolineFactory<Token>,
+  callbackHost?: NativeCallbackHostAdapter<Token>
 ): NativeBoltFFIModule<Exports, Token> {
-  return new NativeBoltFFIModule<Exports, Token>(exports, createContinuationTrampoline);
+  return new NativeBoltFFIModule<Exports, Token>(
+    exports,
+    createContinuationTrampoline,
+    new NativeMemoryArena(),
+    callbackHost
+  );
 }
