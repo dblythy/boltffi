@@ -1197,6 +1197,7 @@ mod tests {
             .insert_callback(callback_trait("Listener", "on_event"));
         ffi.catalog.insert_class(ClassDef {
             id: ClassId::new("Widget"),
+            qualified_path: String::new(),
             constructors: vec![ConstructorDef::Default {
                 params: vec![ParamDef {
                     name: ParamName::new("listener"),
