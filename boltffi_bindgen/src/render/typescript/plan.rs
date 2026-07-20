@@ -242,11 +242,9 @@ pub struct TsCallback {
     pub create_handle_fn: String,
     /// The native-only "foreign vtable" registration export (`boltffi_register_callback_*` under
     /// `NamingStyle::Experimental`, its short-name counterpart otherwise) — sourced from the IR
-    /// layer's `AbiCallbackInvocation::register_fn`. Not yet consumed by any template (native-mode
-    /// registration codegen — actually EMITTING a call to this export, via
-    /// `@boltffi/runtime`'s `native_callback.ts` primitives — is tracked as the concrete next step;
-    /// see that module's own doc and `runtime/typescript/test/native.bun.test.ts`'s real-dylib
-    /// proof of the mechanism this field's consumer will drive).
+    /// layer's `AbiCallbackInvocation::register_fn`. Consumed by `callback.txt`'s `native_async`
+    /// branch (`native_vtable_slots` below) via `bootstrapCallbackVTable` — see that function's own
+    /// doc and `runtime/typescript/test/native.bun.test.ts`'s real-dylib proof of the mechanism.
     pub register_fn: String,
     pub local_free_fn: String,
     pub wrap_handle_fn: String,
@@ -255,6 +253,36 @@ pub struct TsCallback {
     pub async_methods: Vec<TsAsyncCallbackMethod>,
     pub closure_fn_type: Option<String>,
     pub doc: Option<String>,
+    /// Mirrors `TsModule::native_async` — selects `callback.txt`'s native-mode registration +
+    /// host-invokable receipt-direction branch (vtable bootstrap via `bootstrapCallbackVTable`,
+    /// per-slot dispatch closures) over the wasm-only `_callbackImports` wiring. Per-trait (not
+    /// just module-level) so template code can gate cleanly without threading the module flag
+    /// through every helper.
+    pub native_async: bool,
+    /// One entry per real vtable field, in the EXACT order the native ABI declares them (`free`,
+    /// `clone`, then each trait method in `AbiCallbackInvocation::methods` order — mirrors
+    /// `runtime/cpp/include/boltffi/generic_callback.h`'s own "binary-identical to the real
+    /// struct layout" contract). Empty when `native_async` is false. Each slot's `invoke_expr` is a
+    /// fully-rendered JS closure literal built from the SAME decode/encode facts `methods`/
+    /// `async_methods` above already carry — precomputed here (not re-derived in the template)
+    /// because the two universal slots (`free`/`clone`) have no `TsCallbackMethod` counterpart at
+    /// all, and interleaving sync/async slots in real ABI order isn't expressible as two separate
+    /// `{% for %}` loops over `methods`/`async_methods`.
+    pub native_vtable_slots: Vec<TsNativeVTableSlot>,
+}
+
+/// One vtable field's native-mode registration/dispatch code — see `TsCallback::native_vtable_slots`.
+#[derive(Debug, Clone)]
+pub struct TsNativeVTableSlot {
+    /// A unique per-slot identifier (e.g. `free`, `clone`, or the method's snake_case name) used to
+    /// name the generated `const` token/shape variables.
+    pub slot_name: String,
+    /// The JS closure literal (e.g. `(handle: bigint): void => { ... }`) passed to
+    /// `_module.callbackHost.createToken` as its `invoke` argument.
+    pub invoke_expr: String,
+    /// The `NativeCallbackShape` object literal (e.g. `{ args: ["u64"], returns: "void" }`)
+    /// describing this slot's real C signature to the host's token factory.
+    pub shape_literal: String,
 }
 
 #[derive(Debug, Clone)]
@@ -295,7 +323,14 @@ impl TsCallbackMethod {
 #[derive(Debug, Clone)]
 pub enum TsCallbackImportReturn {
     Void,
-    Direct { wasm_type: String },
+    Direct {
+        wasm_type: String,
+        /// The `NativeCallbackScalarType` literal (e.g. `"i32"`) this return value maps onto for
+        /// `native_async` mode's vtable-slot shape description — see `TsCallback::native_vtable_slots`.
+        /// Meaningless in wasm mode (never read there), matching `native_async`'s own field-gating
+        /// convention throughout this module.
+        native_scalar_type: String,
+    },
     Encoded(TsEncodedCallbackReturn),
     PackedUtf8,
 }
@@ -318,6 +353,12 @@ pub enum TsCallbackParamKind {
     Primitive {
         import_ts_type: String,
         call_expr: String,
+        /// The `NativeCallbackScalarType` literal this parameter maps onto for `native_async`
+        /// mode's vtable-slot shape description — see `TsCallback::native_vtable_slots`. Distinct
+        /// from `import_ts_type` (a JS TYPE, `"bigint"`/`"number"`) because a scalar SHAPE
+        /// (`"u64"` vs `"i64"`) still matters to a real host's token factory (Bun's `FFIType`
+        /// distinguishes signedness) even where the JS type the two share is identical.
+        native_scalar_type: String,
     },
     WireEncoded {
         decode_expr: String,

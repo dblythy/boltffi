@@ -1,6 +1,19 @@
 {%- if native_async -%}
-import { WireReader, WireWriter, wireStringSize, instantiateBoltFFINative } from "@boltffi/runtime";
-import type { Duration, WireCodec, NativeBoltFFIModule, NativeTrampolineFactory } from "@boltffi/runtime";
+import {
+  WireReader,
+  WireWriter,
+  wireStringSize,
+  instantiateBoltFFINative,
+  bootstrapCallbackVTable,
+} from "@boltffi/runtime";
+import type {
+  Duration,
+  WireCodec,
+  NativeBoltFFIModule,
+  NativeTrampolineFactory,
+  NativeCallbackHostAdapter,
+  NativeCallbackHostExports,
+} from "@boltffi/runtime";
 
 const _callback_handle_js_namespace_start = 0x80000000;
 const _callback_handle_key = (handle: number): number => handle >>> 0;
@@ -26,9 +39,10 @@ const _callbackImports: Record<string, unknown> = {};
 // (mirrors `instantiateBoltFFINative`'s own two params).
 export default async function init(
   exports: NativeExports,
-  createContinuationTrampoline: NativeTrampolineFactory<unknown>
+  createContinuationTrampoline: NativeTrampolineFactory<unknown>,
+  callbackHost?: NativeCallbackHostAdapter<unknown>
 ): Promise<void> {
-  _module = instantiateBoltFFINative(exports, createContinuationTrampoline);
+  _module = instantiateBoltFFINative(exports, createContinuationTrampoline, callbackHost);
   _exports = _module.exports;
 }
 {%- else -%}

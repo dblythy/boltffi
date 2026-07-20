@@ -1199,6 +1199,7 @@ mod tests {
                     kind: TsCallbackParamKind::Primitive {
                         import_ts_type: "number".to_string(),
                         call_expr: "value".to_string(),
+                        native_scalar_type: "u32".to_string(),
                     },
                 }],
                 proxy_params: vec![TsParam {
@@ -1209,6 +1210,7 @@ mod tests {
                 return_type: Some("number".to_string()),
                 import_return: TsCallbackImportReturn::Direct {
                     wasm_type: "number".to_string(),
+                    native_scalar_type: "u32".to_string(),
                 },
                 proxy_return_route: TsOutputRoute::direct(String::new()),
                 doc: None,
@@ -1216,6 +1218,8 @@ mod tests {
             async_methods: vec![],
             closure_fn_type: None,
             doc: None,
+            native_async: false,
+            native_vtable_slots: vec![],
         }
     }
 
@@ -1239,6 +1243,7 @@ mod tests {
                     kind: TsCallbackParamKind::Primitive {
                         import_ts_type: "number".to_string(),
                         call_expr: "key".to_string(),
+                        native_scalar_type: "u32".to_string(),
                     },
                 }],
                 return_type: Some("number".to_string()),
@@ -1251,6 +1256,8 @@ mod tests {
             }],
             closure_fn_type: None,
             doc: None,
+            native_async: false,
+            native_vtable_slots: vec![],
         }
     }
 
@@ -1311,6 +1318,262 @@ mod tests {
         assert!(rendered.contains("impl = _async_fetcher_lookup(handle);"));
         assert!(rendered.contains("completeError(err);"));
         assert!(rendered.contains("return;"));
+    }
+
+    #[test]
+    fn native_async_false_keeps_wasm_callback_output_free_of_any_native_only_token() {
+        // wasm byte-identity guard: none of the native-mode registration/receipt machinery this
+        // session added may leak into wasm output just because the struct fields now exist.
+        for callback in [sync_callback_fixture(), async_callback_fixture()] {
+            assert!(!callback.native_async);
+            assert!(callback.native_vtable_slots.is_empty());
+            let rendered = CallbackTemplate {
+                callback: &callback,
+            }
+            .render()
+            .unwrap();
+            for needle in [
+                "createToken",
+                "bootstrapCallbackVTable",
+                "callbackHost",
+                "__bootstrap",
+                "readForeignBytes",
+                "freeDeferredCallbackBytes",
+                "wrapForeignFunction",
+            ] {
+                assert!(
+                    !rendered.contains(needle),
+                    "wasm output must never contain '{needle}', found in:\n{rendered}"
+                );
+            }
+        }
+    }
+
+    fn native_sync_callback_fixture() -> TsCallback {
+        let mut callback = sync_callback_fixture();
+        callback.native_async = true;
+        callback.native_vtable_slots = vec![
+            TsNativeVTableSlot {
+                slot_name: "free".to_string(),
+                invoke_expr: "(handle: bigint): void => { _value_handler_release(handle); }".to_string(),
+                shape_literal: r#"{ args: ["u64"], returns: "void" }"#.to_string(),
+            },
+            TsNativeVTableSlot {
+                slot_name: "clone".to_string(),
+                invoke_expr: "(handle: bigint): bigint => _value_handler_retain(handle)".to_string(),
+                shape_literal: r#"{ args: ["u64"], returns: "u64" }"#.to_string(),
+            },
+            TsNativeVTableSlot {
+                slot_name: "on_value".to_string(),
+                invoke_expr: "(handle: bigint, value: number): number => {\n    const impl = _value_handler_lookup(handle);\n    return impl.onValue(value);\n  }".to_string(),
+                shape_literal: r#"{ args: ["u64", "u32"], returns: "u32" }"#.to_string(),
+            },
+        ];
+        callback
+    }
+
+    #[test]
+    fn native_async_callback_registration_bootstraps_the_vtable_before_minting_a_handle() {
+        let callback = native_sync_callback_fixture();
+        let rendered = CallbackTemplate {
+            callback: &callback,
+        }
+        .render()
+        .unwrap();
+
+        // register{{Interface}} calls the bootstrap function before minting a fresh id -- the
+        // registration direction (create_handle_fn) must never run against an unregistered
+        // process-wide vtable.
+        let register_fn_pos = rendered.find("export function registerValueHandler").unwrap();
+        let bootstrap_call_pos = rendered.find("__bootstrapValueHandlerVTable();").unwrap();
+        let next_id_pos = rendered.find("_value_handler_next_id++;").unwrap();
+        assert!(register_fn_pos < bootstrap_call_pos);
+        assert!(bootstrap_call_pos < next_id_pos);
+
+        // The bootstrap function registers through bootstrapCallbackVTable with the real
+        // per-trait register export, echoing every slot token's pointer in order. Token creation
+        // (which touches `_module`) is lazy, inside the function body -- never at module-eval
+        // time, before `init()` has assigned `_module` -- and guarded so a SECOND `register...`
+        // call for another instance doesn't re-mint a fresh token per slot.
+        assert!(rendered.contains("function __bootstrapValueHandlerVTable(): void {"));
+        assert!(rendered.contains(
+            "if (__boltffi_native_vtable_field_ptrs_value_handler === null) {"
+        ));
+        assert!(rendered.contains("\"boltffi_register_value_handler_vtable\","));
+        assert!(rendered.contains(
+            "__boltffi_native_vtable_field_ptrs_value_handler = [BigInt(__boltffi_native_tok_value_handler_free.ptr as unknown as number), \
+BigInt(__boltffi_native_tok_value_handler_clone.ptr as unknown as number), \
+BigInt(__boltffi_native_tok_value_handler_on_value.ptr as unknown as number)];"
+        ));
+        assert!(rendered.contains("_module.callbackHost.writeVTableBytes"));
+
+        // Every slot builds its token through the host's createToken, never the wasm-only
+        // `_callbackImports` bag -- and never at the top of the module (outside any function),
+        // which would run before `_module` exists.
+        assert!(rendered.contains(
+            "const __boltffi_native_tok_value_handler_on_value = _module.callbackHost.createToken("
+        ));
+        assert!(!rendered.contains("_callbackImports[\"__boltffi_callback_value_handler_free\"]"));
+        assert!(!rendered.contains("_callbackImports[\"__boltffi_callback_value_handler_on_value\"]"));
+
+        // Regression guard for the load-bearing bug this session's harness run caught: no
+        // top-level (module-scope) statement may reference `_module` outside a function body --
+        // every generated line touching `_module` must be indented (inside register{{Interface}}
+        // or the bootstrap function), never a bare `const x = _module...` at column 0.
+        for line in rendered.lines() {
+            if line.starts_with("const ") && line.contains("_module.") {
+                panic!("found a top-level (module-eval-time) reference to `_module`: {line}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_sync_method_slot_decodes_wire_params_and_frees_deferred_bytes_only_when_void() {
+        // A Void-returning sync method's buffer param IS deferred (Rust transfers ownership) --
+        // must free after decode. A Direct-returning sync method's buffer param is NOT deferred
+        // (Rust-stack-scoped, borrowed for the call only) -- must NOT free (a free there would
+        // double-free once the caller's stack frame unwinds).
+        let void_method = TsCallbackMethod {
+            ts_name: "onEvent".to_string(),
+            import_name: "__boltffi_callback_x_on_event".to_string(),
+            proxy_export_name: "__boltffi_local_x_on_event".to_string(),
+            params: vec![TsCallbackParam {
+                name: "payload".to_string(),
+                ts_type: "Uint8Array".to_string(),
+                kind: TsCallbackParamKind::WireEncoded {
+                    decode_expr: "reader.readBytes()".to_string(),
+                },
+            }],
+            proxy_params: vec![],
+            return_type: None,
+            import_return: TsCallbackImportReturn::Void,
+            proxy_return_route: TsOutputRoute::void(),
+            doc: None,
+        };
+        let slot = super::super::lower::native_sync_method_vtable_slot(
+            "x", &None, &void_method,
+        );
+        assert!(slot
+            .invoke_expr
+            .contains("_module.callbackHost.readForeignBytes(payload_ptr, payload_len)"));
+        assert!(slot
+            .invoke_expr
+            .contains("_module.freeDeferredCallbackBytes(payload_ptr, payload_len);"));
+        assert_eq!(slot.shape_literal, r#"{ args: ["u64", "ptr", "u64"], returns: "void" }"#);
+
+        let mut direct_method = void_method;
+        direct_method.return_type = Some("number".to_string());
+        direct_method.import_return = TsCallbackImportReturn::Direct {
+            wasm_type: "number".to_string(),
+            native_scalar_type: "u32".to_string(),
+        };
+        let direct_slot = super::super::lower::native_sync_method_vtable_slot(
+            "x", &None, &direct_method,
+        );
+        assert!(direct_slot
+            .invoke_expr
+            .contains("_module.callbackHost.readForeignBytes(payload_ptr, payload_len)"));
+        assert!(!direct_slot
+            .invoke_expr
+            .contains("freeDeferredCallbackBytes"));
+        assert_eq!(direct_slot.shape_literal, r#"{ args: ["u64", "ptr", "u64"], returns: "u32" }"#);
+    }
+
+    fn native_async_callback_fixture() -> TsCallback {
+        let mut callback = async_callback_fixture();
+        callback.native_async = true;
+        callback.native_vtable_slots = vec![
+            TsNativeVTableSlot {
+                slot_name: "free".to_string(),
+                invoke_expr: "(handle: bigint): void => { _async_fetcher_release(handle); }".to_string(),
+                shape_literal: r#"{ args: ["u64"], returns: "void" }"#.to_string(),
+            },
+            TsNativeVTableSlot {
+                slot_name: "clone".to_string(),
+                invoke_expr: "(handle: bigint): bigint => _async_fetcher_retain(handle)".to_string(),
+                shape_literal: r#"{ args: ["u64"], returns: "u64" }"#.to_string(),
+            },
+        ];
+        callback
+    }
+
+    #[test]
+    fn native_async_callback_completion_routes_through_the_vtable_pointer_not_a_named_export() {
+        let callback = native_async_callback_fixture();
+        let rendered = CallbackTemplate {
+            callback: &callback,
+        }
+        .render()
+        .unwrap();
+
+        // The dead wasm-only `_complete` export must never be referenced in native mode.
+        assert!(!rendered.contains("boltffi_callback_async_fetcher_fetch_complete"));
+        assert!(!rendered.contains("_callbackImports[\"__boltffi_callback_async_fetcher_fetch_start\"]"));
+    }
+
+    #[test]
+    fn native_async_method_slot_wire_result_completes_via_wrapped_foreign_function_pointer() {
+        let method = TsAsyncCallbackMethod {
+            ts_name: "get".to_string(),
+            start_import_name: "__boltffi_callback_async_kv_get_start".to_string(),
+            complete_export_name: "boltffi_callback_async_kv_get_complete".to_string(),
+            params: vec![],
+            return_type: Some("string".to_string()),
+            encode_expr: Some("::boltffi::__private::wire::encode_into(&result, writer)".to_string()),
+            size_expr: Some("32".to_string()),
+            direct_write_method: None,
+            direct_write_value_expr: None,
+            direct_size: None,
+            doc: None,
+        };
+        let slot = super::super::lower::native_async_method_vtable_slot(
+            "async_kv", &None, &method,
+        );
+
+        assert!(slot.invoke_expr.contains("__complete: bigint, __userdata: bigint"));
+        assert!(slot
+            .invoke_expr
+            .contains("_module.callbackHost.wrapForeignFunction(__complete, { args: [\"u64\", \"ptr\", \"u64\", \"i32\"], returns: \"void\" });"));
+        assert!(slot.invoke_expr.contains("complete(__userdata, BigInt(writer.ptr), BigInt(writer.len), 0n);"));
+        assert!(slot.invoke_expr.contains("_module.freeWriter(writer);"));
+        assert!(!slot.invoke_expr.contains("boltffi_callback_async_kv_get_complete"));
+    }
+
+    #[test]
+    fn native_async_method_slot_void_result_completes_with_status_only() {
+        let method = TsAsyncCallbackMethod {
+            ts_name: "set".to_string(),
+            start_import_name: "__boltffi_callback_async_kv_set_start".to_string(),
+            complete_export_name: "boltffi_callback_async_kv_set_complete".to_string(),
+            params: vec![TsCallbackParam {
+                name: "value".to_string(),
+                ts_type: "string".to_string(),
+                kind: TsCallbackParamKind::WireEncoded {
+                    decode_expr: "reader.readString()".to_string(),
+                },
+            }],
+            return_type: None,
+            encode_expr: None,
+            size_expr: None,
+            direct_write_method: None,
+            direct_write_value_expr: None,
+            direct_size: None,
+            doc: None,
+        };
+        let slot = super::super::lower::native_async_method_vtable_slot(
+            "async_kv", &None, &method,
+        );
+
+        // A buffer param on an async slot is ALWAYS deferred (transferred ownership) -- always
+        // free after decode, unconditionally (unlike a sync method's Void-only gating).
+        assert!(slot
+            .invoke_expr
+            .contains("_module.freeDeferredCallbackBytes(value_ptr, value_len);"));
+        assert!(slot.invoke_expr.contains("complete(__userdata, 0n);"));
+        assert_eq!(
+            slot.shape_literal,
+            r#"{ args: ["u64", "ptr", "u64", "ptr", "u64"], returns: "void" }"#
+        );
     }
 
     #[test]

@@ -1011,7 +1011,7 @@ impl<'a> TypeScriptLowerer<'a> {
         let wrap_handle_fn = format!("wrap{}", interface_name);
         let proxy_class_name = format!("{}Proxy", interface_name);
 
-        let methods = def
+        let methods: Vec<TsCallbackMethod> = def
             .methods
             .iter()
             .filter(|method| !method.is_async())
@@ -1101,10 +1101,15 @@ impl<'a> TypeScriptLowerer<'a> {
                             decode_ops: None,
                             ..
                         } => {
-                            let ts_type = ts_abi_type(&AbiType::from(origin.primitive()));
+                            let abi = AbiType::from(origin.primitive());
+                            let ts_type = ts_abi_type(&abi);
                             (
                                 Some(ts_type.clone()),
-                                TsCallbackImportReturn::Direct { wasm_type: ts_type },
+                                TsCallbackImportReturn::Direct {
+                                    wasm_type: ts_type,
+                                    native_scalar_type: native_callback_scalar_type(Some(&abi))
+                                        .to_string(),
+                                },
                             )
                         }
                         ReturnShape { contract, .. }
@@ -1145,16 +1150,22 @@ impl<'a> TypeScriptLowerer<'a> {
                             Some("number".to_string()),
                             TsCallbackImportReturn::Direct {
                                 wasm_type: "number".to_string(),
+                                native_scalar_type: "u64".to_string(),
                             },
                         ),
                         ReturnShape {
                             transport: Some(Transport::Scalar(origin)),
                             ..
                         } => {
-                            let ts_type = ts_abi_type(&AbiType::from(origin.primitive()));
+                            let abi = AbiType::from(origin.primitive());
+                            let ts_type = ts_abi_type(&abi);
                             (
                                 Some(ts_type.clone()),
-                                TsCallbackImportReturn::Direct { wasm_type: ts_type },
+                                TsCallbackImportReturn::Direct {
+                                    wasm_type: ts_type,
+                                    native_scalar_type: native_callback_scalar_type(Some(&abi))
+                                        .to_string(),
+                                },
                             )
                         }
                         _ => (None, TsCallbackImportReturn::Void),
@@ -1188,7 +1199,7 @@ impl<'a> TypeScriptLowerer<'a> {
             })
             .collect();
 
-        let async_methods = def
+        let async_methods: Vec<TsAsyncCallbackMethod> = def
             .methods
             .iter()
             .filter(|method| method.is_async())
@@ -1358,6 +1369,19 @@ impl<'a> TypeScriptLowerer<'a> {
             })
             .flatten();
 
+        let native_async = self.experimental.native_async;
+        let native_vtable_slots = if native_async {
+            native_callback_vtable_slots(
+                &trait_name_snake,
+                &closure_fn_type,
+                &abi_callback,
+                &methods,
+                &async_methods,
+            )
+        } else {
+            Vec::new()
+        };
+
         TsCallback {
             interface_name,
             trait_name_snake,
@@ -1370,6 +1394,8 @@ impl<'a> TypeScriptLowerer<'a> {
             async_methods,
             closure_fn_type,
             doc: def.doc.clone(),
+            native_async,
+            native_vtable_slots,
         }
     }
 
@@ -2145,10 +2171,323 @@ fn callback_primitive_param_kind(
         Some(AbiType::Bool) => format!("{param_name} !== 0"),
         _ => param_name.to_string(),
     };
+    let native_scalar_type = native_callback_scalar_type(abi_type).to_string();
 
     TsCallbackParamKind::Primitive {
         import_ts_type,
         call_expr,
+        native_scalar_type,
+    }
+}
+
+/// Maps an ABI primitive onto `@boltffi/runtime`'s closed `NativeCallbackScalarType` vocabulary
+/// (`native_callback.ts`) -- the register-class shape space `runtime/cpp`'s C++ adapter already
+/// established (every non-float value is ONE general-purpose register regardless of declared
+/// width; `f64` is the only float-class value). Used only by `native_async` mode's vtable-slot
+/// shape descriptions (`TsCallback::native_vtable_slots`) — never read in wasm mode, where every
+/// callback parameter/return crosses as a plain `WebAssembly.ImportValue` instead.
+fn native_callback_scalar_type(abi_type: Option<&AbiType>) -> &'static str {
+    match abi_type {
+        Some(AbiType::I64 | AbiType::ISize) => "i64",
+        Some(AbiType::U64 | AbiType::USize | AbiType::Handle(_) | AbiType::CallbackHandle) => "u64",
+        Some(AbiType::F32 | AbiType::F64) => "f64",
+        Some(AbiType::Bool) => "bool",
+        Some(AbiType::Pointer(_) | AbiType::OwnedBuffer | AbiType::Struct(_)) => "ptr",
+        Some(AbiType::I8 | AbiType::I16 | AbiType::I32) => "i32",
+        Some(AbiType::U8 | AbiType::U16 | AbiType::U32) => "u32",
+        Some(AbiType::Void | AbiType::InlineCallbackFn { .. }) | None => "u32",
+    }
+}
+
+/// Builds `TsCallback::native_vtable_slots` — one entry per real vtable field, in the exact order
+/// `AbiCallbackInvocation::methods` declares them, prefixed by the two universal `free`/`clone`
+/// slots every trait shares (`runtime/cpp/include/boltffi/generic_callback.h`'s own
+/// `genericFree`/`genericClone`). A method not found in either `methods` (sync) or `async_methods`
+/// (its `abi_callback.methods` entry never round-tripped into either list — the same silent-skip
+/// `methods`/`async_methods`'s own `filter_map` calls above already apply) contributes no slot;
+/// this can only under- not over-count, so a caller counting `native_vtable_slots.len()` against a
+/// real vtable's field count would notice.
+fn native_callback_vtable_slots(
+    trait_name_snake: &str,
+    closure_fn_type: &Option<String>,
+    abi_callback: &AbiCallbackInvocation,
+    methods: &[TsCallbackMethod],
+    async_methods: &[TsAsyncCallbackMethod],
+) -> Vec<TsNativeVTableSlot> {
+    let mut slots = Vec::with_capacity(abi_callback.methods.len() + 2);
+
+    // `_{{trait}}_lookup`/`_retain`/`_release` (emitted above, shared with the wasm-mode proxy
+    // class/registry) all key their Maps by a plain JS `number` (`_callback_handle_key`'s own
+    // `handle >>> 0`, which THROWS on a `bigint` -- `>>>` cannot mix operand types). A native
+    // vtable slot's `handle` parameter is a `bigint` (the "u64" scalar convention every slot uses),
+    // so every call site below converts via `Number(handle)` first -- the registry's own ids are
+    // always small (`_callback_handle_js_namespace_start = 0x80000000`-based, an ordinary JS
+    // counter), so this conversion never loses precision.
+    slots.push(TsNativeVTableSlot {
+        slot_name: "free".to_string(),
+        invoke_expr: format!(
+            "(handle: bigint): void => {{ _{trait}_release(Number(handle)); }}",
+            trait = trait_name_snake
+        ),
+        shape_literal: r#"{ args: ["u64"], returns: "void" }"#.to_string(),
+    });
+    slots.push(TsNativeVTableSlot {
+        slot_name: "clone".to_string(),
+        invoke_expr: format!(
+            "(handle: bigint): bigint => {{ _{trait}_retain(Number(handle)); return handle; }}",
+            trait = trait_name_snake
+        ),
+        shape_literal: r#"{ args: ["u64"], returns: "u64" }"#.to_string(),
+    });
+
+    for abi_method in &abi_callback.methods {
+        let ts_name = camel_case(abi_method.id.as_str());
+        if let Some(method) = methods.iter().find(|m| m.ts_name == ts_name) {
+            slots.push(native_sync_method_vtable_slot(
+                trait_name_snake,
+                closure_fn_type,
+                method,
+            ));
+        } else if let Some(method) = async_methods.iter().find(|m| m.ts_name == ts_name) {
+            slots.push(native_async_method_vtable_slot(
+                trait_name_snake,
+                closure_fn_type,
+                method,
+            ));
+        }
+    }
+
+    slots
+}
+
+/// Renders one WireEncoded/Primitive callback parameter's native-mode signature fragment
+/// (`params_sig`), shape entries (`shape_args`), decode statement, deferred-free statement (only
+/// when `free_after_decode` — an incoming buffer's ownership is only ever transferred, per
+/// `AbiCallbackMethod::is_deferred_dispatch`'s doc, on a deferred slot; a non-deferred sync
+/// return's buffer is Rust-stack-scoped and freeing it here would double-free), and call argument.
+struct NativeParamRender {
+    params_sig: String,
+    shape_arg: String,
+    decode_stmt: Option<String>,
+    free_stmt: Option<String>,
+    call_arg: String,
+}
+
+fn render_native_callback_param(param: &TsCallbackParam, free_after_decode: bool) -> NativeParamRender {
+    match &param.kind {
+        TsCallbackParamKind::Primitive {
+            import_ts_type,
+            call_expr,
+            native_scalar_type,
+        } => NativeParamRender {
+            params_sig: format!(", {}: {}", param.name, import_ts_type),
+            shape_arg: format!("\"{}\"", native_scalar_type),
+            decode_stmt: None,
+            free_stmt: None,
+            call_arg: call_expr.clone(),
+        },
+        TsCallbackParamKind::WireEncoded { decode_expr } => {
+            let p = &param.name;
+            let decode_stmt = format!(
+                "const {p} = (() => {{ const reader = new WireReader(_module.callbackHost.readForeignBytes({p}_ptr, {p}_len).buffer as ArrayBuffer); return {decode}; }})();",
+                p = p,
+                decode = decode_expr
+            );
+            let free_stmt = free_after_decode
+                .then(|| format!("_module.freeDeferredCallbackBytes({p}_ptr, {p}_len);", p = p));
+            NativeParamRender {
+                params_sig: format!(", {p}_ptr: bigint, {p}_len: bigint", p = p),
+                shape_arg: "\"ptr\", \"u64\"".to_string(),
+                decode_stmt: Some(decode_stmt),
+                free_stmt,
+                call_arg: p.clone(),
+            }
+        }
+    }
+}
+
+fn native_callback_dispatch_call(
+    closure_fn_type: &Option<String>,
+    ts_name: &str,
+    call_args: &[String],
+) -> String {
+    if closure_fn_type.is_some() {
+        format!("impl({})", call_args.join(", "))
+    } else {
+        format!("impl.{}({})", ts_name, call_args.join(", "))
+    }
+}
+
+pub(crate) fn native_sync_method_vtable_slot(
+    trait_name_snake: &str,
+    closure_fn_type: &Option<String>,
+    method: &TsCallbackMethod,
+) -> TsNativeVTableSlot {
+    let is_deferred = matches!(method.import_return, TsCallbackImportReturn::Void);
+    let mut params_sig = String::from("handle: bigint");
+    let mut shape_args = vec!["\"u64\"".to_string()];
+    let mut decode_stmts = Vec::new();
+    let mut free_stmts = Vec::new();
+    let mut call_args = Vec::new();
+
+    for param in &method.params {
+        let rendered = render_native_callback_param(param, is_deferred);
+        params_sig.push_str(&rendered.params_sig);
+        shape_args.push(rendered.shape_arg);
+        if let Some(decode) = rendered.decode_stmt {
+            decode_stmts.push(decode);
+        }
+        if let Some(free) = rendered.free_stmt {
+            free_stmts.push(free);
+        }
+        call_args.push(rendered.call_arg);
+    }
+
+    let call_expr = native_callback_dispatch_call(closure_fn_type, &method.ts_name, &call_args);
+    let lookup = format!("_{}_lookup(Number(handle))", trait_name_snake);
+    let mut body_stmts = vec![format!("const impl = {};", lookup)];
+    body_stmts.extend(decode_stmts);
+    body_stmts.extend(free_stmts);
+
+    let (returns_shape, invoke_expr) = match &method.import_return {
+        TsCallbackImportReturn::Void => {
+            body_stmts.push(format!("{};", call_expr));
+            (
+                "\"void\"".to_string(),
+                format!("({}): void => {{\n    {}\n  }}", params_sig, body_stmts.join("\n    ")),
+            )
+        }
+        TsCallbackImportReturn::Direct {
+            native_scalar_type, ..
+        } => {
+            body_stmts.push(format!("return {};", call_expr));
+            (
+                format!("\"{}\"", native_scalar_type),
+                format!("({}) => {{\n    {}\n  }}", params_sig, body_stmts.join("\n    ")),
+            )
+        }
+        TsCallbackImportReturn::Encoded(_) | TsCallbackImportReturn::PackedUtf8 => (
+            "\"void\"".to_string(),
+            format!(
+                "({}) => {{\n    throw new Error(\"boltffi: native_async callback method '{}' has an aggregate-returning sync shape not yet supported\");\n  }}",
+                params_sig, method.ts_name
+            ),
+        ),
+    };
+
+    TsNativeVTableSlot {
+        slot_name: naming::to_snake_case(&method.ts_name),
+        invoke_expr,
+        shape_literal: format!(
+            "{{ args: [{}], returns: {} }}",
+            shape_args.join(", "),
+            returns_shape
+        ),
+    }
+}
+
+/// Builds an async method's vtable slot. The trailing `(complete: bigint, userdata: bigint)` pair
+/// and the completion-call shape below are sourced from `boltffi_macros::callbacks::trait_export::
+/// native::NativeCallbackMethodExpander::expand_async` (empirically verified against the `rn_poc`
+/// fixture's `AsyncKv::get` through `runtime/cpp/tests/real_crate_integration_test.cpp`'s
+/// `generic_callback_vtable_drives_real_async_completion_kv_get`): a wire-encoded result completes
+/// via `(callback_data: u64, result_ptr: *const u8, result_len: usize, status: FfiStatus)`; a
+/// void result completes via `(callback_data: u64, status: FfiStatus)`. A DIRECT (non-wire) scalar
+/// async result -- `(callback_data, result: <scalar>, status)` -- is a real shape this function
+/// does not yet cover (no empirical proof against a compiled artifact) and is rejected as
+/// unsupported rather than emitting an unverified guess.
+pub(crate) fn native_async_method_vtable_slot(
+    trait_name_snake: &str,
+    closure_fn_type: &Option<String>,
+    method: &TsAsyncCallbackMethod,
+) -> TsNativeVTableSlot {
+    let mut params_sig = String::from("handle: bigint");
+    let mut shape_args = vec!["\"u64\"".to_string()];
+    let mut decode_stmts = Vec::new();
+    let mut free_stmts = Vec::new();
+    let mut call_args = Vec::new();
+
+    for param in &method.params {
+        // Every async callback method's slot is deferred by definition
+        // (`AbiCallbackMethod::is_deferred_dispatch`: `is_async()` is always true here) -- every
+        // encoded parameter buffer is transferred, never borrowed, so always free after decode.
+        let rendered = render_native_callback_param(param, true);
+        params_sig.push_str(&rendered.params_sig);
+        shape_args.push(rendered.shape_arg);
+        if let Some(decode) = rendered.decode_stmt {
+            decode_stmts.push(decode);
+        }
+        if let Some(free) = rendered.free_stmt {
+            free_stmts.push(free);
+        }
+        call_args.push(rendered.call_arg);
+    }
+
+    params_sig.push_str(", __complete: bigint, __userdata: bigint");
+    shape_args.push("\"ptr\"".to_string());
+    shape_args.push("\"u64\"".to_string());
+
+    let call_expr = native_callback_dispatch_call(closure_fn_type, &method.ts_name, &call_args);
+    let lookup = format!("_{}_lookup(Number(handle))", trait_name_snake);
+
+    let has_wire_result = method.encode_expr.is_some();
+    let has_direct_scalar_result = !has_wire_result && method.direct_write_method.is_some();
+
+    let (completion_shape, complete_call) = if has_wire_result {
+        (
+            "\"ptr\", \"u64\", \"i32\"".to_string(),
+            "const writer = _module.allocWriter(__size); __ENCODE__; complete(__userdata, BigInt(writer.ptr), BigInt(writer.len), 0n); _module.freeWriter(writer);".to_string(),
+        )
+    } else {
+        (String::new(), "complete(__userdata, 0n);".to_string())
+    };
+
+    let mut body_stmts = vec![
+        format!("const impl = {};", lookup),
+        format!(
+            "const complete = _module.callbackHost.wrapForeignFunction(__complete, {{ args: [\"u64\"{}], returns: \"void\" }});",
+            if completion_shape.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", completion_shape)
+            }
+        ),
+    ];
+    body_stmts.extend(decode_stmts);
+    body_stmts.extend(free_stmts);
+
+    if has_direct_scalar_result {
+        body_stmts.push(format!(
+            "throw new Error(\"boltffi: native_async callback method '{}' has a direct (non-wire) async scalar result, not yet supported\");",
+            method.ts_name
+        ));
+    } else if has_wire_result {
+        let size_expr = method.size_expr.clone().unwrap_or_else(|| "0".to_string());
+        let encode_expr = method
+            .encode_expr
+            .clone()
+            .unwrap_or_else(|| "void 0".to_string());
+        let complete_stmt = complete_call
+            .replace("__size", &size_expr)
+            .replace("__ENCODE__", &encode_expr);
+        body_stmts.push(format!(
+            "Promise.resolve({}).then((result) => {{ {} }});",
+            call_expr, complete_stmt
+        ));
+    } else {
+        body_stmts.push(format!(
+            "Promise.resolve({}).then(() => {{ {} }});",
+            call_expr, complete_call
+        ));
+    }
+
+    TsNativeVTableSlot {
+        slot_name: naming::to_snake_case(&method.ts_name),
+        invoke_expr: format!("({}): void => {{\n    {}\n  }}", params_sig, body_stmts.join("\n    ")),
+        shape_literal: format!(
+            "{{ args: [{}], returns: \"void\" }}",
+            shape_args.join(", ")
+        ),
     }
 }
 
@@ -3558,9 +3897,11 @@ mod tests {
             TsCallbackParamKind::Primitive {
                 import_ts_type,
                 call_expr,
+                native_scalar_type,
             } => {
                 assert_eq!(import_ts_type, "bigint");
                 assert_eq!(call_expr, "count");
+                assert_eq!(native_scalar_type, "i64");
             }
             TsCallbackParamKind::WireEncoded { .. } => {
                 panic!("expected primitive callback param kind")
@@ -3575,9 +3916,11 @@ mod tests {
             TsCallbackParamKind::Primitive {
                 import_ts_type,
                 call_expr,
+                native_scalar_type,
             } => {
                 assert_eq!(import_ts_type, "number");
                 assert_eq!(call_expr, "isActive !== 0");
+                assert_eq!(native_scalar_type, "bool");
             }
             TsCallbackParamKind::WireEncoded { .. } => {
                 panic!("expected primitive callback param kind")

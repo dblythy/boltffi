@@ -641,3 +641,43 @@ describe("instantiateBoltFFINative wiring", () => {
     expect(() => new NativeBoltFFIModule({}, () => ({}))).not.toThrow();
   });
 });
+
+describe("NativeBoltFFIModule.callbackHost", () => {
+  it("throws a clear error when no NativeCallbackHostAdapter was supplied", () => {
+    const module_ = makeModule();
+    expect(() => module_.callbackHost).toThrow(/NativeCallbackHostAdapter/);
+  });
+
+  it("returns the SAME adapter instance every time once one was supplied to instantiateBoltFFINative", () => {
+    const adapter = {
+      createToken: () => ({ ptr: 1n }),
+      writeVTableBytes: () => 1n,
+      readForeignBytes: () => new Uint8Array(0),
+      wrapForeignFunction: () => () => undefined,
+    };
+    const module_ = instantiateBoltFFINative({}, () => ({}), adapter);
+    expect(module_.callbackHost).toBe(adapter);
+    expect(module_.callbackHost).toBe(adapter);
+  });
+});
+
+describe("NativeBoltFFIModule.freeDeferredCallbackBytes", () => {
+  it("calls the real boltffi_free_deferred_callback_bytes export with ptr and len verbatim", () => {
+    const calls: Array<[bigint, bigint]> = [];
+    const module_ = new NativeBoltFFIModule(
+      { boltffi_free_deferred_callback_bytes: (ptr: bigint, len: bigint) => calls.push([ptr, len]) },
+      () => ({})
+    );
+
+    module_.freeDeferredCallbackBytes(0xabcn, 4n);
+
+    expect(calls).toEqual([[0xabcn, 4n]]);
+  });
+
+  it("throws loudly rather than silently no-op'ing when the export is missing", () => {
+    const module_ = makeModule();
+    expect(() => module_.freeDeferredCallbackBytes(1n, 1n)).toThrow(
+      /boltffi_free_deferred_callback_bytes/
+    );
+  });
+});

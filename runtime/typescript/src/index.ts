@@ -49,4 +49,7 @@ export type {
   NativeCallbackShape,
   NativeCallbackScalarType,
   NativeCallbackHostExports,
+  NativeCallbackByteReader,
+  NativeForeignFunctionWrapper,
+  NativeCallbackHostAdapter,
 } from "./native_callback.js";

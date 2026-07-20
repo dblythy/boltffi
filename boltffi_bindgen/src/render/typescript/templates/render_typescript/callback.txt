@@ -69,6 +69,9 @@ export function register{{ callback.interface_name }}(impl: {{ callback.interfac
   if (typeof existingHandle === "number") {
     return _{{ callback.trait_name_snake }}_retain(existingHandle);
   }
+{%- if callback.native_async %}
+  __bootstrap{{ callback.interface_name }}VTable();
+{%- endif %}
   const id = _{{ callback.trait_name_snake }}_next_id++;
   _{{ callback.trait_name_snake }}_registry.set(id, impl);
   _{{ callback.trait_name_snake }}_ref_counts.set(id, 1);
@@ -78,6 +81,7 @@ export function register{{ callback.interface_name }}(impl: {{ callback.interfac
 export function unregister{{ callback.interface_name }}(handle: number): void {
   _{{ callback.trait_name_snake }}_release(handle);
 }
+{%- if !callback.native_async %}
 
 _callbackImports["__boltffi_callback_{{ callback.trait_name_snake }}_free"] = (handle: number): void => {
   _{{ callback.trait_name_snake }}_release(handle);
@@ -86,6 +90,7 @@ _callbackImports["__boltffi_callback_{{ callback.trait_name_snake }}_free"] = (h
 _callbackImports["__boltffi_callback_{{ callback.trait_name_snake }}_clone"] = (handle: number): number => {
   return _{{ callback.trait_name_snake }}_retain(handle);
 };
+{%- endif %}
 
 {%- if callback.closure_fn_type.is_none() %}
 class {{ callback.proxy_class_name }} implements {{ callback.interface_name }} {
@@ -168,6 +173,7 @@ export function {{ callback.wrap_handle_fn }}(handle: number): {{ callback.inter
 }
 {%- endif %}
 
+{%- if !callback.native_async -%}
 {%- for method in callback.methods %}
 {% match method.import_return %}
 {% when TsCallbackImportReturn::Encoded with (encoded_return) %}
@@ -180,7 +186,7 @@ _callbackImports["{{ method.import_name }}"] = (handle: number, out_ptr: number{
   {{ encoded_return.encode_expr }};
   _module.writeBufDescriptor(out_ptr, writer.ptr, writer.len, writer.capacity);
 };
-{% when TsCallbackImportReturn::Direct with { wasm_type } %}
+{% when TsCallbackImportReturn::Direct with { wasm_type, .. } %}
 _callbackImports["{{ method.import_name }}"] = (handle: number{% for param in method.params %}{% match param.kind %}{% when TsCallbackParamKind::Primitive with { import_ts_type, .. } %}, {{ param.name }}: {{ import_ts_type }}{% when TsCallbackParamKind::WireEncoded with { .. } %}, {{ param.name }}_ptr: number, {{ param.name }}_len: number{% endmatch %}{% endfor %}): {{ wasm_type }} => {
   const impl = _{{ callback.trait_name_snake }}_lookup(handle);
   {%- for param in method.params %}{% match param.kind %}{% when TsCallbackParamKind::WireEncoded with { decode_expr } %}
@@ -263,3 +269,29 @@ _callbackImports["{{ method.start_import_name }}"] = (handle: number, requestId:
     .catch((err) => completeError(err));
 };
 {%- endfor %}
+{%- else %}
+// Lazily built the FIRST time `__bootstrap{{ callback.interface_name }}VTable` actually runs
+// (never at module-eval time, when `_module`/`_exports` are not yet assigned -- `init()` hasn't
+// run yet) and cached here so a later `register{{ callback.interface_name }}` call for a SECOND
+// instance doesn't mint a fresh, leaked native callback token per slot on every call --
+// `bootstrapCallbackVTable` itself only guards the REGISTER call, not this array's construction.
+let __boltffi_native_vtable_field_ptrs_{{ callback.trait_name_snake }}: readonly bigint[] | null = null;
+
+function __bootstrap{{ callback.interface_name }}VTable(): void {
+  if (__boltffi_native_vtable_field_ptrs_{{ callback.trait_name_snake }} === null) {
+{%- for slot in callback.native_vtable_slots %}
+    const __boltffi_native_tok_{{ callback.trait_name_snake }}_{{ slot.slot_name }} = _module.callbackHost.createToken(
+      {{ slot.invoke_expr }},
+      {{ slot.shape_literal }}
+    );
+{%- endfor %}
+    __boltffi_native_vtable_field_ptrs_{{ callback.trait_name_snake }} = [{% for slot in callback.native_vtable_slots %}BigInt(__boltffi_native_tok_{{ callback.trait_name_snake }}_{{ slot.slot_name }}.ptr as unknown as number){% if !loop.last %}, {% endif %}{% endfor %}];
+  }
+  bootstrapCallbackVTable(
+    _exports as unknown as NativeCallbackHostExports,
+    "{{ callback.register_fn }}",
+    __boltffi_native_vtable_field_ptrs_{{ callback.trait_name_snake }},
+    _module.callbackHost.writeVTableBytes
+  );
+}
+{%- endif %}
