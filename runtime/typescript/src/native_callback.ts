@@ -64,11 +64,26 @@ export interface NativeCallbackHostExports {
  * takes over for every future call, and (if the two happen to differ, e.g. across hot-reloads)
  * risks handles from before the second registration dispatching through a vtable Rust no longer
  * points at. Keyed by `registerFnName` (one per trait) rather than by content, matching
- * `registerVTableForProcessLifetime`'s (runtime/cpp) own "leak once, on purpose" discipline. Value
- * type is `unknown`, not `bigint` — see `bootstrapCallbackVTable`'s own doc on why the vtable
- * pointer's real type is host-dependent.
+ * `registerVTableForProcessLifetime`'s (runtime/cpp) own "leak once, on purpose" discipline.
+ *
+ * KNOWN LIMITATION, shipped as-is and documented rather than silently assumed away: this Map is
+ * module-local state, scoped to ONE JS module instantiation. There is no way to detect "another
+ * JS realm has already registered this trait" purely from JS -- the real `boltffi_register_callback_*`
+ * export (`boltffi_macros::callbacks::trait_export`) is a bare `fn(vtable: *const VTable)` that
+ * unconditionally overwrites an `AtomicPtr`; it has no query/compare-and-swap counterpart, and
+ * adding one is a Rust-core (`boltffi_macros`) change outside this module's scope. TWO SEPARATE JS
+ * REALMS SHARING ONE DYLIB (e.g. two Node `vm.Context`s, or two independently-instantiated copies
+ * of the SAME generated bundle) CANNOT be detected here at all -- each gets its own fresh
+ * `registeredVTables`, so each will happily call the real register export, and the second call
+ * silently orphans the first realm's vtable allocation exactly as described above. Do not run more
+ * than one JS realm against the same native callback trait in the same process.
+ *
+ * What IS enforced (the one case detectable from pure JS): the SAME realm calling
+ * `bootstrapCallbackVTable` twice for the SAME `registerFnName` against a DIFFERENT `exports`
+ * object throws immediately rather than silently handing back a vtable pointer bound to the WRONG
+ * (stale) native module instance — see `bootstrapCallbackVTable`'s own doc.
  */
-const registeredVTables = new Map<string, unknown>();
+const registeredVTables = new Map<string, { readonly exports: NativeCallbackHostExports; readonly ptr: unknown }>();
 
 /** Test-only: clears the process-wide registration cache (real production code never needs this --
  * a real trait is registered at most once per process, by definition). */
@@ -84,7 +99,10 @@ export function _resetCallbackVTableRegistrationsForTests(): void {
  * file has no allocator of its own, matching `native.ts`'s "type + delegate" discipline), then
  * calls `registerFnName` with the result exactly once for the trait's whole process lifetime.
  * Returns the SAME vtable pointer on every later call for the same `registerFnName`, never
- * re-registering or re-allocating.
+ * re-registering or re-allocating -- PROVIDED every call for a given `registerFnName` passes the
+ * SAME `exports` object; a later call with a DIFFERENT `exports` throws instead of silently
+ * returning a pointer that belongs to the earlier (possibly now-stale) native module instance. See
+ * `registeredVTables`'s own doc for what this can and cannot detect.
  */
 // `Ptr` is intentionally generic (not hardcoded to `bigint`, unlike `fieldPtrs`' element type,
 // which is always raw memory CONTENT — an 8-byte slot value inside the vtable buffer, so always a
@@ -100,14 +118,26 @@ export function bootstrapCallbackVTable<Ptr>(
   writeVTableBytes: (fieldPtrs: readonly bigint[]) => Ptr
 ): Ptr {
   const cached = registeredVTables.get(registerFnName);
-  if (cached !== undefined) return cached as Ptr;
+  if (cached !== undefined) {
+    if (cached.exports !== exports) {
+      throw new Error(
+        `boltffi: callback trait vtable for "${registerFnName}" was already registered against a ` +
+          "different native module instance in this JS realm. Re-registering with a different " +
+          "`exports` handle would silently hand back a vtable pointer bound to the STALE " +
+          "instance -- there is no unregister; see this module's `registeredVTables` doc. (This " +
+          "check only catches same-realm misuse -- it cannot detect a SEPARATE JS realm racing to " +
+          "register the same trait against the same dylib; see that doc for why.)"
+      );
+    }
+    return cached.ptr as Ptr;
+  }
   const vtablePtr = writeVTableBytes(fieldPtrs);
   const registerFn = exports[registerFnName] as ((ptr: Ptr) => void) | undefined;
   if (!registerFn) {
     throw new Error(`native callback registration export not found: ${registerFnName}`);
   }
   registerFn(vtablePtr);
-  registeredVTables.set(registerFnName, vtablePtr);
+  registeredVTables.set(registerFnName, { exports, ptr: vtablePtr });
   return vtablePtr;
 }
 
