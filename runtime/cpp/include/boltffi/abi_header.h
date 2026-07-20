@@ -45,22 +45,27 @@ enum class PrimKind {
              // inline `RET (*)(ARGS)` parameter such as a vtable's own method fields)
   Aggregate, // a struct passed/returned BY VALUE (`FfiBuf_u8`, `FfiString`, `BoltFFICallbackHandle`,
              // `FfiStatus`, ...) -- `aggregateName` names which one; see RecordAbi for its layout.
-  OpaqueHandle,  // a pointer-shaped value reached through a NAMED TYPEDEF ALIAS to a bare pointer
-                 // type (today: `typedef const void *RustFutureHandle;`, the header's only such
-                 // alias) rather than an inline `T *` spelling -- a Rust-owned opaque token (here,
-                 // a real `Box`/`Arc` pointer the async-future machinery manages), NEVER an offset
-                 // into a JS-simulated arena. Distinguishing this from `PtrConst`/`PtrMut`
-                 // structurally (by how the type was spelled in the header, not by guessing from a
-                 // parameter's name) is what makes it impossible for a generic caller to rebase an
+  OpaqueHandle,  // a pointer-shaped value that is NEVER an offset into a JS-simulated arena --
+                 // structurally, not by guessing from a parameter's name, this parser recognizes
+                 // two distinct spellings that both mean "real process pointer, don't rebase":
+                 // (1) a NAMED TYPEDEF ALIAS to a bare pointer type (`typedef const void
+                 // *RustFutureHandle;`, the header's only such alias) -- a Rust-owned opaque token
+                 // (here, a real `Box`/`Arc` pointer the async-future machinery manages); (2) an
+                 // inline pointer to a NAMED VTABLE STRUCT (`const ___SessionStorageVTable
+                 // *vtable`, every `boltffi_register_callback_*` function's sole parameter) -- the
+                 // real heap pointer `registerVTableForProcessLifetime` (generic_callback.h) hands
+                 // back for the REST OF THE PROCESS's lifetime, never a value a generic caller
+                 // allocated in its own arena. Distinguishing both from `PtrConst`/`PtrMut`
+                 // structurally is what makes it impossible for a generic caller to rebase an
                  // opaque handle against the wrong base address -- see `isArenaPointerKind`.
 };
 
 /// Whether a parameter/return of this kind is a real address into caller-owned memory that a
 /// generic JS-facing caller may legitimately rebase against a bound arena (`PtrConst`/`PtrMut`,
-/// e.g. `key_ptr`/`value_ptr`) -- as opposed to an opaque, Rust-managed handle (`OpaqueHandle`,
-/// e.g. `RustFutureHandle`) that must cross unmodified, verbatim, never offset against anything.
-/// The one place this distinction must be consulted before doing pointer arithmetic on a generic
-/// argument.
+/// e.g. `key_ptr`/`value_ptr`) -- as opposed to an opaque, process-owned handle (`OpaqueHandle`,
+/// e.g. `RustFutureHandle`, or a `boltffi_register_callback_*` vtable pointer) that must cross
+/// unmodified, verbatim, never offset against anything. The one place this distinction must be
+/// consulted before doing pointer arithmetic on a generic argument.
 inline bool isArenaPointerKind(PrimKind kind) { return kind == PrimKind::PtrConst || kind == PrimKind::PtrMut; }
 
 /// One function parameter or a vtable method field's parameter.

@@ -258,8 +258,15 @@ impl<'a> LocalHandleMethodExpander<'a> {
         };
 
         let (ffi_return_params, return_tokens) = match &self.method.sig.output {
+            // No status out-param: this must match `native.rs`'s
+            // `expand_sync` exactly — a `void` sync method's vtable slot
+            // drops it entirely (nothing ever reads it back; see that
+            // file's `status_param` for the full reasoning), and this
+            // function is one of the concrete values assigned into that
+            // same vtable struct's field, so its signature must agree
+            // byte-for-byte or the assignment fails to type-check.
             syn::ReturnType::Default => (
-                vec![quote! { out_status: *mut ::boltffi::__private::FfiStatus }],
+                Vec::new(),
                 self.expand_void_return(&invoke_expression),
             ),
             syn::ReturnType::Type(_, return_type) => {
@@ -293,11 +300,6 @@ impl<'a> LocalHandleMethodExpander<'a> {
     fn expand_void_return(&self, invoke_expression: &TokenStream) -> TokenStream {
         quote! {
             #invoke_expression;
-            if !out_status.is_null() {
-                unsafe {
-                    *out_status = ::boltffi::__private::FfiStatus::OK;
-                }
-            }
         }
     }
 
@@ -649,7 +651,7 @@ impl<'a> LocalHandleMethodExpander<'a> {
         let pointer_name = format_ident!("{}_ptr", param_name);
         let length_name = format_ident!("{}_len", param_name);
 
-        let decode_steps = if Self::is_borrowed_utf8_str(param_type) {
+        let mut decode_steps = if Self::is_borrowed_utf8_str(param_type) {
             let owned_string_name = format_ident!("{}_owned", param_name);
             vec![quote! {
                 let #owned_string_name: String = ::boltffi::__private::wire::decode(unsafe {
@@ -678,6 +680,26 @@ impl<'a> LocalHandleMethodExpander<'a> {
                 .expect("wire decode local callback parameter");
             }]
         };
+
+        // A `void` method's vtable slot is exactly the one `native.rs`
+        // hands a `malloc`-owned buffer to (see its `lower_param`'s
+        // `is_deferred` branch — needed there because a real Dart consumer
+        // defers reading it past this call's return). This function *is*
+        // that call, invoked synchronously, so the read above is always
+        // safe regardless of ownership — but since the buffer is
+        // heap-owned here, something has to free it exactly once. Decoding
+        // always copies out an owned value (never borrows the bytes past
+        // this step), so freeing right after is safe.
+        if matches!(self.method.sig.output, syn::ReturnType::Default) {
+            decode_steps.push(quote! {
+                if !#pointer_name.is_null() {
+                    unsafe extern "C" {
+                        fn free(ptr: *mut ::core::ffi::c_void);
+                    }
+                    unsafe { free(#pointer_name as *mut ::core::ffi::c_void) };
+                }
+            });
+        }
 
         LocalHandleParam {
             ffi_params: vec![

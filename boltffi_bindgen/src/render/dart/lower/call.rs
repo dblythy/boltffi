@@ -109,15 +109,35 @@ fn emit_setup(plan: &CallPlan) -> String {
 /// regen against parse-core-rs — a live-fixture-only mistake unit tests over
 /// string contents alone couldn't catch, since the wrap and its content were
 /// individually well-formed).
+///
+/// The `catch` must not roll back unconditionally, though: the native call
+/// itself is the point where Rust takes ownership of any handle this setup
+/// registered (a `BoxFromCallbackHandle`/`ArcFromCallbackHandle` impl reads
+/// the handle number verbatim, with no re-registration — see
+/// `boltffi_macros`'s `trait_export/mod.rs`). A failure *after* the call
+/// returns (a fallible constructor's null-handle check, a `StatusOut`
+/// check, ...) means Rust already retained the handle — rolling back here
+/// would remove it from the Dart-side map while Rust still holds (and will
+/// later invoke) it. [`transferred_flag_var`] is flipped to `true`
+/// immediately after the call by the caller ([`render_sync_body`]/
+/// [`render_async_body`]); the `catch` only drains the queue while it's
+/// still `false`, i.e. only for a setup-time failure.
 fn wrap_with_cleanup(plan: &CallPlan, body: String) -> String {
     if !plan.has_callback_handles {
         return body;
     }
 
     let queue = cleanup_queue_var();
+    let transferred = transferred_flag_var();
     format!(
-        "final {queue} = <void Function()>[];\ntry {{\n{body}}} catch (e) {{\nfor (final _p$c in {queue}.reversed) {{\n_p$c();\n}}\nrethrow;\n}}\n"
+        "final {queue} = <void Function()>[];\nvar {transferred} = false;\ntry {{\n{body}}} catch (e) {{\nif (!{transferred}) {{\nfor (final _p$c in {queue}.reversed) {{\n_p$c();\n}}\n}}\nrethrow;\n}}\n"
     )
+}
+
+/// The flag [`wrap_with_cleanup`]'s `catch` reads to decide whether the
+/// native call already transferred ownership — see its doc comment.
+fn transferred_flag_var() -> &'static str {
+    "_p$transferred"
 }
 
 /// Replaces the standalone identifier `self` with `this` in a generated
@@ -591,6 +611,9 @@ fn render_sync_body(
         out.push_str(&format!("{call_expr};\n"));
         ""
     };
+    if plan.has_callback_handles {
+        out.push_str(&format!("{} = true;\n", transferred_flag_var()));
+    }
 
     let mut decode = decode_return(
         result_expr,
@@ -700,8 +723,23 @@ fn render_async_body(
         last_error_throw_stmt()
     );
 
+    // The *create* call is where Rust takes ownership of any callback
+    // handle this method's setup registered (same reasoning as the sync
+    // path — see `wrap_with_cleanup`) — flip the flag the instant it
+    // returns, before anything that could still throw (the `complete`/poll
+    // protocol below runs later, independently of setup's rollback).
+    let create_call_expr = format!("{symbol_fn}({create_args})");
+    let create_future = if plan.has_callback_handles {
+        format!(
+            "() {{\n    final _p$createResult = {create_call_expr};\n    {} = true;\n    return _p$createResult;\n  }}",
+            transferred_flag_var()
+        )
+    } else {
+        format!("() => {create_call_expr}")
+    };
+
     out.push_str(&format!(
-        "return _$$BoltFFIAsync.create(\n  createFuture: () => {symbol_fn}({create_args}),\n  pollFuture: {poll_fn},\n  completeFuture: (handle) {{\n{complete_stmt}\n  }},\n  freeFuture: {free_fn},\n  cancelFuture: {cancel_fn},\n);\n"
+        "return _$$BoltFFIAsync.create(\n  createFuture: {create_future},\n  pollFuture: {poll_fn},\n  completeFuture: (handle) {{\n{complete_stmt}\n  }},\n  freeFuture: {free_fn},\n  cancelFuture: {cancel_fn},\n);\n"
     ));
 
     wrap_with_cleanup(&plan, out)
@@ -1139,6 +1177,73 @@ mod tests {
         assert!(
             try_pos < call_pos && call_pos < try_close_pos,
             "the native call must be inside the try block, not after its locals go out of scope: {body}"
+        );
+    }
+
+    // Regression (Codex review finding, 2026-07-20): the rollback `catch`
+    // used to unconditionally drain the cleanup queue on ANY throw,
+    // including one that happens *after* the native call already
+    // transferred the callback handle's ownership to Rust (e.g. a fallible
+    // constructor's own null-handle check). Rolling back in that case
+    // removes the handle from the Dart-side map while Rust is still holding
+    // (and will later invoke) it — every subsequent call against that
+    // handle then misses. The native call must disarm the rollback the
+    // moment it returns, so only a *setup* failure (before the call) rolls
+    // anything back.
+    #[test]
+    fn boxed_dyn_callback_param_rollback_does_not_run_after_the_native_call_succeeds() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog
+            .insert_callback(callback_trait("Listener", "on_event"));
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Widget"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![ParamDef {
+                    name: ParamName::new("listener"),
+                    type_expr: TypeExpr::Callback(crate::ir::CallbackId::new("Listener")),
+                    passing: ParamPassing::BoxedDyn,
+                    doc: None,
+                }],
+                is_fallible: true,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let body = &library.classes[0].constructors[0].body;
+
+        assert!(
+            body.contains("_k$ListenerHandleMap.createHandle(listener)"),
+            "body: {body}"
+        );
+
+        // A flag, declared outside the try, starts false and flips to true
+        // right after the native call — before the fallible decode's own
+        // null-handle check (which can also throw) ever runs.
+        assert!(
+            body.contains("var _p$transferred = false;"),
+            "body: {body}"
+        );
+        let result_pos = body.find("final _p$result = ").expect(body);
+        let transferred_set_pos = body.find("_p$transferred = true;").expect(body);
+        let null_check_pos = body.find("if (_p$result == $$ffi.nullptr)").expect(body);
+        assert!(
+            result_pos < transferred_set_pos && transferred_set_pos < null_check_pos,
+            "the native call's result must be captured, then the flag flipped, \
+             before the decode's own throwing check: {body}"
+        );
+
+        // The catch only drains the rollback queue when the call itself
+        // never went through.
+        assert!(
+            body.contains("if (!_p$transferred) {"),
+            "body: {body}"
         );
     }
 

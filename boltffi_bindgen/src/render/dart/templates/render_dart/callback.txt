@@ -34,8 +34,22 @@ abstract interface class {{ cb.class_name }} {
 }
 
 final class {{ cb.impl_class_name }} {
+  // Deferred by one event-loop turn rather than removed immediately: `free`
+  // and each method below dispatch through *separate*
+  // `NativeCallable.listener`s (distinct native ports), so there is no
+  // guarantee that a `free` message posted from one thread is *processed*
+  // after a method-call message posted (perhaps concurrently, from another
+  // thread — a `Foreign*` handle is `Send + Sync`) for the same handle,
+  // even when the underlying native call that issued it happened first.
+  // Running the actual removal via `Timer.run` places it at the back of
+  // the event queue, after anything already queued when `free` was
+  // processed — including an in-flight method-dispatch message for this
+  // same handle — so that call still finds a live entry instead of
+  // spuriously hitting the "invalid handle" path.
   static void free(int handle) {
-    {{ cb.handle_map_instance_name }}.remove(handle);
+    $$async.Timer.run(() {
+      {{ cb.handle_map_instance_name }}.remove(handle);
+    });
   }
 
   static int clone(int handle) {

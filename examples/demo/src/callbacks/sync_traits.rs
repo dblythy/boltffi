@@ -278,6 +278,113 @@ pub fn invoke_boxed_offset_callback(
     callback.offset(value, delta)
 }
 
+/// A `void`-returning callback method with an encoded (`String`) parameter —
+/// the exact vtable-slot shape a Dart consumer dispatches through a
+/// deferred `NativeCallable.listener` rather than `Pointer.fromFunction`
+/// (see `render::dart::plan::callback::dispatch_via_listener` in
+/// `boltffi_bindgen`). Exercises the real-generation path end to end: the
+/// param bytes must cross as a Rust-owned buffer the Dart trampoline frees
+/// after decoding, not one scoped to the (already-returned) calling Rust
+/// function's stack. `Send + Sync` matches parse-core-rs's real listener
+/// traits (`WatchListener`, `EventuallyQueueListener`, `ObservabilitySink`)
+/// exactly — required so `invoke_void_text_callback_off_thread` below can
+/// hand the boxed callback to a background OS thread at all.
+#[export]
+pub trait VoidTextCallback: Send + Sync {
+    fn on_text(&self, text: String);
+}
+
+#[export]
+pub fn invoke_void_text_callback(callback: impl VoidTextCallback, text: String) {
+    callback.on_text(text);
+}
+
+#[export]
+pub fn invoke_boxed_void_text_callback(callback: Box<dyn VoidTextCallback>, text: String) {
+    callback.on_text(text);
+}
+
+/// Live repro for the Dart callback thread-safety fix (Codex review finding
+/// 1/2, 2026-07-20): calls the `void`-sync, encoded-param callback method
+/// from a genuinely different OS thread than the one that registered it —
+/// the same class of invocation parse-core-rs's `WatchListener::on_diff`
+/// gets from a background tokio worker. Spawns and returns immediately
+/// (the calling Dart isolate has moved on by the time the thread runs), so
+/// a correct callback here proves: the encoded param bytes survive past
+/// this function's own return (finding 1's owned-buffer fix), and the
+/// call itself doesn't abort the process for running off the isolate's
+/// mutator thread (finding 2's `NativeCallable.listener` dispatch).
+#[export]
+pub fn invoke_void_text_callback_off_thread(callback: Box<dyn VoidTextCallback>, text: String) {
+    std::thread::spawn(move || {
+        callback.on_text(text);
+    });
+}
+
+#[cfg(test)]
+mod void_text_callback_tests {
+    use super::*;
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Duration;
+
+    struct Recorder(Arc<(Mutex<Option<String>>, Condvar)>);
+
+    impl VoidTextCallback for Recorder {
+        fn on_text(&self, text: String) {
+            let (lock, cvar) = &*self.0;
+            *lock.lock().unwrap() = Some(text);
+            cvar.notify_one();
+        }
+    }
+
+    // Live repro for the Dart callback thread-safety fix (Codex review
+    // finding 1, 2026-07-20): round-trips a native Rust callback impl
+    // through the SAME ABI a real foreign (Dart/Swift/JNI) caller uses --
+    // `box_from_callback_handle` recovers a real `ForeignVoidTextCallback`
+    // calling through `local_handle.rs`'s populated vtable, not a plain
+    // in-process trait-object call -- then invokes it from a genuinely
+    // different OS thread (mirroring parse-core-rs's `WatchListener` being
+    // invoked from a background tokio worker, not the isolate's own
+    // thread). A standalone Dart-level repro of the exact same shape
+    // wasn't practical in this session (`examples/demo`'s Dart pack step
+    // pulls in the example's cross-platform benchmark toolchain
+    // requirements, e.g. an Android NDK, unrelated to this fix); this test
+    // proves the same underlying claim through the real (non-experimental)
+    // Rust macro path instead: the encoded param bytes decode correctly,
+    // with no crash and no leak/double-free, regardless of which thread
+    // reads them.
+    #[test]
+    fn void_text_callback_round_trips_through_the_real_vtable_from_a_background_thread() {
+        let state = Arc::new((Mutex::new(None), Condvar::new()));
+        let recorder: Arc<dyn VoidTextCallback> = Arc::new(Recorder(Arc::clone(&state)));
+
+        let handle = __boltffi_local_void_text_callback_handle(recorder);
+        let foreign = unsafe {
+            <dyn VoidTextCallback as ::boltffi::__private::BoxFromCallbackHandle>::box_from_callback_handle(handle)
+        };
+
+        invoke_void_text_callback_off_thread(
+            foreign,
+            "hello from a background OS thread, not the Dart isolate".to_string(),
+        );
+
+        let (lock, cvar) = &*state;
+        let mut guard = lock.lock().unwrap();
+        while guard.is_none() {
+            let (new_guard, timeout_result) =
+                cvar.wait_timeout(guard, Duration::from_secs(5)).unwrap();
+            guard = new_guard;
+            if timeout_result.timed_out() {
+                break;
+            }
+        }
+        assert_eq!(
+            guard.as_deref(),
+            Some("hello from a background OS thread, not the Dart isolate")
+        );
+    }
+}
+
 #[export]
 #[benchmark_candidate(callback_interface, uniffi)]
 pub trait DataProvider: Send + Sync {

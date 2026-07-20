@@ -334,6 +334,82 @@ BOLTFFI_TEST(closed_shape_planner_constructs_and_consumes_a_real_callback_handle
   BOLTFFI_CHECK(static_cast<std::int32_t>(result) == 24);  // 6 * factor(4)
 }
 
+// ---- (D) finding 1, second adversarial round: a `boltffi_register_callback_*` vtable-pointer
+// parameter must cross THROUGH THE GENERIC DISPATCH PATH (`planFunctionCall`/`buildRegisterArgs`,
+// with a translate step mirroring the real JSI host object's `translateIfPointer`,
+// boltffi_generic_host_object.cpp) completely UNMODIFIED -- never rebased against an arena base,
+// even a nonzero one. Before this round's fix, `abi_header.cpp`'s parser classified this
+// parameter as `PtrConst` purely because it is spelled with a `*` at the use site (see
+// abi_header_test.cpp's `vtable_pointer_param_is_an_opaque_handle_not_an_arena_pointer` and its
+// 13/13 real-header census for the parser-level proof); routed through the SAME generic
+// mechanism a real JSI host object uses, that misclassification would corrupt the real process
+// pointer `registerVTableForProcessLifetime` returns before Rust ever dereferences it
+// (`arenaBase + processAddress`, a wild pointer). This test proves the FIX (`OpaqueHandle`, no
+// rebase) holds end to end against the REAL `rn_poc` dylib, not just in the parser's own unit
+// tests -- registration succeeds and the subsequently-registered `Multiplier::factor` actually
+// gets called by Rust.
+BOLTFFI_TEST(vtable_registration_pointer_survives_the_generic_dispatch_path_unrebased) {
+  VTableAbi vtable;
+  vtable.name = "MultiplierVTable";
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"factor", TypeRef{PrimKind::I32}, {TypeRef{PrimKind::U64}}});
+  const void* vtablePtr = registerVTableForProcessLifetime(vtable);
+
+  // The FIXED classification `abi_header.cpp`'s parser now produces for every real
+  // `boltffi_register_callback_*` function's sole parameter -- `OpaqueHandle`, never `PtrConst`.
+  FunctionAbi registerFnAbi;
+  registerFnAbi.name = "boltffi_register_callback_rn_poc_multiplier";
+  registerFnAbi.returnType = TypeRef{PrimKind::Void};
+  registerFnAbi.params = {TypeRef{PrimKind::OpaqueHandle}};
+  ParsedAbi abiForRegister;  // no records needed: no Aggregate params in this function
+
+  auto registerPlan = planFunctionCall(registerFnAbi, abiForRegister);
+  BOLTFFI_CHECK(registerPlan.has_value());
+  BOLTFFI_CHECK(registerPlan->size() == 1);
+  BOLTFFI_CHECK((*registerPlan)[0].kind == RegisterSlotKind::Scalar);
+
+  // Mirrors the real host object's `translateIfPointer` against a NONZERO, deliberately-wild
+  // simulated arena base -- so a misclassification (rebasing a value that should cross verbatim)
+  // produces a pointer nowhere near the real one, rather than accidentally landing on a valid
+  // address by luck.
+  constexpr std::uint64_t kFakeArenaBase = 0x7f00'0000'0000ULL;
+  auto translateLikeTheRealHostObject = [](const TypeRef& paramType, CValue v) {
+    if (!isArenaPointerKind(paramType.kind)) return v;
+    return CValue::ofU64(kFakeArenaBase + v.u64);
+  };
+
+  std::vector<LogicalArg> registerLogicalArgs(1);
+  registerLogicalArgs[0].u64 = reinterpret_cast<std::uint64_t>(vtablePtr);
+  std::vector<CValue> registerArgsBuilt =
+      buildRegisterArgs(registerFnAbi, *registerPlan, registerLogicalArgs, translateLikeTheRealHostObject);
+  BOLTFFI_CHECK(registerArgsBuilt.size() == 1);
+  // The vtable pointer must cross BYTE-FOR-BYTE identical to what was registered -- if it had
+  // rebased (the pre-fix `PtrConst` bug), this would equal `kFakeArenaBase + vtablePtr` instead.
+  BOLTFFI_CHECK(registerArgsBuilt[0].u64 == reinterpret_cast<std::uint64_t>(vtablePtr));
+
+  void* registerFn = resolve("boltffi_register_callback_rn_poc_multiplier");
+  invokeGenericVoid(registerFn, registerArgsBuilt.data(), registerArgsBuilt.size());
+
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["factor"] = [](const GenericMethodCall&, std::function<void(CallbackCompletion)>,
+                                        CallbackResult& result) { result.scalar = static_cast<std::uint64_t>(3); };
+  std::uint64_t callbackHandle = CallbackRegistry::instance().insert(registration);
+
+  void* ctor = resolve("boltffi_init_class_rn_poc_counter_new");
+  CValue ctorArgs[1] = {CValue::ofU64(7)};
+  std::uint64_t counter = invokeGenericScalar(ctor, ctorArgs, 1);
+
+  void* setMultiplier = resolve("boltffi_method_class_rn_poc_counter_set_multiplier");
+  CValue setArgs[3] = {CValue::ofU64(counter), CValue::ofU64(callbackHandle), CValue::ofPtr(vtablePtr)};
+  invokeGenericVoid(setMultiplier, setArgs, 3);
+
+  void* scaled = resolve("boltffi_method_class_rn_poc_counter_scaled");
+  CValue scaledArgs[1] = {CValue::ofU64(counter)};
+  auto result = invokeGenericScalar(scaled, scaledArgs, 1);
+  BOLTFFI_CHECK(static_cast<std::int32_t>(result) == 21);  // 7 * factor(3)
+}
+
 }  // namespace
 
 int main() {
