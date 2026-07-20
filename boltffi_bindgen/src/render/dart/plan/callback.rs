@@ -50,8 +50,26 @@ impl DartNativeCallbackMethod {
     /// `AttachCurrentThread`). Those slots keep `Pointer.fromFunction` and
     /// rely on the host never invoking them off the mutator thread.
     pub fn dispatch_via_listener(&self) -> bool {
-        self.is_async() || matches!(self.return_type, super::DartNativeType::Void)
+        should_dispatch_via_listener(self.kind, &self.return_type)
     }
+}
+
+/// The classification [`DartNativeCallbackMethod::dispatch_via_listener`]
+/// wraps — factored out so `lower::callback`'s trampoline-body renderer
+/// (which needs the same answer *before* a `DartNativeCallbackMethod`
+/// exists) can never drift from it. Both sides of a deferred slot's ABI
+/// depend on agreeing here: the Rust macro side
+/// (`boltffi_macros::callbacks::trait_export::native`'s `is_deferred`)
+/// hands owned, heap-allocated bytes for any encoded parameter on exactly
+/// these slots, and drops the status out-param for a `void` sync method —
+/// the Dart trampoline this file renders must free that buffer (never read
+/// it as a borrow) and never write to a status parameter that no longer
+/// exists.
+pub(crate) fn should_dispatch_via_listener(
+    kind: ExecutionKind,
+    return_type: &super::DartNativeType,
+) -> bool {
+    matches!(kind, ExecutionKind::Async) || matches!(return_type, super::DartNativeType::Void)
 }
 
 #[cfg(test)]

@@ -140,12 +140,31 @@ impl<'a> NativeCallbackMethodExpander<'a> {
             quote! {}
         };
 
+        // A `void`-returning sync method's status is written by the
+        // trampoline but never read back here (the wrapping trait method
+        // returns `()`, so a stale/default status is never observed — see
+        // `render::dart::plan::callback::dispatch_via_listener`'s doc
+        // comment) — and, because this slot dispatches through a deferred
+        // `NativeCallable.listener`, the write would land on this
+        // function's already-popped stack frame by the time it happens
+        // (the same use-after-return this method's other half — the
+        // encoded-param prelude below — exists to avoid). Drop the
+        // parameter entirely rather than allocate a pointer nothing safely
+        // reads. A method with a real return value keeps it: that path
+        // stays on `Pointer.fromFunction` (synchronous), so reading
+        // `callback_status` right after the call is safe.
+        let status_param = if return_type.is_some() {
+            quote! { status: *mut ::boltffi::__private::FfiStatus }
+        } else {
+            quote! {}
+        };
+
         vtable_fields.push(quote! {
             pub #method_name_snake: extern "C" fn(
                 handle: u64,
                 #(#ffi_param_types,)*
                 #out_params
-                status: *mut ::boltffi::__private::FfiStatus
+                #status_param
             )
         });
 
@@ -519,12 +538,10 @@ impl<'a> NativeCallbackMethodExpander<'a> {
     ) -> TokenStream {
         quote! {
             #(#prelude_stmts)*
-            let mut callback_status = ::boltffi::__private::FfiStatus::default();
             unsafe {
                 ((*self.vtable).#method_name_snake)(
                     self.handle,
                     #(#call_args,)*
-                    &mut callback_status
                 );
             }
         }
@@ -582,7 +599,7 @@ impl<'a> NativeCallbackMethodExpander<'a> {
         let len_name = syn::Ident::new(&format!("{}_len", param_name), param_name.span());
         let wire_name = syn::Ident::new(&format!("{}_wire", param_name), param_name.span());
 
-        let prelude = if custom_types::contains_custom_types(param_type, self.custom_types) {
+        let encode_stmt = if custom_types::contains_custom_types(param_type, self.custom_types) {
             let wire_type = custom_types::wire_type_for(param_type, self.custom_types);
             let wire_value_name =
                 syn::Ident::new(&format!("{}_wire_value", param_name), param_name.span());
@@ -590,18 +607,66 @@ impl<'a> NativeCallbackMethodExpander<'a> {
                 custom_types::to_wire_expr_owned(param_type, self.custom_types, param_name);
             quote! {
                 let #wire_value_name: #wire_type = { #to_wire };
-                let #wire_name = ::boltffi::__private::wire::encode(&#wire_value_name);
+                let #wire_name: ::std::vec::Vec<u8> = ::boltffi::__private::wire::encode(&#wire_value_name);
             }
         } else {
-            quote! { let #wire_name = ::boltffi::__private::wire::encode(&#param_name); }
+            quote! { let #wire_name: ::std::vec::Vec<u8> = ::boltffi::__private::wire::encode(&#param_name); }
+        };
+
+        let (prelude, call_arg) = if self.is_deferred() {
+            // This slot dispatches through a deferred Dart trampoline
+            // (`NativeCallable.listener` — see
+            // `render::dart::plan::callback::dispatch_via_listener`): the
+            // call below returns before Dart has actually read these
+            // bytes, so a stack-scoped `Vec<u8>` would already be gone by
+            // the time the trampoline runs. Hand the foreign side a
+            // `malloc`-owned copy instead — reusing the same
+            // malloc/`free`-family convention this crate already relies on
+            // for cross-language buffer ownership transfer elsewhere (see
+            // `local_handle.rs`'s callback-return buffers, and this
+            // file's own `sync_returning_impl_body`, which frees a
+            // Dart-`calloc`'d buffer via libc `free`). The generated Dart
+            // trampoline frees it (via `calloc.free`, the same allocator
+            // family) once it has finished decoding.
+            let prelude = quote! {
+                #encode_stmt
+                let #len_name: usize = #wire_name.len();
+                let #ptr_name: *const u8 = {
+                    unsafe extern "C" {
+                        fn malloc(size: usize) -> *mut ::core::ffi::c_void;
+                    }
+                    let copy = unsafe { malloc(#len_name) } as *mut u8;
+                    if !copy.is_null() {
+                        unsafe {
+                            ::core::ptr::copy_nonoverlapping(#wire_name.as_ptr(), copy, #len_name);
+                        }
+                    }
+                    copy as *const u8
+                };
+            };
+            (prelude, quote! { #ptr_name, #len_name })
+        } else {
+            (encode_stmt, quote! { #wire_name.as_ptr(), #wire_name.len() })
         };
 
         NativeCallbackParamLowering {
             ffi_param: quote! { #ptr_name: *const u8, #len_name: usize },
             rust_param,
-            call_arg: quote! { #wire_name.as_ptr(), #wire_name.len() },
+            call_arg,
             prelude: Some(prelude),
         }
+    }
+
+    /// Whether this method's vtable slot dispatches through a deferred Dart
+    /// trampoline rather than a synchronous one — mirrors
+    /// `render::dart::plan::callback::dispatch_via_listener` exactly (async
+    /// is always deferred; sync is deferred only when it has no return
+    /// value to read back). Both sides must keep agreeing on this per the
+    /// same reasoning: an async dispatch is fire-and-forget here regardless
+    /// of return type, and a `void` sync method's status is never read back
+    /// (see `expand_sync`'s `status_param`).
+    fn is_deferred(&self) -> bool {
+        self.method.sig.asyncness.is_some() || self.return_type().is_none()
     }
 
     fn method_name_snake(&self) -> syn::Ident {
