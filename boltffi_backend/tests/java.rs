@@ -101,6 +101,14 @@ const RESULT_RECORD: &str = r#"
     }
 "#;
 
+const MAP_RECORD: &str = r#"
+    #[data]
+    pub struct Profile {
+        pub name: String,
+        pub tags: std::collections::HashMap<String, String>,
+    }
+"#;
+
 const CUSTOM_TYPES: &str = r#"
     pub struct Email(String);
 
@@ -1273,6 +1281,21 @@ fn java_target_renders_encoded_record_fields_through_codec_plans() {
     assert!(profile.contains("writer.writeString"));
     assert!(profile.contains("writer.writeIntArray"));
     assert!(profile.contains("writer.writeOptional"));
+}
+
+/// A `HashMap`-typed field (parse-core-rs's `ClientConfig.default_headers`/`RequestOptions.headers`
+/// are the real-world case) must round-trip through the wire codec exactly like every other
+/// backend (Kotlin/Swift/C#/Python) already does — this was the one shape the Java backend never
+/// implemented (`CodecRead`/`CodecWrite`/`CodecSize::map` all returned "unsupported").
+#[test]
+fn java_target_renders_map_typed_fields_through_codec_plans() {
+    let output = render(MAP_RECORD, CoverageMode::Complete);
+    let profile = java_source(&output, "com.boltffi.demo", "Profile");
+
+    assert!(profile.contains("java.util.Map<String, String> tags"));
+    assert!(profile.contains("reader.readMap"));
+    assert!(profile.contains("writer.writeMap"));
+    assert!(profile.contains("WireSizes.map"));
 }
 
 #[test]
