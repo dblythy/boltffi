@@ -169,6 +169,15 @@ impl<'a> Builder<'a> {
         Self { config, options }
     }
 
+    /// The cargo build path this builder was configured with — `Expanded` for
+    /// every platform whose real shipped artifact goes through the experimental
+    /// `BindingExpansion` macro path, `Default`/`Package` for a plain `cargo build`.
+    /// Exposed crate-wide so callers (`commands::build`) can be pinned in tests
+    /// against which platforms request which scheme, without re-deriving it.
+    pub(crate) fn selection(&self) -> &BuildSelection {
+        &self.options.selection
+    }
+
     pub fn build_targets(&self, targets: &[RustTarget]) -> Result<Vec<BuildResult>> {
         let android_toolchain = targets
             .iter()
