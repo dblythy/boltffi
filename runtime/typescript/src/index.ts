@@ -38,3 +38,15 @@ export type {
   NativePrimitiveBufferAlloc,
 } from "./native.js";
 export { NativeMemoryArena, RETURN_SLOT_SIZE } from "./native_arena.js";
+export {
+  bootstrapCallbackVTable,
+  NativeCallbackTraitRegistry,
+  _resetCallbackVTableRegistrationsForTests,
+} from "./native_callback.js";
+export type {
+  NativeCallbackToken,
+  NativeCallbackTokenFactory,
+  NativeCallbackShape,
+  NativeCallbackScalarType,
+  NativeCallbackHostExports,
+} from "./native_callback.js";

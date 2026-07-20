@@ -240,6 +240,14 @@ pub struct TsCallback {
     pub interface_name: String,
     pub trait_name_snake: String,
     pub create_handle_fn: String,
+    /// The native-only "foreign vtable" registration export (`boltffi_register_callback_*` under
+    /// `NamingStyle::Experimental`, its short-name counterpart otherwise) — sourced from the IR
+    /// layer's `AbiCallbackInvocation::register_fn`. Not yet consumed by any template (native-mode
+    /// registration codegen — actually EMITTING a call to this export, via
+    /// `@boltffi/runtime`'s `native_callback.ts` primitives — is tracked as the concrete next step;
+    /// see that module's own doc and `runtime/typescript/test/native.bun.test.ts`'s real-dylib
+    /// proof of the mechanism this field's consumer will drive).
+    pub register_fn: String,
     pub local_free_fn: String,
     pub wrap_handle_fn: String,
     pub proxy_class_name: String,

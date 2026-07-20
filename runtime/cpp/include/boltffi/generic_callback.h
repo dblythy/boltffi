@@ -190,6 +190,33 @@ inline std::shared_ptr<RegisteredCallbackObject> lookup(std::uint64_t handle) {
   return CallbackRegistry::instance().find(handle);
 }
 
+/// Releases an INCOMING deferred callback-parameter buffer via the real
+/// `boltffi_free_deferred_callback_bytes` (`boltffi_core::callback::deferred_buffer` --
+/// `transfer_deferred_callback_bytes`'s paired dealloc). Every buffer parameter this file's
+/// trampolines receive is on a deferred-dispatch slot (an async method, or a sync method with no
+/// return value -- `AbiCallbackMethod::is_deferred_dispatch`'s definition, mirrored here): the
+/// caller (Rust) already transferred ownership of a `Box<[u8]>`-backed allocation expecting the
+/// receiver to free it exactly once. `dlsym`'d like `boltffi_buf_from_bytes` below (a per-process,
+/// dynamically loaded Rust symbol, not a build-time link dependency) and fails loudly if missing --
+/// silently skipping the free would trade a link error for a silent per-call leak.
+inline void freeDeferredCallbackBytes(const std::uint8_t* ptr, std::uintptr_t len) {
+  static void* freeFn = dlsym(RTLD_DEFAULT, "boltffi_free_deferred_callback_bytes");
+  if (!freeFn) throw std::runtime_error("boltffi::generic_callback: boltffi_free_deferred_callback_bytes not found");
+  using FreeDeferredFn = void (*)(std::uint8_t*, std::uintptr_t);
+  reinterpret_cast<FreeDeferredFn>(freeFn)(const_cast<std::uint8_t*>(ptr), len);
+}
+
+/// Copies an incoming deferred buffer parameter into an owned `std::vector`, then IMMEDIATELY
+/// releases the source allocation via `freeDeferredCallbackBytes` -- called at the very top of
+/// every trampoline that receives one, before any handle/method lookup, so a call that can't be
+/// dispatched (unknown handle, unregistered method -- an early return below) still returns
+/// ownership of the transferred bytes instead of leaking them on every such call.
+inline std::vector<std::uint8_t> takeDeferredBuf(const std::uint8_t* ptr, std::uintptr_t len) {
+  std::vector<std::uint8_t> copy(ptr, ptr + len);
+  freeDeferredCallbackBytes(ptr, len);
+  return copy;
+}
+
 // ---- the universal free/clone pair (no SlotId needed -- one instance covers every vtable) ----
 
 extern "C" inline void genericFree(std::uint64_t handle) { CallbackRegistry::instance().erase(handle); }
@@ -262,13 +289,14 @@ void trampolineVoidScalar2(std::uint64_t handle, std::uint64_t a0, std::uint64_t
 
 template <std::size_t SlotId>
 void trampolineVoidBuf1(std::uint64_t handle, const std::uint8_t* ptr, std::uintptr_t len) {
+  auto buf = takeDeferredBuf(ptr, len);
   auto obj = lookup(handle);
   if (!obj) return;
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) return;
   CallbackResult result;
   GenericMethodCall call;
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr, ptr + len));
+  call.bufArgs.push_back(std::move(buf));
   it->second(call, nullptr, result);
 }
 
@@ -282,17 +310,23 @@ template <std::size_t SlotId>
 void trampolineVoidBuf2Scalar1Buf1(std::uint64_t handle, const std::uint8_t* ptr0, std::uintptr_t len0,
                                     const std::uint8_t* ptr1, std::uintptr_t len1, std::int32_t scalar,
                                     const std::uint8_t* ptr2, std::uintptr_t len2) {
+  // All three transferred buffers are taken (copied + freed) unconditionally, before the
+  // handle/method lookup below -- see `takeDeferredBuf`'s own doc for why this must happen
+  // regardless of whether dispatch ends up finding a handler.
+  auto buf0 = takeDeferredBuf(ptr0, len0);
+  auto buf1 = takeDeferredBuf(ptr1, len1);
+  auto buf2 = takeDeferredBuf(ptr2, len2);
   auto obj = lookup(handle);
   if (!obj) return;
   auto it = obj->methods.find(slotMethodNames()[SlotId]);
   if (it == obj->methods.end()) return;
   CallbackResult result;
   GenericMethodCall call;
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr0, ptr0 + len0));
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr1, ptr1 + len1));
+  call.bufArgs.push_back(std::move(buf0));
+  call.bufArgs.push_back(std::move(buf1));
   call.scalarArg = static_cast<std::uint64_t>(scalar);
   call.hasScalarArg = true;
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr2, ptr2 + len2));
+  call.bufArgs.push_back(std::move(buf2));
   it->second(call, nullptr, result);
 }
 
@@ -322,6 +356,7 @@ void trampolineCompletionStatus0(std::uint64_t handle, CompletionStatusFn comple
 template <std::size_t SlotId>
 void trampolineCompletionStatus1(std::uint64_t handle, const std::uint8_t* ptr, std::uintptr_t len,
                                   CompletionStatusFn complete, void* userdata) {
+  auto buf = takeDeferredBuf(ptr, len);
   auto obj = lookup(handle);
   auto onComplete = [complete, userdata](CallbackCompletion c) { complete(userdata, c.statusCode); };
   if (!obj) {
@@ -335,7 +370,7 @@ void trampolineCompletionStatus1(std::uint64_t handle, const std::uint8_t* ptr, 
   }
   CallbackResult result;
   GenericMethodCall call;
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr, ptr + len));
+  call.bufArgs.push_back(std::move(buf));
   it->second(call, onComplete, result);
 }
 
@@ -344,6 +379,8 @@ template <std::size_t SlotId>
 void trampolineCompletionStatus2(std::uint64_t handle, const std::uint8_t* ptr0, std::uintptr_t len0,
                                   const std::uint8_t* ptr1, std::uintptr_t len1, CompletionStatusFn complete,
                                   void* userdata) {
+  auto buf0 = takeDeferredBuf(ptr0, len0);
+  auto buf1 = takeDeferredBuf(ptr1, len1);
   auto obj = lookup(handle);
   auto onComplete = [complete, userdata](CallbackCompletion c) { complete(userdata, c.statusCode); };
   if (!obj) {
@@ -357,8 +394,8 @@ void trampolineCompletionStatus2(std::uint64_t handle, const std::uint8_t* ptr0,
   }
   CallbackResult result;
   GenericMethodCall call;
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr0, ptr0 + len0));
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr1, ptr1 + len1));
+  call.bufArgs.push_back(std::move(buf0));
+  call.bufArgs.push_back(std::move(buf1));
   it->second(call, onComplete, result);
 }
 
@@ -450,6 +487,7 @@ void trampolineCompletionStatusBuf0(std::uint64_t handle, CompletionStatusBufFn 
 template <std::size_t SlotId>
 void trampolineCompletionStatusBuf1(std::uint64_t handle, const std::uint8_t* ptr, std::uintptr_t len,
                                      CompletionStatusBufFn complete, void* userdata) {
+  auto buf = takeDeferredBuf(ptr, len);
   auto obj = lookup(handle);
   auto onComplete = [complete, userdata](CallbackCompletion c) {
     LargeAggregate agg = makeFfiBufFromBytes(c.bytes);
@@ -466,7 +504,7 @@ void trampolineCompletionStatusBuf1(std::uint64_t handle, const std::uint8_t* pt
   }
   CallbackResult result;
   GenericMethodCall call;
-  call.bufArgs.push_back(std::vector<std::uint8_t>(ptr, ptr + len));
+  call.bufArgs.push_back(std::move(buf));
   it->second(call, onComplete, result);
 }
 

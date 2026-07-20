@@ -39,6 +39,25 @@ SpyFfiBuf boltffi_buf_from_bytes(const std::uint8_t* ptr, std::uintptr_t len) {
 }
 }
 
+// `takeDeferredBuf`'s free half (`freeDeferredCallbackBytes`) `dlsym`s a REAL
+// `boltffi_free_deferred_callback_bytes` -- same "this test binary provides its own spy" rationale
+// as `boltffi_buf_from_bytes` above. Tracks every (ptr, len) pair it's asked to free so tests can
+// assert the incoming-buffer leak (found by adversarial review of a91bde65) stays fixed: every
+// trampoline that takes a deferred buffer parameter must free it exactly once, even when dispatch
+// never finds a registered handle/method.
+namespace {
+std::vector<std::pair<void*, std::uintptr_t>>& deferredFrees() {
+  static std::vector<std::pair<void*, std::uintptr_t>> frees;
+  return frees;
+}
+}  // namespace
+
+extern "C" {
+void boltffi_free_deferred_callback_bytes(std::uint8_t* ptr, std::uintptr_t len) {
+  deferredFrees().emplace_back(static_cast<void*>(ptr), len);
+}
+}
+
 BOLTFFI_TEST(classifies_free_and_clone) {
   VTableFieldAbi freeField{"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}};
   VTableFieldAbi cloneField{"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}};
@@ -338,6 +357,155 @@ BOLTFFI_TEST(registered_vtable_survives_the_registering_functions_return) {
   BOLTFFI_CHECK(factorFn(handle) == 9);
 
   auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slotArray[0]);
+  freeFn(handle);
+}
+
+BOLTFFI_TEST(void_buf1_trampoline_frees_the_transferred_buffer_exactly_once) {
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"on_event",
+                            TypeRef{PrimKind::Void},
+                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}}});
+  auto slots = buildVTableBytes(vtable);
+
+  std::vector<std::uint8_t> seen;
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["on_event"] = [&](const GenericMethodCall& call, std::function<void(CallbackCompletion)>,
+                                           CallbackResult&) { seen = call.bufArgs[0]; };
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  deferredFrees().clear();
+  std::uint8_t buf[] = {9, 8, 7};
+  auto onEventFn =
+      reinterpret_cast<void (*)(std::uint64_t, const std::uint8_t*, std::uintptr_t)>(slots[2]);
+  onEventFn(handle, buf, sizeof(buf));
+
+  BOLTFFI_CHECK((seen == std::vector<std::uint8_t>{9, 8, 7}));
+  BOLTFFI_CHECK(deferredFrees().size() == 1);
+  BOLTFFI_CHECK(deferredFrees()[0].first == static_cast<void*>(buf));
+  BOLTFFI_CHECK(deferredFrees()[0].second == sizeof(buf));
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
+  freeFn(handle);
+}
+
+BOLTFFI_TEST(void_buf1_trampoline_frees_the_transferred_buffer_even_when_handle_is_unknown) {
+  // The leak's worst case (adversarial finding): a call that can't be dispatched at all -- unknown
+  // handle -- must still return ownership of the transferred bytes rather than leaking them.
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"on_event",
+                            TypeRef{PrimKind::Void},
+                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}}});
+  auto slots = buildVTableBytes(vtable);
+
+  deferredFrees().clear();
+  std::uint8_t buf[] = {1, 2};
+  auto onEventFn =
+      reinterpret_cast<void (*)(std::uint64_t, const std::uint8_t*, std::uintptr_t)>(slots[2]);
+  onEventFn(0xDEADBEEFULL, buf, sizeof(buf));  // never registered
+
+  BOLTFFI_CHECK(deferredFrees().size() == 1);
+  BOLTFFI_CHECK(deferredFrees()[0].first == static_cast<void*>(buf));
+  BOLTFFI_CHECK(deferredFrees()[0].second == sizeof(buf));
+}
+
+BOLTFFI_TEST(void_buf2_scalar1_buf1_trampoline_frees_all_three_transferred_buffers) {
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"on_dropped",
+                            TypeRef{PrimKind::Void},
+                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64},
+                             TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}, TypeRef{PrimKind::I32},
+                             TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64}}});
+  auto slots = buildVTableBytes(vtable);
+
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["on_dropped"] = [](const GenericMethodCall&, std::function<void(CallbackCompletion)>,
+                                            CallbackResult&) {};
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  deferredFrees().clear();
+  std::uint8_t buf0[] = {1}, buf1[] = {2, 3}, buf2[] = {4, 5, 6};
+  auto onDroppedFn = reinterpret_cast<void (*)(std::uint64_t, const std::uint8_t*, std::uintptr_t,
+                                                const std::uint8_t*, std::uintptr_t, std::int32_t,
+                                                const std::uint8_t*, std::uintptr_t)>(slots[2]);
+  onDroppedFn(handle, buf0, sizeof(buf0), buf1, sizeof(buf1), 0, buf2, sizeof(buf2));
+
+  BOLTFFI_CHECK(deferredFrees().size() == 3);
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
+  freeFn(handle);
+}
+
+BOLTFFI_TEST(completion_status1_trampoline_frees_the_transferred_buffer) {
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  TypeRef statusOnly;
+  statusOnly.kind = PrimKind::FnPtr;
+  statusOnly.fnPtrArity = 2;
+  vtable.fields.push_back({"set",
+                            TypeRef{PrimKind::Void},
+                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64},
+                             statusOnly, TypeRef{PrimKind::PtrMut}}});
+  auto slots = buildVTableBytes(vtable);
+
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["set"] = [](const GenericMethodCall&, std::function<void(CallbackCompletion)> onComplete,
+                                     CallbackResult&) { onComplete(CallbackCompletion{0, {}}); };
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  deferredFrees().clear();
+  std::uint8_t buf[] = {1, 2, 3, 4};
+  std::atomic<int32_t> received{-1};
+  auto setFn = reinterpret_cast<void (*)(std::uint64_t, const std::uint8_t*, std::uintptr_t,
+                                          detail::CompletionStatusFn, void*)>(slots[2]);
+  auto completion = +[](void* ud, std::int32_t status) { *reinterpret_cast<std::atomic<int32_t>*>(ud) = status; };
+  setFn(handle, buf, sizeof(buf), completion, &received);
+
+  BOLTFFI_CHECK(received.load() == 0);
+  BOLTFFI_CHECK(deferredFrees().size() == 1);
+  BOLTFFI_CHECK(deferredFrees()[0].second == sizeof(buf));
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
+  freeFn(handle);
+}
+
+BOLTFFI_TEST(completion_status_buf1_trampoline_frees_the_transferred_buffer) {
+  VTableAbi vtable;
+  vtable.fields.push_back({"free", TypeRef{PrimKind::Void}, {TypeRef{PrimKind::U64}}});
+  vtable.fields.push_back({"clone", TypeRef{PrimKind::U64}, {TypeRef{PrimKind::U64}}});
+  TypeRef statusPlusBuf;
+  statusPlusBuf.kind = PrimKind::FnPtr;
+  statusPlusBuf.fnPtrArity = 3;
+  vtable.fields.push_back({"get",
+                            TypeRef{PrimKind::Void},
+                            {TypeRef{PrimKind::U64}, TypeRef{PrimKind::PtrConst}, TypeRef{PrimKind::U64},
+                             statusPlusBuf, TypeRef{PrimKind::PtrMut}}});
+  auto slots = buildVTableBytes(vtable);
+
+  auto registration = std::make_shared<RegisteredCallbackObject>();
+  registration->methods["get"] = [](const GenericMethodCall&, std::function<void(CallbackCompletion)> onComplete,
+                                     CallbackResult&) { onComplete(CallbackCompletion{0, {42}}); };
+  std::uint64_t handle = CallbackRegistry::instance().insert(registration);
+
+  deferredFrees().clear();
+  std::uint8_t buf[] = {1, 2, 3};
+  std::atomic<bool> done{false};
+  auto getFn = reinterpret_cast<void (*)(std::uint64_t, const std::uint8_t*, std::uintptr_t,
+                                          detail::CompletionStatusBufFn, void*)>(slots[2]);
+  auto completion = +[](void* ud, std::int32_t, LargeAggregate) { *reinterpret_cast<std::atomic<bool>*>(ud) = true; };
+  getFn(handle, buf, sizeof(buf), completion, &done);
+
+  BOLTFFI_CHECK(done.load());
+  BOLTFFI_CHECK(deferredFrees().size() == 1);
+  BOLTFFI_CHECK(deferredFrees()[0].second == sizeof(buf));
+
+  auto freeFn = reinterpret_cast<void (*)(std::uint64_t)>(slots[0]);
   freeFn(handle);
 }
 

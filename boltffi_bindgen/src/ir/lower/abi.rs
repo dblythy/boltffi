@@ -229,11 +229,31 @@ impl<'c> Lowerer<'c> {
             })
             .collect();
 
+        // `register_fn`/`create_fn` are the ONLY two real symbols the native-only "foreign vtable"
+        // registration protocol exports per callback trait (`boltffi_macros::experimental::wrapper::
+        // callback`'s `#register_ident`/`#create_ident`) -- like every other native symbol, they
+        // need `NamingStyle::Experimental`'s long, module-qualified form to match a real
+        // `BindingExpansion`-built artifact (mirrors `abi_call_for_function`'s own naming_style
+        // branch elsewhere in this file). Missing this branch entirely (as opposed to a subtly wrong
+        // one) was the root cause of the react-native track's "0 host-callback-registration symbols
+        // resolve against a real dylib" gap: this file always minted the short/legacy scheme,
+        // regardless of `native_async`.
+        let (register_fn, create_fn) = match self.naming_style {
+            boltffi_binding::NamingStyle::LegacyCompatible => (
+                naming::callback_register_fn(callback.id.as_str()),
+                naming::callback_create_fn(callback.id.as_str()),
+            ),
+            boltffi_binding::NamingStyle::Experimental => (
+                naming::Name::new(naming::experimental::callback_register_fn(&callback.qualified_path).into_string()),
+                naming::Name::new(naming::experimental::callback_create_fn(&callback.qualified_path).into_string()),
+            ),
+        };
+
         AbiCallbackInvocation {
             callback_id: callback.id.clone(),
             vtable_type: naming::callback_vtable_name(callback.id.as_str()),
-            register_fn: naming::callback_register_fn(callback.id.as_str()),
-            create_fn: naming::callback_create_fn(callback.id.as_str()),
+            register_fn,
+            create_fn,
             methods,
         }
     }

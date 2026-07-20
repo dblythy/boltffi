@@ -968,8 +968,46 @@ impl<'a> TypeScriptLowerer<'a> {
         let abi_callback = index.callback(self.abi, &def.id);
         let interface_name = naming::to_upper_camel_case(def.id.as_str());
         let trait_name_snake = naming::to_snake_case(def.id.as_str());
-        let create_handle_fn = cb_naming::callback_create_handle_global().to_string();
-        let local_free_fn = format!("__boltffi_local_{}_free", trait_name_snake);
+        // The "local" direction's real symbols (`__boltffi_local_<qualified_path>_free`/`_<method>`,
+        // Rust handing JS a handle onto a Rust-native trait impl) always embed the FULL, crate-
+        // qualified path, verified against `boltffi_binding::lower::symbol::CallbackLocalLifecycle`/
+        // `CallbackSlot` (which mint this exact form under BOTH `NamingStyle::Legacy`/`Experimental`
+        // — this is a genuine, surface-agnostic naming fact, not a native-only one). Still gated on
+        // `native_async` here, matching `create_handle_fn` below: this session's mandate is the
+        // native-mode gap specifically, and the wasm surface's generated TS output must stay
+        // byte-identical to what it always was (this repo's own cross-session invariant, protecting
+        // against exactly this kind of drift) — the plain-leaf form is a real, PRE-EXISTING bug for
+        // wasm too whenever a trait has a qualified path beyond the bare crate root, left as
+        // follow-up rather than fixed here without a wasm-side census to validate against.
+        let qualified_symbol_path = if self.experimental.native_async && !def.qualified_path.is_empty() {
+            naming::experimental::symbol_path(&def.qualified_path)
+        } else {
+            trait_name_snake.clone()
+        };
+        // `create_handle_fn` is genuinely DIFFERENT per surface, not just differently NAMED: wasm32
+        // has no per-trait `create_fn` at all (`boltffi_core::callback::wasm`'s single, global,
+        // shared `boltffi_create_callback_handle(js_handle: u32) -> u32` mints a plain wasm-side id
+        // for EVERY callback trait alike, since wasm dispatch never needs a per-trait vtable
+        // pointer baked into the handle -- that's `_callbackImports`' job instead); only NATIVE
+        // mode's handle is the 2-word `{handle, vtable}` aggregate a per-trait `create_fn`
+        // (`AbiCallbackInvocation::create_fn`, `ir/lower/abi.rs::abi_callback_invocation` --
+        // already threads `NamingStyle` correctly) produces. Gating on `native_async` (not
+        // `NamingStyle` directly) matches every other per-surface branch in this file (e.g.
+        // `lower_class`'s `ffi_free`) — `native_async` mode always pairs with
+        // `NamingStyle::Experimental`, so reading the IR value here can never silently pick up the
+        // wrong scheme.
+        let create_handle_fn = if self.experimental.native_async {
+            abi_callback.create_fn.as_str().to_string()
+        } else {
+            cb_naming::callback_create_handle_global().to_string()
+        };
+        // Not yet consumed by any template (native mode's registration codegen -- see
+        // `TsCallback::register_fn`'s own doc) but always available so a future native_async
+        // template branch can read it without another IR round trip; wasm32 has no register-fn
+        // concept at all (see `create_handle_fn`'s comment above), so this value is meaningless
+        // there and MUST stay unread outside a `native_async` branch.
+        let register_fn = abi_callback.register_fn.as_str().to_string();
+        let local_free_fn = format!("__boltffi_local_{}_free", qualified_symbol_path);
         let wrap_handle_fn = format!("wrap{}", interface_name);
         let proxy_class_name = format!("{}Proxy", interface_name);
 
@@ -988,9 +1026,12 @@ impl<'a> TypeScriptLowerer<'a> {
                     trait_name_snake,
                     naming::to_snake_case(method_def.id.as_str())
                 );
+                // Real exported native symbol (checked against a real artifact, unlike `import_name`
+                // above, which is only ever a wasm-mode `_callbackImports` JS-object key) — needs the
+                // same qualified-path form `local_free_fn` uses above, not the bare leaf name.
                 let proxy_export_name = format!(
                     "__boltffi_local_{}_{}",
-                    trait_name_snake,
+                    qualified_symbol_path,
                     naming::to_snake_case(method_def.id.as_str())
                 );
 
@@ -1162,9 +1203,18 @@ impl<'a> TypeScriptLowerer<'a> {
                     "__boltffi_callback_{}_{}_start",
                     trait_name_snake, method_name_snake
                 );
+                // Real exported native symbol (checked against a real artifact via `_exports.X`,
+                // like `local_free_fn`/`proxy_export_name` above — unlike `start_import_name`
+                // above, which is only ever a wasm-mode `_callbackImports` key) — same
+                // qualified-path-under-native_async gating as the rest of this function.
+                // `boltffi_binding::lower::symbol::SymbolAllocator::mint_callback_complete` mints
+                // this exact qualified form (`{}_callback_{}_{}_complete`, `symbol_path`-joined)
+                // unconditionally of naming style, but this render layer still only applies it
+                // under `native_async` to keep wasm output byte-identical, matching every other
+                // gate in this function.
                 let complete_export_name = format!(
                     "boltffi_callback_{}_{}_complete",
-                    trait_name_snake, method_name_snake
+                    qualified_symbol_path, method_name_snake
                 );
 
                 let params = method_def
@@ -1312,6 +1362,7 @@ impl<'a> TypeScriptLowerer<'a> {
             interface_name,
             trait_name_snake,
             create_handle_fn,
+            register_fn,
             local_free_fn,
             wrap_handle_fn,
             proxy_class_name,
