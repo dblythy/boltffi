@@ -14,6 +14,23 @@
 // (`runtime/cpp/include/boltffi/ffi_buf.h`'s `decodeAndFreeFfiBuf`), which this file assumes
 // copies bytes into the arena (or hands back a plain `Uint8Array`) before `_module`'s decode
 // helpers ever run — this file owns the JS-side half of that contract, not the C++ half.
+//
+// Call-in-flight growth marks (native_arena.ts's `beginCall`/`endCall`, wired here): every native
+// dispatch this file itself makes -- `NativeAsyncFutureManager.dispatchPoll` (the initial poll
+// registration AND every `MaybeReady`-queued re-poll), `NativeBoltFFIModule.completeAsync`, and
+// `takeLastErrorMessage`'s two calls -- brackets JUST that one synchronous native invocation with
+// the arena's growth guard, closing the reentrant-growth coherence gap `native_arena.ts`'s class
+// doc describes for every route that goes through one of these three funnels (which is every
+// generated async completion/poll/last-error call site — see `boltffi_bindgen`'s `class.txt`/
+// `async_function.txt`/`value_type_companion.txt`/`enum_namespace.txt`, all of which call through
+// `_module.completeAsync`/`_module.asyncManager.pollAsyncNative`/`_module.takeLastErrorMessage`
+// rather than dispatching directly). What this does NOT yet close: a plain, non-async native call
+// a generated `function.txt` function makes directly against `_exports.ffiName(...)` (and the one
+// synchronous "start the async op" call `async_function.txt` emits before ever touching
+// `pollAsyncNative`) never funnels through `_module` at all -- there is nothing in THIS file to
+// bracket, and wiring it needs a codegen change (routing those calls through a new marked
+// `_module` wrapper), out of this file's scope. See `runtime/cpp/jsi/boltffi_generic_host_object.h`
+// for why the C++ HostObject cannot close that remaining gap on its own either.
 
 import { WireReader, WireWriter } from "./wire.js";
 import type { WasmWireWriterAllocator } from "./wire.js";
@@ -78,6 +95,27 @@ interface NativePendingFuture<Token> {
 }
 
 /**
+ * The narrow `NativeMemoryArena.beginCall()`/`endCall()` surface (native_arena.ts) every native
+ * dispatch this file makes must bracket, in a `try`/`finally`, around the ACTUAL native invocation
+ * only — never around an `await` (see `native_arena.ts`'s "reentrant growth" class doc for the
+ * coherence bug this closes: a synchronous host-callback the native call triggers can otherwise
+ * grow the arena mid-call, silently orphaning an out-param write the callee already made into the
+ * OLD buffer). Kept structural — rather than importing `NativeMemoryArena` by name — so
+ * `NativeAsyncFutureManager` stays constructible on its own (as several tests below already do)
+ * without wiring up a real arena; `NativeBoltFFIModule` passes its own arena, which already
+ * implements this shape.
+ */
+export interface NativeCallMarks {
+  beginCall(): void;
+  endCall(): void;
+}
+
+const NO_OP_CALL_MARKS: NativeCallMarks = {
+  beginCall(): void {},
+  endCall(): void {},
+};
+
+/**
  * The native-protocol counterpart to `AsyncFutureManager` (module.ts) — a genuinely different
  * poll loop, not a smaller version of the same thing (design doc item 4). Owns exactly one
  * continuation trampoline (created once, via `createTrampoline`) and a table of pending
@@ -89,14 +127,23 @@ interface NativePendingFuture<Token> {
  * mirrors wasm's `AsyncFutureManager.pollAsync` exactly, so generated code completes/frees the
  * future itself afterward (`_complete_ffi_name`/`_free_ffi_name`), the same shape either backend
  * emits.
+ *
+ * Every actual `poll(...)` dispatch — the initial registration AND every later re-poll a
+ * `MaybeReady` signal queues — goes through `dispatchPoll`, which brackets JUST that one
+ * synchronous call with `callMarks.beginCall()`/`endCall()`. The `Promise` returned by
+ * `pollAsyncNative` itself is NEVER bracketed: the mark must not span the await gap between one
+ * poll dispatch and the next (growth there is legal — nothing is mid-call), only the synchronous
+ * window each dispatch itself runs in.
  */
 export class NativeAsyncFutureManager<Token = unknown> {
   private readonly trampoline: Token;
   private readonly pending = new Map<bigint, NativePendingFuture<Token>>();
   private nextCallbackData = 1n;
+  private readonly callMarks: NativeCallMarks;
 
-  constructor(createTrampoline: NativeTrampolineFactory<Token>) {
+  constructor(createTrampoline: NativeTrampolineFactory<Token>, callMarks: NativeCallMarks = NO_OP_CALL_MARKS) {
     this.trampoline = createTrampoline((callbackData, signal) => this.onSignal(callbackData, signal));
+    this.callMarks = callMarks;
   }
 
   pollAsyncNative(handle: NativeHandle, poll: NativePollFn<Token>): Promise<NativeHandle> {
@@ -108,8 +155,21 @@ export class NativeAsyncFutureManager<Token = unknown> {
       // the Ready case synchronously inside this very call (the "Waked" race the design doc
       // calls out). `onSignal` handles that identically to an off-thread firing: the pending
       // entry is already in the map before `poll` runs.
-      poll(handle, callbackData, this.trampoline);
+      this.dispatchPoll(poll, handle, callbackData);
     });
+  }
+
+  /** Brackets ONE synchronous `poll(...)` dispatch with the arena's call-in-flight growth guard
+   * (see the class doc) — shared by the initial registration (`pollAsyncNative`) and every
+   * `MaybeReady`-queued re-poll (`onSignal`), since both are equally a native call whose own
+   * synchronous host-callbacks (if any) must not be allowed to grow the arena out from under it. */
+  private dispatchPoll(poll: NativePollFn<Token>, handle: NativeHandle, callbackData: bigint): void {
+    this.callMarks.beginCall();
+    try {
+      poll(handle, callbackData, this.trampoline);
+    } finally {
+      this.callMarks.endCall();
+    }
   }
 
   private allocateCallbackData(): bigint {
@@ -136,8 +196,11 @@ export class NativeAsyncFutureManager<Token = unknown> {
       // native stack frame per iteration with no bound, for a future that never actually blocks.
       // A microtask hop trades stack depth for queue depth: each iteration returns to an empty
       // stack before the next one runs, so the recursion is unbounded in iteration count but
-      // bounded (O(1)) in stack depth.
-      queueMicrotask(() => entry.poll(entry.handle, callbackData, this.trampoline));
+      // bounded (O(1)) in stack depth. Each re-poll is its OWN synchronous dispatch -- routed
+      // through `dispatchPoll` so it gets its OWN beginCall/endCall bracket, never one held open
+      // across the microtask hop itself (growth between re-polls is legal; only the call inside
+      // one is not).
+      queueMicrotask(() => this.dispatchPoll(entry.poll, entry.handle, callbackData));
       return;
     }
 
@@ -228,8 +291,10 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
     arena: NativeMemoryArena = new NativeMemoryArena()
   ) {
     this.exports = exports;
-    this.asyncManager = new NativeAsyncFutureManager<Token>(createContinuationTrampoline);
     this.arena = arena;
+    // `arena` itself satisfies `NativeCallMarks` (it has its own `beginCall`/`endCall`) -- every
+    // poll dispatch the async manager makes shares THIS instance's own call-in-flight growth guard.
+    this.asyncManager = new NativeAsyncFutureManager<Token>(createContinuationTrampoline, arena);
     this.bindArenaToHost();
   }
 
@@ -273,11 +338,27 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
     this.arena.free(ptr, size);
   }
 
+  /**
+   * `complete` is the SYNCHRONOUS dispatch of the native `_complete` export every async method's
+   * generated completion route calls this through (`_module.completeAsync((statusPtr) =>
+   * _exports.xxx_complete(...))`) -- the one funnel ALL of them share. Brackets JUST that call
+   * with the arena's call-in-flight growth guard (`beginCall`/`endCall`): `statusPtr` is an
+   * out-param the callee writes through after this function returns control to it, so a
+   * synchronous host-callback the completion triggers (reentering JS) must not be allowed to grow
+   * the arena and orphan that write -- see `native_arena.ts`'s class doc. Reading the status back
+   * out happens AFTER `endCall()`, once the call is no longer in flight and reading is safe again.
+   */
   completeAsync<T>(complete: (statusPtr: number) => T): T {
     const statusPtr = this.arena.alloc(4);
     this.arena.dataView.setInt32(statusPtr, 0, true);
     try {
-      const result = complete(statusPtr);
+      this.arena.beginCall();
+      let result: T;
+      try {
+        result = complete(statusPtr);
+      } finally {
+        this.arena.endCall();
+      }
       this.checkStatus(this.arena.dataView.getInt32(statusPtr, true));
       return result;
     } finally {
@@ -903,6 +984,12 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
    * no arena-side equivalent of "ask Rust for its thread-local error." Passes an arena offset as
    * the out-param pointer, exactly like wasm passes a linear-memory offset — a real JSI adapter
    * resolves it against the arena's shared backing buffer.
+   *
+   * Both native calls below (`lastErrorMessage` writing the ptr/len out-param, `freeString`
+   * releasing it) are each bracketed with their OWN `beginCall`/`endCall` pair -- two separate
+   * dispatches, so two separate marks, never one held open across both (see `native_arena.ts`'s
+   * class doc for why any window a synchronous host-callback could reenter through needs the
+   * guard, and why it must never span more than the ONE call it protects).
    */
   takeLastErrorMessage(): string {
     const exportsRecord = this.exports as Record<string, unknown>;
@@ -916,7 +1003,12 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
     const outPtr = this.arena.alloc(NATIVE_FFI_STRING_SIZE);
     try {
       this.arena.byteView.fill(0, outPtr, outPtr + NATIVE_FFI_STRING_SIZE);
-      lastErrorMessage(outPtr);
+      this.arena.beginCall();
+      try {
+        lastErrorMessage(outPtr);
+      } finally {
+        this.arena.endCall();
+      }
       const view = this.arena.dataView;
       const strPtr = view.getUint32(outPtr, true);
       const strLen = view.getUint32(outPtr + 4, true);
@@ -924,7 +1016,12 @@ export class NativeBoltFFIModule<Exports, Token = unknown> {
         strPtr === 0 || strLen === 0
           ? ""
           : this.decoder.decode(this.arena.byteView.subarray(strPtr, strPtr + strLen));
-      freeString(outPtr);
+      this.arena.beginCall();
+      try {
+        freeString(outPtr);
+      } finally {
+        this.arena.endCall();
+      }
       return message;
     } finally {
       this.arena.free(outPtr, NATIVE_FFI_STRING_SIZE);

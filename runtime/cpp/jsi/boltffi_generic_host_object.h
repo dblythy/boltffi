@@ -61,6 +61,30 @@
 // round's finding 2). That coherence half of the fix lives on the JS side
 // (`native_arena.ts`'s call-in-flight growth guard -- see its module doc); this file only owns
 // eliminating the (separate) torn-snapshot hazard described above.
+//
+// Why this file has no C++-side mirror of `beginCall()`/`endCall()`: this class cannot enforce
+// the growth-coherence invariant itself, no matter what counter it kept, because it never causes
+// growth and only ever LEARNS about one after the fact. Growth is 100% a JS-side event --
+// `NativeMemoryArena.grow()` reallocates `this.buf`/`this.view`/`this.bytes` FIRST and only THEN
+// invokes `onGrow`, which is what eventually calls back into THIS file's own
+// `__boltffi_native_bind_arena` handler above. By the time that handler runs, the old buffer is
+// already orphaned; a C++ counter refusing the rebind at that point could not undo the
+// reallocation JS already performed, so it would neither prevent the coherence break nor even
+// reliably detect it before JS itself does (`NativeMemoryArena.grow()`'s own `callDepth` check
+// throws first, synchronously, from the same JS call stack that would otherwise have triggered
+// this rebind). Adding a parallel depth counter here would be pure dead weight -- state that can
+// never be the one to catch the bug, tracking something the JS side already tracks and already
+// acts on. The invariant instead depends entirely on JS marking the call BEFORE it ever reaches
+// this HostObject: `@boltffi/runtime`'s `native.ts` wires `beginCall()`/`endCall()` around its own
+// three native-dispatch funnels (`NativeAsyncFutureManager.dispatchPoll`,
+// `NativeBoltFFIModule.completeAsync`, `takeLastErrorMessage`) -- every generated async
+// completion/poll/last-error call site routes through one of those three. What remains OPEN (a
+// known gap, not silently accepted): a plain non-async call a generated `function.txt` function
+// makes directly against `_exports.ffiName(...)` -- which, for a real JSI adapter, dispatches
+// through THIS class's `get()` lambda exactly like any other call -- has no JS-side wrapper
+// bracketing it at all today, so a synchronous host-callback such a call triggers could still grow
+// the arena reentrantly underneath it. Closing that needs a codegen change (routing those calls
+// through a marked `_module` wrapper too), not anything this file could add on its own.
 #pragma once
 
 #include <jsi/jsi.h>

@@ -143,7 +143,10 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
         // concurrent rebind could tear apart from the pin (the second adversarial round's finding
         // 1 residual). Pinning the object's lifetime does not, by itself, make a reentrant grow's
         // effect on an OUT-param write coherent with what JS reads after the call returns -- that
-        // half of the fix is the JS-side arena's call-in-flight growth guard (`native_arena.ts`).
+        // half of the fix is the JS-side arena's call-in-flight growth guard (`native_arena.ts`),
+        // which this class deliberately does NOT mirror (see the header's doc for why a C++-side
+        // counter could never be the one to enforce it, and which call sites the JS side already
+        // covers vs. the one that's still open).
         std::shared_ptr<ArrayBuffer> pinnedArena;
         {
           std::lock_guard<std::mutex> lock(arenaObjectMutex_);
