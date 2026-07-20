@@ -15,8 +15,13 @@
 
 #include "test_harness.h"
 
+using boltffi::isArenaPointerKind;
 using boltffi::parseAbiHeader;
+using boltffi::planFunctionCall;
+using boltffi::planFunctionReturn;
 using boltffi::PrimKind;
+using boltffi::RegisterSlotKind;
+using boltffi::ReturnPlan;
 
 namespace {
 
@@ -149,11 +154,51 @@ BOLTFFI_TEST(fn_ptr_typedef_alias_used_as_bare_param_type) {
   BOLTFFI_CHECK(abi.functions[0].params[2].kind == PrimKind::FnPtr);
 }
 
-BOLTFFI_TEST(pointer_typedef_alias_used_as_bare_return_type) {
+BOLTFFI_TEST(pointer_typedef_alias_used_as_bare_return_type_is_an_opaque_handle) {
+  // CRITICAL regression (finding 3, this session): `RustFutureHandle` is a Rust-owned OPAQUE
+  // handle (a real `Box`/`Arc` pointer the async-future machinery manages), never an offset into a
+  // JS-simulated arena -- it must classify distinctly from an inline `const T *` parameter
+  // (`PrimKind::PtrConst`), which a generic JS-facing caller DOES legitimately rebase against a
+  // bound arena. Before this fix both were the same `PrimKind::PtrConst`, so every
+  // poll/complete/cancel/free call on a real future handle got silently (and wrongly) rebased as
+  // `arenaBase + handle`, corrupting the pointer.
   auto abi = parseAbiHeader(
       "typedef const void *RustFutureHandle;\n"
-      "RustFutureHandle boltffi_x_start(uint64_t receiver);\n");
-  BOLTFFI_CHECK(abi.functions[0].returnType.kind == PrimKind::PtrConst);
+      "RustFutureHandle boltffi_x_start(uint64_t receiver);\n"
+      "void boltffi_x_poll(RustFutureHandle handle, uint64_t callback_data);\n");
+  BOLTFFI_CHECK(abi.functions[0].returnType.kind == PrimKind::OpaqueHandle);
+  BOLTFFI_CHECK(abi.functions[1].params[0].kind == PrimKind::OpaqueHandle);
+  BOLTFFI_CHECK(!isArenaPointerKind(PrimKind::OpaqueHandle));
+}
+
+BOLTFFI_TEST(vtable_pointer_param_is_an_opaque_handle_not_an_arena_pointer) {
+  // CRITICAL regression (finding 1, second adversarial round): a `boltffi_register_callback_*`
+  // function's `const ___FooVTable *vtable` parameter carries the REAL process pointer
+  // `registerVTableForProcessLifetime` (generic_callback.h) hands back -- never an offset into a
+  // JS-simulated arena, unlike an inline `const uint8_t *` data pointer. Before this fix it
+  // classified as `PtrConst` purely because it was spelled with a `*` at the use site, so a
+  // generic dispatch would rebase it as `arenaBase + processAddress`, corrupting it (wild pointer
+  // on the Rust side). A pointer to a NAMED vtable struct type must classify like `RustFutureHandle`
+  // (`OpaqueHandle`): structurally, not by guessing from the parameter's name.
+  auto abi = parseAbiHeader(
+      "typedef struct {\n"
+      "    void (*free)(uint64_t);\n"
+      "    uint64_t (*clone)(uint64_t);\n"
+      "} ___FooVTable;\n"
+      "void boltffi_register_callback_foo(const ___FooVTable *vtable);\n");
+  BOLTFFI_CHECK(abi.vtables.size() == 1);
+  BOLTFFI_CHECK(abi.functions.size() == 1);
+  BOLTFFI_CHECK(abi.functions[0].params[0].kind == PrimKind::OpaqueHandle);
+  BOLTFFI_CHECK(!isArenaPointerKind(abi.functions[0].params[0].kind));
+}
+
+BOLTFFI_TEST(inline_pointer_param_is_still_a_rebase_eligible_arena_pointer) {
+  // The sibling case: an INLINE `const uint8_t *` parameter spelling (never through a named
+  // typedef alias) must still classify as `PtrConst` and remain rebase-eligible -- the fix must
+  // not overcorrect and treat every pointer as opaque.
+  auto abi = parseAbiHeader("void boltffi_x(const uint8_t *key_ptr, uintptr_t key_len);\n");
+  BOLTFFI_CHECK(abi.functions[0].params[0].kind == PrimKind::PtrConst);
+  BOLTFFI_CHECK(isArenaPointerKind(PrimKind::PtrConst));
 }
 
 BOLTFFI_TEST(enum_underlying_type_alias_resolves_bare) {
@@ -244,6 +289,177 @@ BOLTFFI_TEST(parses_the_real_full_parse_core_header_end_to_end) {
     BOLTFFI_CHECK(doubleCount <= 1);
   }
   BOLTFFI_CHECK(maxArity == 9);
+
+  // Every `RustFutureHandle`-typed param/return across the ENTIRE real header must classify as
+  // `OpaqueHandle`, never `PtrConst` -- the finding-3 regression, swept across all 689 functions
+  // rather than just the one hand-picked poll function below.
+  bool sawOpaqueHandleParam = false, sawOpaqueHandleReturn = false;
+  for (const auto& fn : abi.functions) {
+    if (fn.returnType.kind == PrimKind::OpaqueHandle) sawOpaqueHandleReturn = true;
+    for (const auto& p : fn.params) {
+      if (p.kind == PrimKind::OpaqueHandle) sawOpaqueHandleParam = true;
+    }
+  }
+  BOLTFFI_CHECK(sawOpaqueHandleParam);
+  BOLTFFI_CHECK(sawOpaqueHandleReturn);
+
+  // Finding 1, second adversarial round: every `boltffi_register_callback_*` function's vtable-
+  // pointer parameter must classify as `OpaqueHandle`, never `PtrConst`/`PtrMut` -- swept across
+  // all 13 real register functions (one per vtable), not just a single hand-picked example, so a
+  // future header that adds a 14th callback vtable can't silently regress this.
+  int registerCallbackFunctions = 0;
+  for (const auto& fn : abi.functions) {
+    if (fn.name.rfind("boltffi_register_callback_", 0) != 0) continue;
+    ++registerCallbackFunctions;
+    BOLTFFI_CHECK(fn.params.size() == 1);
+    BOLTFFI_CHECK(fn.params[0].kind == PrimKind::OpaqueHandle);
+    BOLTFFI_CHECK(!isArenaPointerKind(fn.params[0].kind));
+  }
+  BOLTFFI_CHECK(registerCallbackFunctions == static_cast<int>(abi.vtables.size()));
+  BOLTFFI_CHECK(registerCallbackFunctions == 13);
+
+  const auto* poll = abi.findFunction(
+      "boltffi_async_method_class_parse_core_ffi_object_parse_object_save_poll");
+  BOLTFFI_CHECK(poll != nullptr);
+  BOLTFFI_CHECK(poll->params[0].kind == PrimKind::OpaqueHandle);
+}
+
+// ---- planFunctionCall / planFunctionReturn: the closed-shape-space call planner ----
+// (findings 1 and 2, this session: a by-value 16-byte aggregate PARAMETER
+// (`BoltFFICallbackHandle`) was silently modeled as ONE register instead of the two it actually
+// occupies -- and a 16-byte aggregate RETURN, every `boltffi_create_callback_*` constructor, fell
+// through to the plain-scalar return path and lost its second register (the vtable pointer)
+// entirely.)
+
+BOLTFFI_TEST(plans_plain_scalar_params_as_one_slot_each) {
+  auto abi = parseAbiHeader("bool boltffi_x(uint64_t a, const uint8_t *b_ptr, uintptr_t b_len);\n");
+  auto plan = planFunctionCall(abi.functions[0], abi);
+  BOLTFFI_CHECK(plan.has_value());
+  BOLTFFI_CHECK(plan->size() == 3);
+  for (const auto& slot : *plan) BOLTFFI_CHECK(slot.kind == RegisterSlotKind::Scalar);
+  BOLTFFI_CHECK((*plan)[0].logicalParamIndex == 0);
+  BOLTFFI_CHECK((*plan)[2].logicalParamIndex == 2);
+}
+
+BOLTFFI_TEST(plans_callback_handle_param_as_two_registers_in_field_order) {
+  // Mirrors the real header's `set_http_transport(BoltFFICallbackHandle transport)`.
+  auto abi = parseAbiHeader(
+      "typedef struct {\n"
+      "    uint64_t handle;\n"
+      "    const void *vtable;\n"
+      "} BoltFFICallbackHandle;\n"
+      "bool boltffi_set_http_transport(BoltFFICallbackHandle transport);\n");
+  auto plan = planFunctionCall(abi.functions[0], abi);
+  BOLTFFI_CHECK(plan.has_value());
+  BOLTFFI_CHECK(plan->size() == 2);
+  BOLTFFI_CHECK((*plan)[0].kind == RegisterSlotKind::TwoWordLow);
+  BOLTFFI_CHECK((*plan)[1].kind == RegisterSlotKind::TwoWordHigh);
+  BOLTFFI_CHECK((*plan)[0].logicalParamIndex == 0);
+  BOLTFFI_CHECK((*plan)[1].logicalParamIndex == 0);
+}
+
+BOLTFFI_TEST(plans_later_args_after_a_callback_handle_param_without_shifting) {
+  // The exact hazard the finding names: "later args shift" if a 16-byte aggregate param is
+  // mis-modeled as one register. Mirrors the real header's `live_query_client_new(..., handle
+  // BoltFFICallbackHandle transport, BoltFFICallbackHandle listener)` shape -- TWO aggregate
+  // params, each contributing two registers, with a trailing scalar after both.
+  auto abi = parseAbiHeader(
+      "typedef struct {\n"
+      "    uint64_t handle;\n"
+      "    const void *vtable;\n"
+      "} BoltFFICallbackHandle;\n"
+      "bool boltffi_x(uint64_t receiver, BoltFFICallbackHandle transport, BoltFFICallbackHandle "
+      "listener, uint64_t trailing);\n");
+  auto plan = planFunctionCall(abi.functions[0], abi);
+  BOLTFFI_CHECK(plan.has_value());
+  BOLTFFI_CHECK(plan->size() == 6);  // 1 (receiver) + 2 (transport) + 2 (listener) + 1 (trailing)
+  BOLTFFI_CHECK((*plan)[0].kind == RegisterSlotKind::Scalar);
+  BOLTFFI_CHECK((*plan)[0].logicalParamIndex == 0);
+  BOLTFFI_CHECK((*plan)[1].kind == RegisterSlotKind::TwoWordLow);
+  BOLTFFI_CHECK((*plan)[1].logicalParamIndex == 1);
+  BOLTFFI_CHECK((*plan)[2].kind == RegisterSlotKind::TwoWordHigh);
+  BOLTFFI_CHECK((*plan)[2].logicalParamIndex == 1);
+  BOLTFFI_CHECK((*plan)[3].kind == RegisterSlotKind::TwoWordLow);
+  BOLTFFI_CHECK((*plan)[3].logicalParamIndex == 2);
+  BOLTFFI_CHECK((*plan)[4].kind == RegisterSlotKind::TwoWordHigh);
+  BOLTFFI_CHECK((*plan)[4].logicalParamIndex == 2);
+  BOLTFFI_CHECK((*plan)[5].kind == RegisterSlotKind::Scalar);
+  BOLTFFI_CHECK((*plan)[5].logicalParamIndex == 3);  // NOT shifted onto an aggregate's registers
+}
+
+BOLTFFI_TEST(rejects_by_value_aggregate_params_outside_the_two_word_shape) {
+  // `boltffi_free_string(FfiString string)` / `boltffi_free_buf(FfiBuf_u8 buf)` -- the two real
+  // functions with an unsupported by-value aggregate PARAMETER (see generic_invoke.h's module
+  // doc). These must never be callable through this generic dispatcher.
+  auto abi = parseAbiHeader(
+      "typedef struct {\n"
+      "    uint8_t *ptr;\n"
+      "    uintptr_t len;\n"
+      "    uintptr_t cap;\n"
+      "} FfiString;\n"
+      "void boltffi_free_string(FfiString string);\n");
+  auto plan = planFunctionCall(abi.functions[0], abi);
+  BOLTFFI_CHECK(!plan.has_value());
+}
+
+BOLTFFI_TEST(plans_return_shapes_scalar_twoword_and_sret) {
+  auto abi = parseAbiHeader(
+      "typedef struct {\n"
+      "    int32_t code;\n"
+      "} FfiStatus;\n"
+      "typedef struct {\n"
+      "    uint64_t handle;\n"
+      "    const void *vtable;\n"
+      "} BoltFFICallbackHandle;\n"
+      "typedef struct {\n"
+      "    uint8_t *ptr;\n"
+      "    uintptr_t len;\n"
+      "    uintptr_t cap;\n"
+      "    uintptr_t align;\n"
+      "} FfiBuf_u8;\n"
+      "FfiStatus boltffi_a(uint64_t x);\n"
+      "BoltFFICallbackHandle boltffi_create_callback_x(uint64_t handle);\n"
+      "FfiBuf_u8 boltffi_b(uint64_t x);\n"
+      "void boltffi_c(uint64_t x);\n");
+  BOLTFFI_CHECK(planFunctionReturn(abi.functions[0], abi) == ReturnPlan::Scalar);  // FfiStatus, 4B
+  BOLTFFI_CHECK(planFunctionReturn(abi.functions[1], abi) == ReturnPlan::TwoWord);  // 16B
+  BOLTFFI_CHECK(planFunctionReturn(abi.functions[2], abi) == ReturnPlan::Sret);     // 32B
+  BOLTFFI_CHECK(planFunctionReturn(abi.functions[3], abi) == ReturnPlan::Scalar);   // void
+}
+
+BOLTFFI_TEST(every_real_function_is_plannable_except_the_two_free_functions) {
+  std::string source = readFixture("fixtures/parse_core_real_abi.h");
+  auto abi = parseAbiHeader(source);
+
+  int unplannable = 0;
+  bool sawTwoWordParam = false, sawTwoWordReturn = false, sawSretReturn = false;
+  for (const auto& fn : abi.functions) {
+    auto plan = planFunctionCall(fn, abi);
+    if (!plan) {
+      ++unplannable;
+      continue;
+    }
+    for (const auto& slot : *plan) {
+      if (slot.kind == RegisterSlotKind::TwoWordLow) sawTwoWordParam = true;
+    }
+    switch (planFunctionReturn(fn, abi)) {
+      case ReturnPlan::TwoWord:
+        sawTwoWordReturn = true;
+        break;
+      case ReturnPlan::Sret:
+        sawSretReturn = true;
+        break;
+      case ReturnPlan::Scalar:
+        break;
+    }
+  }
+  // Exactly `boltffi_free_string`/`boltffi_free_buf` fall outside the closed shape space (see
+  // generic_invoke.h's module doc) -- everything else, including every `BoltFFICallbackHandle`
+  // by-value parameter and every `boltffi_create_callback_*` 16-byte return, must plan cleanly.
+  BOLTFFI_CHECK(unplannable == 2);
+  BOLTFFI_CHECK(sawTwoWordParam);
+  BOLTFFI_CHECK(sawTwoWordReturn);
+  BOLTFFI_CHECK(sawSretReturn);
 }
 
 int main() { return boltffi_test::runAll(); }

@@ -31,6 +31,14 @@ constexpr std::array<void*, sizeof...(Ids)> buildVoidBuf1Table(std::index_sequen
   return {{reinterpret_cast<void*>(&detail::trampolineVoidBuf1<Ids>)...}};
 }
 template <std::size_t... Ids>
+constexpr std::array<void*, sizeof...(Ids)> buildVoidBuf2Scalar1Buf1Table(std::index_sequence<Ids...>) {
+  return {{reinterpret_cast<void*>(&detail::trampolineVoidBuf2Scalar1Buf1<Ids>)...}};
+}
+template <std::size_t... Ids>
+constexpr std::array<void*, sizeof...(Ids)> buildScalarInBufOutTable(std::index_sequence<Ids...>) {
+  return {{reinterpret_cast<void*>(&detail::trampolineScalarInBufOut<Ids>)...}};
+}
+template <std::size_t... Ids>
 constexpr std::array<void*, sizeof...(Ids)> buildCompletionStatus0Table(std::index_sequence<Ids...>) {
   return {{reinterpret_cast<void*>(&detail::trampolineCompletionStatus0<Ids>)...}};
 }
@@ -93,6 +101,24 @@ std::optional<CallbackShape> classifyVTableField(const VTableFieldAbi& field) {
       p[2].kind == PrimKind::U64 && field.returnType.kind == PrimKind::Void) {
     return CallbackShape::VoidBuf1;
   }
+  // VoidBuf2Scalar1Buf1: `void(uint64_t, (ptr,len), (ptr,len), i32, (ptr,len))` --
+  // `EventuallyQueueListener::on_dropped` (3 buffers + 1 scalar, sync void). Checked before the
+  // FnPtr-based completion shapes below so an 8-param field is never mistaken for one of them.
+  if (p.size() == 8 && p[0].kind == PrimKind::U64 && p[1].kind == PrimKind::PtrConst &&
+      p[2].kind == PrimKind::U64 && p[3].kind == PrimKind::PtrConst && p[4].kind == PrimKind::U64 &&
+      (p[5].kind == PrimKind::I32 || p[5].kind == PrimKind::U32 || p[5].kind == PrimKind::I64 ||
+       p[5].kind == PrimKind::U64) &&
+      p[6].kind == PrimKind::PtrConst && p[7].kind == PrimKind::U64 && field.returnType.kind == PrimKind::Void) {
+    return CallbackShape::VoidBuf2Scalar1Buf1;
+  }
+  // ScalarInBufOut: `FfiBuf_u8(uint64_t, uint32_t)` -- `RandomSource::fill` (scalar-in, LARGE
+  // aggregate-out, synchronous). The ONLY shape in this file whose return isn't `void`/scalar.
+  if (p.size() == 2 && p[0].kind == PrimKind::U64 &&
+      (p[1].kind == PrimKind::I32 || p[1].kind == PrimKind::U32 || p[1].kind == PrimKind::I64 ||
+       p[1].kind == PrimKind::U64) &&
+      field.returnType.kind == PrimKind::Aggregate) {
+    return CallbackShape::ScalarInBufOut;
+  }
   // CompletionStatus0: `void(uint64_t, void(*)(void*,int32_t), void*)` -- `clear`.
   if (p.size() == 3 && p[0].kind == PrimKind::U64 && p[1].kind == PrimKind::FnPtr &&
       p[1].fnPtrArity == 2 && p[2].kind == PrimKind::PtrMut && field.returnType.kind == PrimKind::Void) {
@@ -147,12 +173,16 @@ void* buildCallbackTrampoline(CallbackShape shape, const std::string& methodName
   if (shape == CallbackShape::Free) return reinterpret_cast<void*>(&detail::genericFree);
   if (shape == CallbackShape::Clone) return reinterpret_cast<void*>(&detail::genericClone);
 
-  std::size_t slot = detail::allocateSlot(methodName);
+  std::size_t slot = detail::allocateOrReuseSlot(static_cast<int>(shape), methodName);
   static const auto scalarReturnTable = buildScalarReturnTable(std::make_index_sequence<kMaxCallbackSlots>{});
   static const auto voidArgs0Table = buildVoidArgs0Table(std::make_index_sequence<kMaxCallbackSlots>{});
   static const auto voidScalar1Table = buildVoidScalar1Table(std::make_index_sequence<kMaxCallbackSlots>{});
   static const auto voidScalar2Table = buildVoidScalar2Table(std::make_index_sequence<kMaxCallbackSlots>{});
   static const auto voidBuf1Table = buildVoidBuf1Table(std::make_index_sequence<kMaxCallbackSlots>{});
+  static const auto voidBuf2Scalar1Buf1Table =
+      buildVoidBuf2Scalar1Buf1Table(std::make_index_sequence<kMaxCallbackSlots>{});
+  static const auto scalarInBufOutTable =
+      buildScalarInBufOutTable(std::make_index_sequence<kMaxCallbackSlots>{});
   static const auto completionStatus0Table =
       buildCompletionStatus0Table(std::make_index_sequence<kMaxCallbackSlots>{});
   static const auto completionStatus1Table =
@@ -174,6 +204,10 @@ void* buildCallbackTrampoline(CallbackShape shape, const std::string& methodName
       return voidScalar2Table[slot];
     case CallbackShape::VoidBuf1:
       return voidBuf1Table[slot];
+    case CallbackShape::VoidBuf2Scalar1Buf1:
+      return voidBuf2Scalar1Buf1Table[slot];
+    case CallbackShape::ScalarInBufOut:
+      return scalarInBufOutTable[slot];
     case CallbackShape::CompletionStatus0:
       return completionStatus0Table[slot];
     case CallbackShape::CompletionStatus1:

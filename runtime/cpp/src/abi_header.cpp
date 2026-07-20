@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace boltffi {
 
@@ -58,6 +59,14 @@ bool looksLikeFnPtrType(const std::string& text) {
 struct AliasTable {
   std::unordered_map<std::string, PrimKind> aliases;
   std::unordered_map<std::string, std::size_t> recordSizes;
+  // Names of `typedef struct { ... } Name;` blocks classified as callback VTABLEs (every field a
+  // function pointer -- see the `typedef struct` handling below). Populated as each vtable block
+  // is parsed, which always precedes (in the real, generated header) any `boltffi_register_callback_*`
+  // declaration naming it as `const Name *vtable` -- a single forward pass suffices. Consulted by
+  // `resolveParamOrReturnType` so an inline pointer TO one of these classifies as `OpaqueHandle`
+  // (a real process pointer `registerVTableForProcessLifetime` hands back), never `PtrConst`/
+  // `PtrMut` (finding 1, second adversarial round -- see `PrimKind::OpaqueHandle`'s own doc).
+  std::unordered_set<std::string> vtableNames;
 
   AliasTable() {
     aliases["void"] = PrimKind::Void;
@@ -186,7 +195,15 @@ TypeRef resolveParamOrReturnType(const std::string& text, const AliasTable& alia
   TypeText parts = splitTypeText(trimmed);
   if (parts.isPointer) {
     TypeRef ref;
-    ref.kind = parts.isConst ? PrimKind::PtrConst : PrimKind::PtrMut;
+    if (aliases.vtableNames.count(parts.identifier)) {
+      // `const ___FooVTable *vtable` -- a pointer to a NAMED VTABLE STRUCT is always the real
+      // process pointer `registerVTableForProcessLifetime` returns (see `PrimKind::OpaqueHandle`'s
+      // doc), never an offset into a JS-simulated arena, regardless of the `const`/mutable
+      // spelling a future header might use -- finding 1, second adversarial round.
+      ref.kind = PrimKind::OpaqueHandle;
+    } else {
+      ref.kind = parts.isConst ? PrimKind::PtrConst : PrimKind::PtrMut;
+    }
     ref.name = parts.name;
     return ref;
   }
@@ -403,6 +420,10 @@ ParsedAbi parseAbiHeader(std::string_view source) {
           if (f == "uint8_t _unused;") continue;
           vtable.fields.push_back(parseVTableField(f, aliases));
         }
+        // Recorded BEFORE this loop moves on so any LATER `const Name *vtable` parameter (every
+        // real header's `boltffi_register_callback_*` declarations follow their vtable's typedef)
+        // classifies as `OpaqueHandle` via `resolveParamOrReturnType` above.
+        aliases.vtableNames.insert(name);
         result.vtables.push_back(std::move(vtable));
       } else {
         std::size_t size = 0;
@@ -448,7 +469,15 @@ ParsedAbi parseAbiHeader(std::string_view source) {
       std::string name = trim(rest.substr(lastSpace + 1));
       TypeRef resolved = resolveParamOrReturnType(typeText, aliases);
       if (resolved.kind == PrimKind::PtrConst || resolved.kind == PrimKind::PtrMut) {
-        aliases.aliases[name] = resolved.kind;
+        // A NAMED typedef alias resolving to a bare pointer type (`typedef const void
+        // *RustFutureHandle;`, the real header's only instance) is an OPAQUE, Rust-managed handle
+        // -- never a real inline pointer a generic caller may rebase against a bound arena. Every
+        // OTHER `PtrConst`/`PtrMut` classification in this parser comes from an inline `T *`
+        // spelling at the actual use site (`const uint8_t *key_ptr` in a param list), which never
+        // goes through this branch -- so recording `OpaqueHandle` here, instead of collapsing back
+        // to the same `PtrConst`/`PtrMut` kind the inline case uses, is what lets
+        // `isArenaPointerKind` tell the two apart later without guessing from a parameter's name.
+        aliases.aliases[name] = PrimKind::OpaqueHandle;
       } else {
         aliases.aliases[name] = resolved.kind;
       }
@@ -468,6 +497,51 @@ ParsedAbi parseAbiHeader(std::string_view source) {
   }
 
   return result;
+}
+
+namespace {
+
+/// `true` iff `param` is exactly the 16-byte `BoltFFICallbackHandle` by-value shape -- the ONLY
+/// by-value aggregate PARAMETER this dispatcher's register-level plan knows how to expand. Checks
+/// the actual resolved record size (not just the name) so a future header that reused the name for
+/// a differently-shaped record would be rejected rather than silently mis-expanded.
+bool isTwoWordCallbackHandleParam(const TypeRef& param, const ParsedAbi& abi) {
+  if (param.kind != PrimKind::Aggregate) return false;
+  const RecordAbi* record = abi.findRecord(param.aggregateName);
+  return record != nullptr && record->byteSize == 16;
+}
+
+}  // namespace
+
+std::optional<std::vector<RegisterSlot>> planFunctionCall(const FunctionAbi& fn, const ParsedAbi& abi) {
+  std::vector<RegisterSlot> plan;
+  plan.reserve(fn.params.size() + 1);
+  for (std::size_t i = 0; i < fn.params.size(); ++i) {
+    const TypeRef& param = fn.params[i];
+    if (param.kind == PrimKind::F64) {
+      plan.push_back({RegisterSlotKind::Float, i});
+    } else if (param.kind == PrimKind::Aggregate) {
+      if (!isTwoWordCallbackHandleParam(param, abi)) {
+        // Outside the closed shape space (e.g. `boltffi_free_string`/`boltffi_free_buf`'s own
+        // >16-byte by-value parameters) -- `fn` must never be routed through this dispatcher.
+        return std::nullopt;
+      }
+      plan.push_back({RegisterSlotKind::TwoWordLow, i});
+      plan.push_back({RegisterSlotKind::TwoWordHigh, i});
+    } else {
+      plan.push_back({RegisterSlotKind::Scalar, i});
+    }
+  }
+  return plan;
+}
+
+ReturnPlan planFunctionReturn(const FunctionAbi& fn, const ParsedAbi& abi) {
+  if (fn.returnType.kind != PrimKind::Aggregate) return ReturnPlan::Scalar;
+  const RecordAbi* record = abi.findRecord(fn.returnType.aggregateName);
+  std::size_t byteSize = record != nullptr ? record->byteSize : 0;
+  if (byteSize <= 8) return ReturnPlan::Scalar;
+  if (byteSize == 16) return ReturnPlan::TwoWord;
+  return ReturnPlan::Sret;
 }
 
 }  // namespace boltffi
