@@ -24,6 +24,11 @@ import {
   readNativeStatusCode,
   type NativeHandle,
 } from "../src/native.js";
+import {
+  bootstrapCallbackVTable,
+  NativeCallbackTraitRegistry,
+  _resetCallbackVTableRegistrationsForTests,
+} from "../src/native_callback.js";
 
 const FIXTURE_DIR = new URL("./fixtures", import.meta.url).pathname;
 const DYLIB_PATH = `${FIXTURE_DIR}/rn_poc/target/release/librn_poc.dylib`;
@@ -195,6 +200,98 @@ describe("native backend PoC (rn_poc fixture, real dylib via Bun FFI)", () => {
       freeCb.close();
       cloneCb.close();
       factorCb.close();
+    }
+  });
+
+  // The SAME round trip as the test above, but driven through `native_callback.ts`'s generic
+  // `bootstrapCallbackVTable`/`NativeCallbackTraitRegistry` instead of the hand-rolled vtable
+  // bytes/registry the previous test builds inline -- proves those primitives are genuinely
+  // sufficient to drive a REAL callback trait against the real compiled dylib, end to end,
+  // through Bun's own native-callback primitive (`JSCallback`) standing in for whatever a real
+  // JSI adapter's `CallInvoker`-backed trampoline factory would supply. This is the design this
+  // session's react-native native-mode host-callback-registration work generalizes for codegen to
+  // emit automatically per callback trait (see native_callback.ts's own module doc).
+  test("host callback round trip via native_callback.ts's generic registration primitives", () => {
+    _resetCallbackVTableRegistrationsForTests();
+    const registry = new NativeCallbackTraitRegistry<{ factor(): number }>();
+    const tokens: JSCallback[] = [];
+
+    // The host's own "make a real native function pointer from a JS closure" primitive --
+    // Bun's `JSCallback` here, a JSI `CallInvoker`-backed C++ trampoline in production. Free/clone
+    // are the two slots EVERY trait shares (mirrors `callback.txt`'s wasm-mode `_release`/
+    // `_retain`, and `generic_callback.h`'s universal `genericFree`/`genericClone` on the C++
+    // side); `factor` is `Multiplier`'s own one declared method.
+    const freeToken = new JSCallback((handle: bigint) => void registry.release(handle), {
+      args: [FFIType.u64],
+      returns: FFIType.void,
+    });
+    const cloneToken = new JSCallback((handle: bigint) => registry.retain(handle), {
+      args: [FFIType.u64],
+      returns: FFIType.u64,
+    });
+    const factorToken = new JSCallback(
+      (handle: bigint) => {
+        const impl = registry.lookup(handle);
+        return impl.factor();
+      },
+      { args: [FFIType.u64], returns: FFIType.i32 }
+    );
+    tokens.push(freeToken, cloneToken, factorToken);
+
+    // Kept alive for the vtable's whole process lifetime (matching the real thing:
+    // `registerVTableForProcessLifetime`'s own C++ discipline never frees its slot storage either)
+    // -- a Bun `Pointer` handed to Rust does not itself keep the backing `Uint8Array` reachable to
+    // Bun's GC, so a buffer built only inside `writeVTableBytes`'s closure and never referenced
+    // again would risk collection while Rust still holds the raw address.
+    let vtableBuf: Uint8Array;
+    const writeVTableBytes = (fieldPtrs: readonly bigint[]): Pointer => {
+      vtableBuf = new Uint8Array(fieldPtrs.length * 8);
+      const view = new DataView(vtableBuf.buffer);
+      fieldPtrs.forEach((fieldPtr, i) => view.setBigUint64(i * 8, fieldPtr, true));
+      return ptr(vtableBuf);
+    };
+
+    try {
+      bootstrapCallbackVTable(
+        exports as unknown as Record<string, unknown>,
+        "boltffi_register_callback_rn_poc_multiplier",
+        [
+          BigInt(freeToken.ptr as unknown as number),
+          BigInt(cloneToken.ptr as unknown as number),
+          BigInt(factorToken.ptr as unknown as number),
+        ],
+        writeVTableBytes
+      );
+
+      const handle = exports.boltffi_init_class_rn_poc_counter_new(10);
+      let callbackHandleId: bigint;
+      try {
+        callbackHandleId = registry.register({ factor: () => 6 });
+        const vtablePtr = bootstrapCallbackVTable(
+          exports as unknown as Record<string, unknown>,
+          "boltffi_register_callback_rn_poc_multiplier",
+          [],
+          (): Pointer => {
+            throw new Error("must not rebuild an already-registered vtable");
+          }
+        );
+
+        const status = exports.boltffi_method_class_rn_poc_counter_set_multiplier(
+          handle,
+          callbackHandleId,
+          vtablePtr
+        );
+        expect(status).toBe(NativeFfiStatus.Ok);
+        expect(exports.boltffi_method_class_rn_poc_counter_scaled(handle)).toBe(60);
+      } finally {
+        exports.boltffi_release_class_rn_poc_counter(handle);
+      }
+
+      // Rust's Box<dyn Multiplier> drop called the vtable's `free` slot during release above,
+      // which routed through `registry.release` -- the registry entry should be gone.
+      expect(() => registry.lookup(callbackHandleId)).toThrow();
+    } finally {
+      tokens.forEach((t) => t.close());
     }
   });
 });
