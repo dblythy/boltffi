@@ -1464,7 +1464,10 @@ fn java_target_renders_class_ownership_and_handle_calls_from_binding_ir() {
         counter
             .contains("return new Counter(Native.boltffi_init_class_demo_counter_try_new(value));")
     );
-    assert!(counter.contains("throw new RuntimeException(\"Factory constructor failed\")"));
+    // A fallible class-factory constructor decodes the real error, same as any other Result-returning
+    // call -- not a fixed placeholder message (this used to discard the encoded error entirely).
+    assert!(counter.contains("catch (BoltFfiErrorBufferException __boltffi_error)"));
+    assert!(counter.contains("throw new RuntimeException(__boltffi_error_reader.readString());"));
     assert!(counter.contains("if (!closed.compareAndSet(false, true)) return;"));
     assert!(counter.contains("Native.boltffi_release_class_demo_counter(this.handle);"));
     assert!(counter.contains("public int get()"));
@@ -1475,8 +1478,9 @@ fn java_target_renders_class_ownership_and_handle_calls_from_binding_ir() {
 
     assert!(fallible.contains("public FallibleOnly(String name)"));
     assert!(fallible.contains("private static long __boltffiCreateHandle0(String name)"));
+    // Same for a plain (non-factory) constructor -- decodes the real error, not "Constructor failed".
     assert!(fallible.contains("catch (BoltFfiErrorBufferException __boltffi_error)"));
-    assert!(fallible.contains("throw new RuntimeException(\"Constructor failed\")"));
+    assert!(fallible.contains("throw new RuntimeException(__boltffi_error_reader.readString());"));
     assert!(!fallible.contains("this(new FallibleOnly"));
 
     assert!(factory.contains("public static Counter make(int value)"));
