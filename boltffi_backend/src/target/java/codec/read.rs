@@ -222,7 +222,17 @@ impl CodecRead for Reader<'_> {
         )))
     }
 
-    fn map(&mut self, _kind: MapKind, _key: Self::Expr, _value: Self::Expr) -> Self::Expr {
-        Self::unsupported("map wire read")
+    fn map(&mut self, _kind: MapKind, key: Self::Expr, value: Self::Expr) -> Self::Expr {
+        Ok(ReadExpression::new(
+            Expression::identifier(self.reader.clone()).call(
+                Identifier::known("readMap"),
+                [
+                    Expression::lambda([], key?.expression),
+                    Expression::lambda([], value?.expression),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        ))
     }
 }
