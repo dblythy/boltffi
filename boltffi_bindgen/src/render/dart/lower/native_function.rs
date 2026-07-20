@@ -317,6 +317,7 @@ mod tests {
     pub fn method_on_a_class_whose_constructor_takes_a_callback_is_not_leaf() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("Listener"),
             methods: vec![crate::ir::CallbackMethodDef {
                 execution_kind: ExecutionKind::Sync,
@@ -329,6 +330,7 @@ mod tests {
             doc: None,
         });
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Connection"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![ParamDef {
