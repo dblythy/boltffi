@@ -287,6 +287,128 @@ mod tests {
         Module::new("test").with_callback_trait(status_mapper)
     }
 
+    /// A void-returning sync callback method — a deferred-dispatch slot per
+    /// `AbiCallbackMethod::is_deferred_dispatch` — with an encoded (String)
+    /// param, matching the real `WatchListener::on_diff`/
+    /// `EventuallyQueueListener::on_dropped`/`ObservabilitySink::on_event`
+    /// shape from 16e3ae42's motivating repro.
+    fn build_void_sync_callback_module() -> Module {
+        let event_sink = CallbackTrait::new("EventSink").with_method(
+            TraitMethod::new("on_event")
+                .with_param(TraitMethodParam::new("text", Type::String))
+                .with_return(ReturnType::Void),
+        );
+
+        Module::new("test").with_callback_trait(event_sink)
+    }
+
+    // Regression (ABI lockstep, 16e3ae42 left legacy JNI behind): the
+    // generated glue for a void-sync callback method must not declare a
+    // trailing `FfiStatus*` param anywhere it appears (the vtable-populating
+    // trampoline definition, nor either call site that dispatches through
+    // it) — `boltffi_macros`'s `expand_sync` drops it from this exact
+    // vtable slot's function pointer type entirely, so a mismatched JNI
+    // declaration is UB the moment Rust calls through it.
+    #[test]
+    fn void_sync_callback_method_has_no_status_param_in_generated_glue() {
+        let module = build_void_sync_callback_module();
+        let package = "com.example";
+        let class_name = "BenchBoltFFI";
+
+        let mut ir_module = module.clone();
+        let contract = ir::build_contract(&mut ir_module);
+        let abi_contract = ir::Lowerer::new(&contract).to_abi_contract();
+        let jni_module = JniLowerer::new(
+            &contract,
+            &abi_contract,
+            package.to_string(),
+            class_name.to_string(),
+        )
+        .lower();
+        let glue_code = JniEmitter::emit(&jni_module);
+
+        assert!(
+            glue_code.contains(
+                "static void EventSink_vtable_on_event(uint64_t handle, const uint8_t* text_ptr, uintptr_t text_len) {"
+            ),
+            "the vtable-populating trampoline must declare no trailing status param: {glue_code}"
+        );
+        assert!(
+            !glue_code.contains("FfiStatus* _out_status"),
+            "no FfiStatus out-param may appear anywhere for this void-sync slot: {glue_code}"
+        );
+        assert!(
+            !glue_code.contains("&_status)"),
+            "no call site may pass a trailing status arg to this void-sync vtable slot: {glue_code}"
+        );
+    }
+
+    // Regression (ABI lockstep finding 2 -- ownership): a deferred-dispatch
+    // slot's encoded param buffer (`native.rs`'s
+    // `transfer_deferred_callback_bytes`) is ownership-transferred to this
+    // glue, not borrowed for the call's duration -- `NewDirectByteBuffer`
+    // alone never frees the backing native allocation, only the local JNI
+    // reference to the wrapper object. Without the paired free call this
+    // leaks the buffer on every dispatch.
+    #[test]
+    fn void_sync_callback_method_frees_transferred_encoded_param_buffer() {
+        let module = build_void_sync_callback_module();
+        let package = "com.example";
+        let class_name = "BenchBoltFFI";
+
+        let mut ir_module = module.clone();
+        let contract = ir::build_contract(&mut ir_module);
+        let abi_contract = ir::Lowerer::new(&contract).to_abi_contract();
+        let jni_module = JniLowerer::new(
+            &contract,
+            &abi_contract,
+            package.to_string(),
+            class_name.to_string(),
+        )
+        .lower();
+        let glue_code = JniEmitter::emit(&jni_module);
+
+        assert!(
+            glue_code.contains(
+                "if (text_ptr != NULL) boltffi_free_deferred_callback_bytes((uint8_t*)text_ptr, (uintptr_t)text_len);"
+            ),
+            "the transferred encoded param buffer must be freed via the paired export: {glue_code}"
+        );
+    }
+
+    // A non-deferred (sync, non-void) slot's encoded param is still
+    // Rust-stack-scoped for this call's duration only -- freeing it here
+    // would be a use-after-free on Rust's side, not a fix.
+    #[test]
+    fn non_deferred_callback_method_does_not_free_its_borrowed_encoded_param() {
+        let status_mapper_with_bytes = CallbackTrait::new("BytesMapper").with_method(
+            TraitMethod::new("map_bytes")
+                .with_param(TraitMethodParam::new("data", Type::String))
+                .with_return(ReturnType::value(Type::Primitive(Primitive::I32))),
+        );
+        let module = Module::new("test").with_callback_trait(status_mapper_with_bytes);
+        let package = "com.example";
+        let class_name = "BenchBoltFFI";
+
+        let mut ir_module = module.clone();
+        let contract = ir::build_contract(&mut ir_module);
+        let abi_contract = ir::Lowerer::new(&contract).to_abi_contract();
+        let jni_module = JniLowerer::new(
+            &contract,
+            &abi_contract,
+            package.to_string(),
+            class_name.to_string(),
+        )
+        .lower();
+        let glue_code = JniEmitter::emit(&jni_module);
+
+        assert!(
+            !glue_code.contains("boltffi_free_deferred_callback_bytes"),
+            "a non-deferred slot's encoded param is Rust-stack-scoped, not transferred -- \
+             freeing it here would be a use-after-free on Rust's side: {glue_code}"
+        );
+    }
+
     #[test]
     fn jni_ir_generates_valid_glue() {
         let module = build_test_module();

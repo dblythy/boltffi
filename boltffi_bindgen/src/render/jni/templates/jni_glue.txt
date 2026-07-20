@@ -757,9 +757,19 @@ JNIEXPORT {{ trampoline.proxy_sync_method.jni_return_type }} JNICALL {{ trampoli
         boltffi_throw_runtime(env, "callback method unavailable");
         goto boltffi_input_cleanup;
     }
+{%- if !trampoline.proxy_sync_method.return_is_unit %}
     FfiStatus _status = {0};
+{%- endif %}
 {%- if trampoline.proxy_sync_method.return_is_unit %}
-    vtable->{{ trampoline.proxy_sync_method.vtable_field }}(callback->handle{% if trampoline.proxy_sync_method.params.len() > 0 %}, {% endif %}{% for param in trampoline.proxy_sync_method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, &_status);
+{#- A void-returning sync method is a deferred-dispatch slot (see
+    `AbiCallbackMethod::is_deferred_dispatch`): `boltffi_macros`'s
+    `expand_sync` drops the trailing `FfiStatus*` out-param from this exact
+    vtable slot's function pointer type, since the Rust caller never reads
+    it back. This call site must match that signature exactly or it is UB
+    the moment it calls through the vtable -- and with no status channel
+    left, a callback failure here has nowhere to report to (same tradeoff
+    the generated Dart trampoline makes for the same slot shape). #}
+    vtable->{{ trampoline.proxy_sync_method.vtable_field }}(callback->handle{% if trampoline.proxy_sync_method.params.len() > 0 %}, {% endif %}{% for param in trampoline.proxy_sync_method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %});
 {%- elif trampoline.proxy_sync_method.return_is_direct %}
     vtable->{{ trampoline.proxy_sync_method.vtable_field }}(callback->handle{% if trampoline.proxy_sync_method.params.len() > 0 %}, {% endif %}{% for param in trampoline.proxy_sync_method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, &_result, &_status);
 {%- elif trampoline.proxy_sync_method.return_composite_c_type.is_some() %}
@@ -767,10 +777,12 @@ JNIEXPORT {{ trampoline.proxy_sync_method.jni_return_type }} JNICALL {{ trampoli
 {%- else %}
     vtable->{{ trampoline.proxy_sync_method.vtable_field }}(callback->handle{% if trampoline.proxy_sync_method.params.len() > 0 %}, {% endif %}{% for param in trampoline.proxy_sync_method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, &_out_ptr, &_out_len, &_status);
 {%- endif %}
+{%- if !trampoline.proxy_sync_method.return_is_unit %}
     if (_status.code != 0) {
         boltffi_throw_runtime(env, "callback invocation failed");
         goto boltffi_input_cleanup;
     }
+{%- endif %}
 boltffi_input_cleanup:
 {%- for param in trampoline.proxy_sync_method.params %}
 {%- if param.is_primitive_array() %}
@@ -1350,9 +1362,16 @@ JNIEXPORT {{ method.jni_return_type }} JNICALL {{ method.jni_name }}(JNIEnv *env
         boltffi_throw_runtime(env, "callback method unavailable");
         goto boltffi_input_cleanup;
     }
+{%- if !method.return_is_unit %}
     FfiStatus _status = {0};
+{%- endif %}
 {%- if method.return_is_unit %}
-    vtable->{{ method.vtable_field }}(callback->handle{% if method.params.len() > 0 %}, {% endif %}{% for param in method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, &_status);
+{#- See the matching `trampoline.proxy_sync_method` block above: a
+    void-returning sync method is a deferred-dispatch slot
+    (`AbiCallbackMethod::is_deferred_dispatch`) and its vtable slot's
+    function pointer type has no trailing `FfiStatus*` to pass -- and
+    nothing left to report a callback failure through. #}
+    vtable->{{ method.vtable_field }}(callback->handle{% if method.params.len() > 0 %}, {% endif %}{% for param in method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %});
 {%- elif method.return_is_direct %}
     vtable->{{ method.vtable_field }}(callback->handle{% if method.params.len() > 0 %}, {% endif %}{% for param in method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, &_result, &_status);
 {%- elif method.return_composite_c_type.is_some() %}
@@ -1360,10 +1379,12 @@ JNIEXPORT {{ method.jni_return_type }} JNICALL {{ method.jni_name }}(JNIEnv *env
 {%- else %}
     vtable->{{ method.vtable_field }}(callback->handle{% if method.params.len() > 0 %}, {% endif %}{% for param in method.params %}{{ param.ffi_arg() }}{% if !loop.last %}, {% endif %}{% endfor %}, &_out_ptr, &_out_len, &_status);
 {%- endif %}
+{%- if !method.return_is_unit %}
     if (_status.code != 0) {
         boltffi_throw_runtime(env, "callback invocation failed");
         goto boltffi_input_cleanup;
     }
+{%- endif %}
 boltffi_input_cleanup:
 {%- for param in method.params %}
 {%- if param.is_primitive_array() %}
@@ -1431,11 +1452,22 @@ JNIEXPORT void JNICALL {{ cb.proxy_release_jni_name }}(JNIEnv* env, jclass cls, 
 
 {%- for method in cb.sync_methods %}
 
-static void {{ cb.trait_name }}_vtable_{{ method.ffi_name }}(uint64_t handle{% for param in method.c_params %}, {{ param.c_type }} {{ param.name }}{% endfor %}, FfiStatus* {{ method.status_param_name() }}) {
+{#- A void-returning sync method is a deferred-dispatch slot (see
+    `AbiCallbackMethod::is_deferred_dispatch`): `boltffi_macros`'s
+    `expand_sync` drops the trailing `FfiStatus*` out-param from this exact
+    vtable slot's function pointer type entirely, since the Rust caller
+    never reads it back. This definition must match that signature exactly
+    -- the vtable struct field assignment a few lines down is UB otherwise
+    -- and with no status channel left, a callback failure here is caught
+    and swallowed rather than reported (same tradeoff the generated Dart
+    trampoline makes for the same slot shape). #}
+static void {{ cb.trait_name }}_vtable_{{ method.ffi_name }}(uint64_t handle{% for param in method.c_params %}, {{ param.c_type }} {{ param.name }}{% endfor %}{% if method.has_return() %}, FfiStatus* {{ method.status_param_name() }}{% endif %}) {
     JNIEnv* env;
     int attached = 0;
     if (boltffi_jni_callback_enter(&env, &attached) != JNI_OK) {
+{%- if method.has_return() %}
         {{ method.status_param_name() }}->code = 1;
+{%- endif %}
         return;
     }
 {%- for line in method.setup_lines %}
@@ -1474,12 +1506,11 @@ static void {{ cb.trait_name }}_vtable_{{ method.ffi_name }}(uint64_t handle{% f
     *{{ method.out_ptr_name() }} = ({{ method.c_return_type() }})_result;
 {%- else %}
     (*env)->CallStaticVoidMethod(env, g_{{ cb.trait_name }}_callbacks_class, g_{{ cb.trait_name }}_{{ method.ffi_name }}_method, (jlong)handle{% for arg in method.jni_args %}, {{ arg }}{% endfor %});
-    if (boltffi_consume_pending_exception(env)) {
-        {{ method.status_param_name() }}->code = 1;
-        goto cleanup;
-    }
+    boltffi_consume_pending_exception(env);
 {%- endif %}
+{%- if method.has_return() %}
     {{ method.status_param_name() }}->code = 0;
+{%- endif %}
 cleanup:
 {%- for line in method.cleanup_lines %}
     {{ line }}

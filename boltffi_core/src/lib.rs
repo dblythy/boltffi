@@ -24,7 +24,7 @@ pub use boltffi_macros::{
 pub use callback::WasmCallbackOwner;
 pub use callback::{
     ArcFromCallbackHandle, BoxFromCallbackHandle, CallbackForeignType, CallbackHandle,
-    NativeCallbackOwner,
+    NativeCallbackOwner, boltffi_free_deferred_callback_bytes, transfer_deferred_callback_bytes,
 };
 pub use custom_ffi::CustomFfiConvertible;
 pub use handle::HandleBox;

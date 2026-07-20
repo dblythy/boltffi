@@ -8,6 +8,7 @@
 //! handle, and the foreign-type association used to move between the Rust-facing
 //! callback type and its generated wrapper.
 
+mod deferred_buffer;
 mod foreign;
 mod handle;
 mod native;
@@ -15,6 +16,7 @@ mod ownership;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
+pub use deferred_buffer::{boltffi_free_deferred_callback_bytes, transfer_deferred_callback_bytes};
 pub use foreign::CallbackForeignType;
 pub use handle::CallbackHandle;
 pub use native::NativeCallbackOwner;

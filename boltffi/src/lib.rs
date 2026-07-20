@@ -12,7 +12,8 @@ pub mod __private {
         BoxFromCallbackHandle, CallbackForeignType, CallbackHandle, EventSubscription, FfiBuf,
         FfiSpan, FfiStatus, NativeCallbackOwner, Passable, RustFutureContinuationCallback,
         RustFutureHandle, StreamContinuationCallback, StreamPollResult, SubscriptionHandle,
-        VecTransport, WaitResult, WirePassable, rustfuture, set_last_error, take_last_error, wire,
+        VecTransport, WaitResult, WirePassable, rustfuture, set_last_error, take_last_error,
+        transfer_deferred_callback_bytes, wire,
     };
     #[cfg(target_arch = "wasm32")]
     pub use boltffi_core::{

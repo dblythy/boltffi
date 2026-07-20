@@ -1868,7 +1868,7 @@ impl<'a> JniLowerer<'a> {
         let lowered_params = self
             .callback_input_abi_params(&method.params, abi_method)
             .into_iter()
-            .map(|param| self.callback_param(param))
+            .map(|param| self.callback_param(param, abi_method.is_deferred_dispatch()))
             .collect::<Vec<_>>();
 
         let input_c_params = lowered_params
@@ -1928,7 +1928,7 @@ impl<'a> JniLowerer<'a> {
         let lowered_params = self
             .callback_input_abi_params(&method.params, abi_method)
             .into_iter()
-            .map(|param| self.callback_param(param))
+            .map(|param| self.callback_param(param, abi_method.is_deferred_dispatch()))
             .collect::<Vec<_>>();
 
         let c_params = lowered_params
@@ -2176,7 +2176,13 @@ impl<'a> JniLowerer<'a> {
         }
     }
 
-    fn callback_param(&self, param: &AbiParam) -> LoweredCallbackParam {
+    /// `is_deferred` must be the owning method's
+    /// `AbiCallbackMethod::is_deferred_dispatch()` — on a deferred slot, the
+    /// matching Rust macro (`native.rs`'s `is_deferred`) hands this glue a
+    /// buffer whose ownership was transferred (not borrowed for this call's
+    /// duration only), so an encoded param must free it once done (see
+    /// `lower_callback_encoded_param`).
+    fn callback_param(&self, param: &AbiParam, is_deferred: bool) -> LoweredCallbackParam {
         let param_name = param.name.as_str();
         match &param.role {
             ParamRole::Input {
@@ -2190,7 +2196,7 @@ impl<'a> JniLowerer<'a> {
             | ParamRole::Input {
                 transport: Transport::Composite(_),
                 ..
-            } => self.lower_callback_encoded_param(param_name),
+            } => self.lower_callback_encoded_param(param_name, is_deferred),
             _ => unreachable!("unsupported JNI callback param role: {:?}", param.role),
         }
     }
@@ -2217,10 +2223,34 @@ impl<'a> JniLowerer<'a> {
         }
     }
 
-    fn lower_callback_encoded_param(&self, param_name: &str) -> LoweredCallbackParam {
+    fn lower_callback_encoded_param(
+        &self,
+        param_name: &str,
+        is_deferred: bool,
+    ) -> LoweredCallbackParam {
         let ptr_name = format!("{}_ptr", param_name);
         let len_name = format!("{}_len", param_name);
         let buf_name = format!("buf_{}", param_name);
+
+        let mut cleanup_lines = vec![format!(
+            "if ({buf_name} != NULL) (*env)->DeleteLocalRef(env, {buf_name});"
+        )];
+        if is_deferred {
+            // This slot is a deferred-dispatch slot (see
+            // `AbiCallbackMethod::is_deferred_dispatch`): the matching Rust
+            // macro (`native.rs`'s `is_deferred`) transferred ownership of
+            // this buffer to us via `transfer_deferred_callback_bytes`
+            // rather than borrowing it for the call's duration only. The
+            // `NewDirectByteBuffer` above is only ever a view over it, not
+            // a copy — the JVM static method call reads through that view
+            // synchronously and has returned by the time cleanup runs, so
+            // freeing the backing allocation here (once, via the paired
+            // export) is safe and required — the direct-buffer local ref
+            // alone never releases the native allocation it points at.
+            cleanup_lines.push(format!(
+                "if ({ptr_name} != NULL) boltffi_free_deferred_callback_bytes((uint8_t*){ptr_name}, (uintptr_t){len_name});"
+            ));
+        }
 
         LoweredCallbackParam {
             c_params: vec![
@@ -2244,9 +2274,7 @@ impl<'a> JniLowerer<'a> {
                 ),
                 "}".to_string(),
             ],
-            cleanup_lines: vec![format!(
-                "if ({buf_name} != NULL) (*env)->DeleteLocalRef(env, {buf_name});"
-            )],
+            cleanup_lines,
             jni_arg: buf_name,
         }
     }
@@ -2538,7 +2566,7 @@ impl<'a> JniLowerer<'a> {
         let lowered_params = self
             .callback_input_abi_params(&method.params, abi_method)
             .into_iter()
-            .map(|param| self.callback_param(param))
+            .map(|param| self.callback_param(param, abi_method.is_deferred_dispatch()))
             .collect::<Vec<_>>();
         let c_params = self.callback_c_params_string(&lowered_params);
         let setup_lines = lowered_params

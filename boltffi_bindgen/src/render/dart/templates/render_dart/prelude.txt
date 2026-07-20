@@ -903,7 +903,17 @@ final class _$$BoltFFIAsync {
     required R Function($$ffi.Pointer<$$ffi.Void> handle) completeFuture,
     required void Function($$ffi.Pointer<$$ffi.Void> handle) freeFuture,
     required void Function($$ffi.Pointer<$$ffi.Void> handle) cancelFuture,
-  }) async {
+  }) {
+    // Deliberately not `async`: the body never `await`s anything (it
+    // resolves `completer.future` via a `NativeCallable.listener`
+    // callback, never `await`), and an `async` function catches even a
+    // *synchronous* throw from its own body and reports it through the
+    // returned `Future` instead of propagating it to the immediate caller.
+    // `createFuture()` runs a pre-transfer native call that can genuinely
+    // fail before any ownership handoff — a caller-side rollback `try`
+    // wrapping this call (Codex review finding 6, 2026-07-20) needs that
+    // failure to surface as a real synchronous throw, not get absorbed
+    // into an error `Future` its `catch` never sees.
     final handle = createFuture();
     final completer = $$async.Completer<R>();
     late final $$ffi.NativeCallable<

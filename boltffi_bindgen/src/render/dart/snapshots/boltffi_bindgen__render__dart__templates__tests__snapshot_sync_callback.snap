@@ -56,7 +56,7 @@ final class _I$ICallbackVTable extends $$ffi.Struct {
     $$ffi.NativeFunction<
       $$ffi.Void Function(
         $$ffi.Uint64,
-        $$ffi.Pointer<$$ffi.Uint8>,
+        $$ffi.UintPtr,
         $$ffi.UintPtr,
     )
     >
@@ -186,18 +186,22 @@ _p$outStatus.ref.code = -1;
 
   static void processBytes(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> _p$bytesPtr,
+    int _p$bytesPtr,
     int _p$bytesLen,
   ) {
     try {
+try {
 final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$bytes = _$$WireReader(_p$bytesPtr, _p$bytesLen);
+final _p$ptr$bytes = $$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$bytesPtr);
+final _p$r$bytes = _$$WireReader(_p$ptr$bytes, _p$bytesLen);
 final _p$d$bytes = _p$r$bytes.readUint8List();
-$$extffi.calloc.free(_p$bytesPtr);
 impl.processBytes(_p$d$bytes);
+} finally {
+_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$bytesPtr), _p$bytesLen);
+}
 } catch (e) {
 
 }
@@ -222,7 +226,7 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   late final $$ffi.NativeCallable<
     $$ffi.Void Function(
       $$ffi.Uint64,
-      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
       $$ffi.UintPtr,
     )
   >

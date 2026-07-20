@@ -30,7 +30,7 @@ final class _I$ICallbackVTable extends $$ffi.Struct {
     $$ffi.NativeFunction<
       $$ffi.Void Function(
         $$ffi.Uint64,
-        $$ffi.Pointer<$$ffi.Uint8>,
+        $$ffi.UintPtr,
         $$ffi.UintPtr,
         $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
         $$ffi.Uint64,
@@ -42,7 +42,7 @@ final class _I$ICallbackVTable extends $$ffi.Struct {
     $$ffi.NativeFunction<
       $$ffi.Void Function(
         $$ffi.Uint64,
-        $$ffi.Pointer<$$ffi.Uint8>,
+        $$ffi.UintPtr,
         $$ffi.UintPtr,
         $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
         $$ffi.Uint64,
@@ -54,7 +54,7 @@ final class _I$ICallbackVTable extends $$ffi.Struct {
     $$ffi.NativeFunction<
       $$ffi.Void Function(
         $$ffi.Uint64,
-        $$ffi.Pointer<$$ffi.Uint8>,
+        $$ffi.UintPtr,
         $$ffi.UintPtr,
         $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Int32)>>,
         $$ffi.Uint64,
@@ -125,19 +125,20 @@ _p$callback.asFunction<void Function(int, int, int)>()(_p$callbackData, 0, -1);
 
   static void mapStringRef(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> _p$sPtr,
+    int _p$sPtr,
     int _p$sLen,
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
     try {
+try {
 final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$s = _$$WireReader(_p$sPtr, _p$sLen);
+final _p$ptr$s = $$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$sPtr);
+final _p$r$s = _$$WireReader(_p$ptr$s, _p$sLen);
 final _p$d$s = _p$r$s.readString();
-$$extffi.calloc.free(_p$sPtr);
 final _p$value = await impl.mapStringRef(_p$d$s);
 late final _$$WireWriter _p$w;
 {
@@ -146,6 +147,9 @@ _p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
 _p$w.writeString(value);
 }
 _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, _p$w.ptr, _p$w.len, 0);
+} finally {
+_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$sPtr), _p$sLen);
+}
 } catch (e) {
 _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, $$ffi.nullptr, 0, -1);
 }
@@ -154,19 +158,20 @@ _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>
 
   static void mapString(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> _p$sPtr,
+    int _p$sPtr,
     int _p$sLen,
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
     try {
+try {
 final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$s = _$$WireReader(_p$sPtr, _p$sLen);
+final _p$ptr$s = $$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$sPtr);
+final _p$r$s = _$$WireReader(_p$ptr$s, _p$sLen);
 final _p$d$s = _p$r$s.readString();
-$$extffi.calloc.free(_p$sPtr);
 final _p$value = await impl.mapString(_p$d$s);
 late final _$$WireWriter _p$w;
 {
@@ -175,6 +180,9 @@ _p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
 _p$w.writeString(value);
 }
 _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, _p$w.ptr, _p$w.len, 0);
+} finally {
+_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$sPtr), _p$sLen);
+}
 } catch (e) {
 _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>()(_p$callbackData, $$ffi.nullptr, 0, -1);
 }
@@ -183,21 +191,25 @@ _p$callback.asFunction<void Function(int, $$ffi.Pointer<$$ffi.Uint8>, int, int)>
 
   static void processBytes(
     int _p$handle,
-    $$ffi.Pointer<$$ffi.Uint8> _p$bytesPtr,
+    int _p$bytesPtr,
     int _p$bytesLen,
     $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Int32)>> _p$callback,
     int _p$callbackData,
   ) async {
     try {
+try {
 final impl = _k$ICallbackHandleMap.get(_p$handle);
 if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
-final _p$r$bytes = _$$WireReader(_p$bytesPtr, _p$bytesLen);
+final _p$ptr$bytes = $$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$bytesPtr);
+final _p$r$bytes = _$$WireReader(_p$ptr$bytes, _p$bytesLen);
 final _p$d$bytes = _p$r$bytes.readUint8List();
-$$extffi.calloc.free(_p$bytesPtr);
 await impl.processBytes(_p$d$bytes);
 _p$callback.asFunction<void Function(int, int)>()(_p$callbackData, 0);
+} finally {
+_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$bytesPtr), _p$bytesLen);
+}
 } catch (e) {
 _p$callback.asFunction<void Function(int, int)>()(_p$callbackData, -1);
 }
@@ -231,7 +243,7 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   late final $$ffi.NativeCallable<
     $$ffi.Void Function(
       $$ffi.Uint64,
-      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
       $$ffi.UintPtr,
       $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
       $$ffi.Uint64,
@@ -241,7 +253,7 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   late final $$ffi.NativeCallable<
     $$ffi.Void Function(
       $$ffi.Uint64,
-      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
       $$ffi.UintPtr,
       $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Pointer<$$ffi.Uint8>, $$ffi.UintPtr, $$ffi.Int32)>>,
       $$ffi.Uint64,
@@ -251,7 +263,7 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   late final $$ffi.NativeCallable<
     $$ffi.Void Function(
       $$ffi.Uint64,
-      $$ffi.Pointer<$$ffi.Uint8>,
+      $$ffi.UintPtr,
       $$ffi.UintPtr,
       $$ffi.Pointer<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Uint64, $$ffi.Int32)>>,
       $$ffi.Uint64,

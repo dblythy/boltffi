@@ -134,10 +134,34 @@ fn push_async_callback_params(callback_params: &mut Vec<DartNativeType>, return_
     callback_params.push(DartNativeType::Primitive(PrimitiveType::I32));
 }
 
+/// Whether `param` is the pointer half of a wire-encoded callback
+/// parameter — the one `decode_input_args` reconstructs a `Pointer<Uint8>`
+/// for on a deferred slot (see `lower_native_callback_method`'s param-type
+/// override and `decode_input_args`'s `Transport::Span(SpanContent::Encoded(_))`
+/// arm, which this must match exactly).
+fn encoded_ptr_param(param: &AbiParam) -> bool {
+    matches!(
+        &param.role,
+        ParamRole::Input {
+            transport: Transport::Span(SpanContent::Encoded(_)),
+            ..
+        }
+    )
+}
+
 /// One decoded input argument's setup (if any: a `_$$WireReader` over a
 /// ptr+len pair) plus the expression passed positionally to `impl.<method>`.
+///
+/// `frees` is kept separate from `setup` rather than interleaved: every
+/// free must run exactly once regardless of whether the handle lookup, a
+/// later param's decode, or the registered implementation itself throws
+/// (Codex review finding 4) — `render_native_method_body` places `setup`
+/// inside a `try` and `frees` inside its `finally`, so an inline free
+/// sitting between two `setup` statements would never be reached by an
+/// exception raised earlier in the same list.
 struct DecodedArgs {
     setup: Vec<String>,
+    frees: Vec<String>,
     call_args: Vec<String>,
 }
 
@@ -156,15 +180,18 @@ struct DecodedArgs {
 ///
 /// `is_deferred` must be `should_dispatch_via_listener`'s answer for this
 /// same method: on a deferred slot, `native.rs`'s matching macro hands this
-/// trampoline a `malloc`-owned buffer (a stack-scoped one would already be
+/// trampoline a transferred, Rust-allocator-owned buffer (via
+/// `transfer_deferred_callback_bytes` — a stack-scoped one would already be
 /// gone by the time this — a `NativeCallable.listener`-posted, not
 /// synchronous — call runs), so the decode is forced eager (into a plain
-/// local, not left as a lazy inline read expression) so a `calloc.free` can
-/// follow it before the value is used. A non-deferred slot's buffer is
-/// still Rust-stack-scoped for the (synchronous) duration of this call —
-/// freeing it here would be a use-after-free on Rust's side instead.
+/// local, not left as a lazy inline read expression) so a paired
+/// `boltffi_free_deferred_callback_bytes` call can follow it before the
+/// value is used. A non-deferred slot's buffer is still Rust-stack-scoped
+/// for the (synchronous) duration of this call — freeing it here would be a
+/// use-after-free on Rust's side instead.
 fn decode_input_args(params: &[AbiParam], is_deferred: bool) -> DecodedArgs {
     let mut setup = Vec::new();
+    let mut frees = Vec::new();
     let mut call_args = Vec::new();
 
     for param in params {
@@ -197,9 +224,27 @@ fn decode_input_args(params: &[AbiParam], is_deferred: bool) -> DecodedArgs {
                 // naming for this same `AbiParam` exactly — that's what
                 // declares these identifiers in the enclosing native
                 // signature this body is spliced into.
-                let ptr_name = super::native_function::encoded_ptr_name(param.name.as_str());
+                let raw_ptr_name = super::native_function::encoded_ptr_name(param.name.as_str());
                 let len_name = super::native_function::encoded_len_name(param.name.as_str());
                 let reader_var = format!("_p$r${base}");
+
+                // On a deferred slot, `raw_ptr_name` is declared as a plain
+                // `int` address, not a `Pointer<Uint8>` (see
+                // `lower_native_callback_method` — a raw `Pointer` isn't
+                // guaranteed to survive the `NativeCallable.listener`
+                // isolate hop; a pointer-sized integer is). Reconstruct the
+                // real pointer here, now safely on the mutator isolate,
+                // before using it.
+                let ptr_name = if is_deferred {
+                    let reconstructed = format!("_p$ptr${base}");
+                    setup.push(format!(
+                        "final {reconstructed} = $$ffi.Pointer<$$ffi.Uint8>.fromAddress({raw_ptr_name});"
+                    ));
+                    reconstructed
+                } else {
+                    raw_ptr_name.clone()
+                };
+
                 setup.push(format!(
                     "final {reader_var} = _$$WireReader({ptr_name}, {len_name});"
                 ));
@@ -207,7 +252,24 @@ fn decode_input_args(params: &[AbiParam], is_deferred: bool) -> DecodedArgs {
                 if is_deferred {
                     let decoded_var = format!("_p$d${base}");
                     setup.push(format!("final {decoded_var} = {read_expr};"));
-                    setup.push(format!("$$extffi.calloc.free({ptr_name});"));
+                    // Rust transferred ownership of this buffer via its own
+                    // global allocator (`transfer_deferred_callback_bytes`),
+                    // not `malloc`/`calloc` — free it through the paired
+                    // native export rather than `calloc.free`, which would
+                    // reach for a foreign allocator (`CoTaskMemAlloc` on
+                    // Windows) that never allocated it. Collected into
+                    // `frees` (run from a `finally`), not appended to
+                    // `setup` inline — a later param's decode, or the
+                    // registered implementation itself, throwing must not
+                    // skip this free (Codex review finding 4). Rebuilds the
+                    // pointer from `raw_ptr_name` (the native `int` param,
+                    // in scope for the whole function) rather than reusing
+                    // `ptr_name` — that local is declared inside the `try`
+                    // this `finally` sits outside of, and Dart doesn't
+                    // share a `try`'s scope with its own `finally`.
+                    frees.push(format!(
+                        "_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress({raw_ptr_name}), {len_name});"
+                    ));
                     call_args.push(decoded_var);
                 } else {
                     call_args.push(read_expr);
@@ -219,7 +281,11 @@ fn decode_input_args(params: &[AbiParam], is_deferred: bool) -> DecodedArgs {
         }
     }
 
-    DecodedArgs { setup, call_args }
+    DecodedArgs {
+        setup,
+        frees,
+        call_args,
+    }
 }
 
 /// The try-body / catch-body pair a native trampoline's outer
@@ -360,17 +426,37 @@ fn render_native_method_body(
         setup.push('\n');
     }
 
-    format!(
-        "try {{\n\
-         final impl = {handle_map_instance_name}.get(_p$handle);\n\
+    let lookup_and_call = format!(
+        "final impl = {handle_map_instance_name}.get(_p$handle);\n\
          if (impl == null) {{\n\
          throw _$$FFIException(-1, \"{class_name}: invalid handle `${{_p$handle}}`\");\n\
          }}\n\
-         {setup}{try_body}\n\
+         {setup}{try_body}",
+        try_body = completion.try_body,
+    );
+
+    // Every param's owned buffer must be freed exactly once regardless of
+    // where an exception originates — an invalid handle, a later param's
+    // decode, or the registered implementation itself throwing (Codex
+    // review finding 4: a free sitting inline between other statements is
+    // skipped by any exception raised earlier in the same list). Nesting
+    // this in its own `try`/`finally`, inside the outer reporting `catch`,
+    // guarantees the frees run before the exception is caught and reported
+    // — without a decoded param at all (`frees` empty), the extra nesting
+    // buys nothing, so it's skipped.
+    let guarded_body = if decoded.frees.is_empty() {
+        lookup_and_call
+    } else {
+        let frees = decoded.frees.join("\n");
+        format!("try {{\n{lookup_and_call}\n}} finally {{\n{frees}\n}}")
+    };
+
+    format!(
+        "try {{\n\
+         {guarded_body}\n\
          }} catch (e) {{\n\
          {catch_body}\n\
          }}\n",
-        try_body = completion.try_body,
         catch_body = completion.catch_body,
     )
 }
@@ -399,14 +485,30 @@ impl<'a> super::DartLowerer<'a> {
             native_type: DartNativeType::Primitive(PrimitiveType::U64),
         }];
 
-        params.extend(
-            m.params[1..]
-                .iter()
-                .map(|p| self.lower_native_function_param(p)),
-        );
-
         let return_type =
             DartNativeType::from_return_shape_and_error_transport(&m.returns, &m.error);
+        let is_deferred = should_dispatch_via_listener(m.execution_kind, &return_type);
+
+        params.extend(m.params[1..].iter().map(|p| {
+            let mut param = self.lower_native_function_param(p);
+            // A deferred slot's dispatch call crosses through
+            // `NativeCallable.listener`, which posts its arguments to the
+            // isolate's `SendPort` — and a raw `Pointer` is not among the
+            // types Dart guarantees survive that trip intact (dart-lang/sdk
+            // #50457: isolate messaging has no supported way to pass a
+            // `Pointer` between isolates). An encoded param's ptr half is
+            // exactly such a `Pointer<Uint8>`; declare it as a plain
+            // pointer-sized integer instead (`IntPtr`/`UintPtr` and a raw
+            // `Pointer<T>` are ABI-identical on the native side — this
+            // changes nothing about what Rust passes) and reconstruct the
+            // real `Pointer` from that integer inside the trampoline body
+            // (`decode_input_args`) once it's safely on the other side of
+            // the isolate hop.
+            if is_deferred && encoded_ptr_param(p) {
+                param.native_type = DartNativeType::Primitive(PrimitiveType::USize);
+            }
+            param
+        }));
 
         match m.execution_kind {
             // A `void` return means this slot dispatches through a deferred
@@ -529,7 +631,7 @@ mod tests {
             CallbackId, CallbackKind, CallbackMethodDef, CallbackTraitDef, ParamDef, ParamName,
             ParamPassing, PrimitiveType, ReturnDef, TypeExpr,
         },
-        render::dart::test,
+        render::dart::{DartNativeType, test},
     };
 
     fn callback_with_method(method: CallbackMethodDef) -> CallbackTraitDef {
@@ -589,26 +691,53 @@ mod tests {
             "body: {}",
             native.body
         );
+        // The native param is a plain `int` address, not a `Pointer` — a
+        // raw `Pointer` isn't guaranteed to survive the
+        // `NativeCallable.listener` isolate hop (dart-lang/sdk #50457) —
+        // reconstructed into a real pointer before use.
         assert!(
-            native.body.contains("_$$WireReader(_p$textPtr, _p$textLen)"),
+            native
+                .params
+                .iter()
+                .any(|p| p.name == "_p$textPtr"
+                    && matches!(p.native_type, DartNativeType::Primitive(PrimitiveType::USize))),
+            "params: {:?}",
+            native.params
+        );
+        assert!(
+            native
+                .body
+                .contains("final _p$ptr$text = $$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$textPtr);"),
+            "body: {}",
+            native.body
+        );
+        assert!(
+            native.body.contains("_$$WireReader(_p$ptr$text, _p$textLen)"),
             "body: {}",
             native.body
         );
         // Regression (Codex review finding, 2026-07-20, finding 1): the
         // encoded param must be decoded eagerly, into a local, *before* the
         // call — never left as a lazy inline read expression evaluated at
-        // the call site — so the buffer can be freed right after decoding
-        // and before `impl.onEvent` runs. Rust hands this trampoline a
-        // `malloc`-owned buffer for exactly this slot shape (see
-        // `native.rs`'s `is_deferred`), so it must be freed here, not
-        // borrowed indefinitely.
+        // the call site. Rust transfers ownership of this buffer to this
+        // trampoline for exactly this slot shape (see `native.rs`'s
+        // `is_deferred`/`transfer_deferred_callback_bytes`), so it must be
+        // freed here (via the paired native export, not `calloc.free` —
+        // Rust's own allocator owns it, not Dart's), never borrowed
+        // indefinitely.
         assert!(
             native.body.contains("final _p$d$text = _p$r$text.readString();"),
             "body: {}",
             native.body
         );
+        // The `finally` reconstructs the pointer fresh from the native
+        // `int` param (`_p$textPtr`), rather than reusing the `try`-scoped
+        // `_p$ptr$text` local — a `finally` block does not share its
+        // paired `try`'s local scope in Dart.
         assert!(
-            native.body.contains("$$extffi.calloc.free(_p$textPtr);"),
+            native.body.contains(
+                "_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$textPtr), _p$textLen);"
+            ),
             "body: {}",
             native.body
         );
@@ -617,18 +746,23 @@ mod tests {
             "body: {}",
             native.body
         );
-        // The free must happen strictly between the decode and the call.
+        // Regression (Codex review finding 4, 2026-07-20): the free must
+        // run regardless of whether the handle lookup, the decode, or
+        // `impl.onEvent` itself throws — placed in a `finally` wrapping all
+        // three, not inline between decode and call (where an exception
+        // from `impl.onEvent` would skip it).
         let decode_pos = native
             .body
             .find("final _p$d$text = _p$r$text.readString();")
             .expect(&native.body);
+        let call_pos = native.body.find("impl.onEvent(_p$d$text);").expect(&native.body);
+        let finally_pos = native.body.find("} finally {").expect(&native.body);
         let free_pos = native
             .body
-            .find("$$extffi.calloc.free(_p$textPtr);")
+            .find("_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$textPtr), _p$textLen);")
             .expect(&native.body);
-        let call_pos = native.body.find("impl.onEvent(_p$d$text);").expect(&native.body);
         assert!(
-            decode_pos < free_pos && free_pos < call_pos,
+            decode_pos < call_pos && call_pos < finally_pos && finally_pos < free_pos,
             "body: {}",
             native.body
         );

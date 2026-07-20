@@ -100,6 +100,35 @@ mod tests {
         DartLowerer::new(ffi, &abi, "test").library()
     }
 
+    // Regression (Codex review finding 6, 2026-07-20): `_$$BoltFFIAsync.create`
+    // must not be declared `async` — its body never `await`s anything (it
+    // resolves via a `NativeCallable.listener` callback instead), and an
+    // `async` function catches even a *synchronous* throw from its own body,
+    // reporting it through the returned `Future` rather than propagating it
+    // to the immediate caller. A caller-side rollback `try` wrapping a
+    // pre-transfer native call (`createFuture()`, this function's first
+    // statement) needs that failure to surface as a real synchronous throw,
+    // or the rollback `catch` never runs and a registered callback handle
+    // leaks.
+    #[test]
+    fn bolt_ffi_async_create_is_not_declared_async_so_pre_transfer_throws_stay_synchronous() {
+        let preamble = PreludeTemplate {}.render().unwrap();
+        let cancel_future_pos = preamble.find("cancelFuture,").expect(&preamble);
+        // The next `{` after `cancelFuture,` opens `create`'s body — it must not be
+        // immediately preceded by `async` (whitespace/newlines around the closing
+        // `)` aside).
+        let body_open_pos = cancel_future_pos
+            + preamble[cancel_future_pos..].find('{').expect(&preamble);
+        let between = &preamble[cancel_future_pos..body_open_pos];
+        assert!(
+            !between.contains("async"),
+            "`_$$BoltFFIAsync.create` must not be `async` -- a synchronous throw from \
+             `createFuture()` (its first statement) must propagate to the immediate \
+             caller, not get absorbed into the returned Future's error state. Found \
+             between `cancelFuture,` and the body's opening brace: {between:?}"
+        );
+    }
+
     fn generic_callback_def(kind: ExecutionKind) -> CallbackTraitDef {
         CallbackTraitDef {
             id: CallbackId::new("ICallback"),

@@ -614,34 +614,29 @@ impl<'a> NativeCallbackMethodExpander<'a> {
         };
 
         let (prelude, call_arg) = if self.is_deferred() {
-            // This slot dispatches through a deferred Dart trampoline
-            // (`NativeCallable.listener` — see
-            // `render::dart::plan::callback::dispatch_via_listener`): the
-            // call below returns before Dart has actually read these
-            // bytes, so a stack-scoped `Vec<u8>` would already be gone by
-            // the time the trampoline runs. Hand the foreign side a
-            // `malloc`-owned copy instead — reusing the same
-            // malloc/`free`-family convention this crate already relies on
-            // for cross-language buffer ownership transfer elsewhere (see
-            // `local_handle.rs`'s callback-return buffers, and this
-            // file's own `sync_returning_impl_body`, which frees a
-            // Dart-`calloc`'d buffer via libc `free`). The generated Dart
-            // trampoline frees it (via `calloc.free`, the same allocator
-            // family) once it has finished decoding.
+            // This slot dispatches through a deferred callee (e.g. Dart's
+            // `NativeCallable.listener` — see
+            // `render::dart::plan::callback::dispatch_via_listener`, or any
+            // other backend that reads this buffer after this call
+            // returns): a stack-scoped `Vec<u8>` would already be gone by
+            // the time that happens. Transfer ownership of the encoded
+            // bytes instead, via Rust's own global allocator
+            // (`transfer_deferred_callback_bytes` — a `Box<[u8]>` leak, not
+            // a raw libc `malloc`) so the paired dealloc always agrees with
+            // whatever allocated it, regardless of platform (no foreign
+            // allocator — e.g. Dart's `package:ffi` `calloc`, which is
+            // `CoTaskMemAlloc` on Windows, not the CRT heap — on either
+            // side). The callee must free the buffer via the paired
+            // `boltffi_free_deferred_callback_bytes` export once it has
+            // finished decoding (the generated Dart trampoline does this;
+            // any other backend consuming a deferred slot's encoded param
+            // must do the same).
             let prelude = quote! {
                 #encode_stmt
-                let #len_name: usize = #wire_name.len();
-                let #ptr_name: *const u8 = {
-                    unsafe extern "C" {
-                        fn malloc(size: usize) -> *mut ::core::ffi::c_void;
-                    }
-                    let copy = unsafe { malloc(#len_name) } as *mut u8;
-                    if !copy.is_null() {
-                        unsafe {
-                            ::core::ptr::copy_nonoverlapping(#wire_name.as_ptr(), copy, #len_name);
-                        }
-                    }
-                    copy as *const u8
+                let (#ptr_name, #len_name): (*const u8, usize) = {
+                    let (ptr, len) =
+                        ::boltffi::__private::transfer_deferred_callback_bytes(#wire_name);
+                    (ptr as *const u8, len)
                 };
             };
             (prelude, quote! { #ptr_name, #len_name })

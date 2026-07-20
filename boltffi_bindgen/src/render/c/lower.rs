@@ -197,7 +197,14 @@ impl<'a> CHeaderLowerer<'a> {
             let ret_params = self.async_callback_return_params(&method.returns);
             parts.push(format!("void (*callback)(uint64_t{})", ret_params));
             parts.push("uint64_t callback_data".to_string());
-        } else {
+        } else if !method.is_deferred_dispatch() {
+            // A void-returning sync method is a deferred-dispatch slot (see
+            // `AbiCallbackMethod::is_deferred_dispatch`): the matching Rust
+            // macro (`boltffi_macros`'s `expand_sync`) drops the status
+            // out-param from this exact vtable slot's function pointer type
+            // entirely, since nothing on the Rust side ever reads it back.
+            // A C implementation of the vtable must declare the same
+            // signature or the function-pointer assignment is UB.
             parts.push("FfiStatus *_out_status".to_string());
         }
 
@@ -460,6 +467,15 @@ impl<'a> CHeaderLowerer<'a> {
         format!(
             "\nvoid {p}_free_string(FfiString s);\n\
              void {p}_free_buf(FfiBuf_u8 buf);\n\
+             // Frees a callback-vtable slot's encoded parameter buffer whose\n\
+             // ownership Rust transferred to the callee (a deferred-dispatch\n\
+             // slot -- see AbiCallbackMethod::is_deferred_dispatch): a\n\
+             // void-returning sync method or any async method. A C\n\
+             // implementation of such a slot must call this exactly once on\n\
+             // the received pointer+length once done with it -- never a\n\
+             // platform free()/dealloc, which may not agree with the\n\
+             // allocator Rust used.\n\
+             void {p}_free_deferred_callback_bytes(uint8_t *ptr, uintptr_t len);\n\
              FfiStatus {p}_last_error_message(FfiString *out);\n\
              void {p}_clear_last_error(void);\n",
             p = self.prefix,
@@ -653,12 +669,17 @@ mod tests {
         let header = generate_header(&mut module);
         assert!(header.contains("boltffi_free_string(FfiString s);"));
         assert!(header.contains("boltffi_free_buf(FfiBuf_u8 buf);"));
+        assert!(header.contains("boltffi_free_deferred_callback_bytes(uint8_t *ptr, uintptr_t len);"));
         assert!(header.contains("boltffi_last_error_message(FfiString *out);"));
         assert!(header.contains("boltffi_clear_last_error(void);"));
     }
 
     #[test]
     fn callback_method_status_param_does_not_collide_with_out_status() {
+        // A sync method with a real return value keeps the out-status
+        // param (it is not a deferred-dispatch slot — see
+        // `AbiCallbackMethod::is_deferred_dispatch`), so the collision with
+        // a user param literally named `status` is still a live concern.
         let mut module = Module::new("test").with_callback_trait(
             CallbackTrait::new("ValueListener").with_method(
                 TraitMethod::new("on_value")
@@ -666,18 +687,85 @@ mod tests {
                         "status",
                         Type::Primitive(Primitive::I32),
                     ))
-                    .with_return(ReturnType::Void),
+                    .with_return(ReturnType::Value(Type::Primitive(Primitive::I32))),
             ),
         );
         let header = generate_header(&mut module);
         assert!(
             header.contains("_out_status"),
-            "sync callback method should use _out_status to avoid collision with user param 'status'"
+            "non-void sync callback method should use _out_status to avoid collision with user param 'status'"
         );
         let status_count = header.matches("status").count();
         assert!(
             status_count >= 2,
             "header should contain both user param 'status' and '_out_status'"
+        );
+    }
+
+    // Regression (ABI lockstep, 16e3ae42 left C behind): a void-returning
+    // sync callback method is a deferred-dispatch slot per
+    // `AbiCallbackMethod::is_deferred_dispatch` — `boltffi_macros`'s
+    // `expand_sync` drops the trailing `FfiStatus*` out-param from this
+    // exact vtable slot's function pointer type, since the Rust caller
+    // never reads it back. The C header's declared signature must match
+    // byte-for-byte or a C implementation of the vtable is UB the moment
+    // Rust calls through it.
+    #[test]
+    fn void_sync_callback_method_has_no_status_param() {
+        let mut module = Module::new("test").with_callback_trait(
+            CallbackTrait::new("EventSink").with_method(
+                TraitMethod::new("on_event")
+                    .with_param(TraitMethodParam::new(
+                        "text",
+                        Type::Primitive(Primitive::I32),
+                    ))
+                    .with_return(ReturnType::Void),
+            ),
+        );
+        let header = generate_header(&mut module);
+        assert!(
+            !header.contains("FfiStatus *_out_status"),
+            "void-returning sync callback method must not declare a status out-param: {header}"
+        );
+        assert!(
+            header.contains("void (*on_event)(uint64_t handle, int32_t text);"),
+            "void-returning sync callback vtable slot should end right after its params: {header}"
+        );
+    }
+
+    // A non-void sync method is NOT a deferred-dispatch slot and must keep
+    // its status out-param exactly as before.
+    #[test]
+    fn non_void_sync_callback_method_keeps_status_param() {
+        let mut module = Module::new("test").with_callback_trait(
+            CallbackTrait::new("ValueSource").with_method(
+                TraitMethod::new("get_value")
+                    .with_return(ReturnType::Value(Type::Primitive(Primitive::I32))),
+            ),
+        );
+        let header = generate_header(&mut module);
+        assert!(
+            header.contains("FfiStatus *_out_status"),
+            "non-void sync callback method must keep its status out-param: {header}"
+        );
+    }
+
+    // An async method's main dispatch slot never had a status param (its
+    // result travels through a separate completion function pointer) —
+    // confirm it stays that way and is unaffected by the void-sync fix.
+    #[test]
+    fn async_callback_method_has_no_status_param_on_dispatch_slot() {
+        let mut module = Module::new("test").with_callback_trait(
+            CallbackTrait::new("AsyncSink").with_method(
+                TraitMethod::new("on_ready")
+                    .with_return(ReturnType::Void)
+                    .make_async(),
+            ),
+        );
+        let header = generate_header(&mut module);
+        assert!(
+            !header.contains("FfiStatus *_out_status"),
+            "async callback dispatch slot must not declare a status out-param: {header}"
         );
     }
 }

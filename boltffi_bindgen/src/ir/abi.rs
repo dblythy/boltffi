@@ -131,6 +131,22 @@ pub enum CallId {
     },
 }
 
+impl CallId {
+    /// The class this call is a constructor or method of, if any — `None`
+    /// for a free function, record/enum constructor, or record/enum method.
+    ///
+    /// Used to find every sibling call on the same class (e.g. by a backend
+    /// deciding whether a method might reenter a callback the class's own
+    /// constructor stored — see `render::dart::lower::native_function`'s
+    /// `class_owns_a_callback`).
+    pub fn class_id(&self) -> Option<&ClassId> {
+        match self {
+            Self::Method { class_id, .. } | Self::Constructor { class_id, .. } => Some(class_id),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct AbiCall {
     pub id: CallId,
@@ -360,6 +376,27 @@ impl AbiCallbackMethod {
 
     pub fn execution_kind(&self) -> ExecutionKind {
         self.execution_kind
+    }
+
+    /// Whether this vtable slot's Rust caller (`boltffi_macros`'s
+    /// `NativeCallbackMethodExpander::is_deferred`) never reads anything
+    /// back from the call before returning — true for an async method
+    /// (its result travels through a separate completion function pointer)
+    /// and for a sync method with no return value (its status out-param is
+    /// written but never observed, so the macro drops it from the vtable
+    /// slot's signature entirely).
+    ///
+    /// This is THE canonical classification every backend that renders a
+    /// callback vtable slot must agree with byte-for-byte — it decides both
+    /// whether the slot's function pointer type carries a trailing
+    /// `FfiStatus*` out-param and whether an encoded parameter's bytes are
+    /// a transferred (malloc-owned, callee-freed) buffer rather than one
+    /// borrowed for the call's duration only. Backends must call this
+    /// method rather than re-deriving the same two facts locally — a
+    /// second, drifted copy of this rule is exactly what left the C and
+    /// JNI backends out of lockstep with the Dart-motivated ABI change.
+    pub fn is_deferred_dispatch(&self) -> bool {
+        self.is_async() || self.returns.transport.is_none()
     }
 }
 

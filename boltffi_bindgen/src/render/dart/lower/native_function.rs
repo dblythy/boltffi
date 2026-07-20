@@ -66,12 +66,8 @@ impl<'a> super::DartLowerer<'a> {
             .map(|p| self.lower_native_function_param(p))
             .collect();
 
-        let is_not_leaf = abi_call.params.iter().any(|p| {
-            matches!(
-                p.abi_type,
-                AbiType::InlineCallbackFn { .. } | AbiType::CallbackHandle
-            )
-        });
+        let is_not_leaf =
+            Self::call_has_callback_param(abi_call) || self.class_owns_a_callback(abi_call);
 
         let call_mode = match &abi_call.mode {
             CallMode::Sync => DartNativeFunctionCallMode::Sync,
@@ -106,6 +102,43 @@ impl<'a> super::DartLowerer<'a> {
         }
     }
 
+    fn call_has_callback_param(call: &AbiCall) -> bool {
+        call.params.iter().any(|p| {
+            matches!(
+                p.abi_type,
+                AbiType::InlineCallbackFn { .. } | AbiType::CallbackHandle
+            )
+        })
+    }
+
+    /// True when `call`'s class has ANY constructor or method (not
+    /// necessarily `call` itself) that takes a callback-handle-shaped
+    /// parameter — meaning some instance of this class holds a
+    /// host-implemented callback it may invoke synchronously from inside
+    /// ANY of its methods, not only the one that received it as a param.
+    ///
+    /// `dart:ffi`'s `isLeaf: true` promises the Dart VM the native call will
+    /// never call back into Dart; declaring it on a method that reenters a
+    /// stored callback aborts the process (`Cannot invoke native callback
+    /// from a leaf call`) — confirmed for real by `LiveQueryClient::disconnect`/
+    /// `release` and `WatchHandle::unsubscribe`, none of which take a
+    /// callback param themselves, all of which reenter a transport/listener
+    /// their class's constructor stored. The IR has no per-method "may
+    /// reenter" fact to check directly, so this is deliberately
+    /// conservative at the whole-class granularity: a sibling method that
+    /// genuinely never reenters only loses the `isLeaf` fast path, never
+    /// correctness — the failure mode on the other side is a process abort.
+    fn class_owns_a_callback(&self, call: &AbiCall) -> bool {
+        let Some(class_id) = call.id.class_id() else {
+            return false;
+        };
+        self.abi
+            .calls
+            .iter()
+            .filter(|c| c.id.class_id() == Some(class_id))
+            .any(Self::call_has_callback_param)
+    }
+
     pub(super) fn lower_native_functions(&self) -> Vec<DartNativeFunction> {
         self.ffi
             .functions
@@ -124,8 +157,9 @@ mod tests {
 
     use crate::{
         ir::{
-            CallbackId, CallbackKind, CallbackTraitDef, FunctionDef, FunctionId, ParamDef,
-            ParamName, ParamPassing, PrimitiveType, ReturnDef, TypeExpr,
+            CallbackId, CallbackKind, CallbackTraitDef, ClassDef, ClassId, ConstructorDef,
+            FunctionDef, FunctionId, MethodDef, ParamDef, ParamName, ParamPassing, PrimitiveType,
+            Receiver, ReturnDef, TypeExpr,
         },
         render::dart::test,
     };
@@ -265,6 +299,70 @@ mod tests {
             names.len(),
             unique.len(),
             "duplicate native param names, generated code will fail to compile: {names:?}"
+        );
+    }
+
+    // Regression ("Fork bug 3", docs/tracks/dart.md): a class whose
+    // constructor stores a callback-handle param (e.g.
+    // `LiveQueryClient::new(transport, listener)`) may reenter it
+    // synchronously from ANY of its methods later, including ones that take
+    // no callback param themselves (`LiveQueryClient::disconnect`/`release`,
+    // `WatchHandle::unsubscribe`) -- declaring those `isLeaf: true` aborts
+    // the whole process the first time the reentrant call actually happens.
+    #[test]
+    pub fn method_on_a_class_whose_constructor_takes_a_callback_is_not_leaf() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_callback(CallbackTraitDef {
+            id: CallbackId::new("Listener"),
+            methods: vec![crate::ir::CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: crate::ir::MethodId::new("on_event"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: CallbackKind::Trait,
+            doc: None,
+        });
+        ffi.catalog.insert_class(ClassDef {
+            id: ClassId::new("Connection"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![ParamDef {
+                    name: ParamName::new("listener"),
+                    type_expr: TypeExpr::Callback(CallbackId::new("Listener")),
+                    passing: ParamPassing::BoxedDyn,
+                    doc: None,
+                }],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: crate::ir::MethodId::new("disconnect"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let class = &library.classes[0];
+
+        assert!(
+            !class.constructors[0].native.is_leaf,
+            "constructor takes the callback param directly, must not be leaf"
+        );
+        assert!(
+            !class.methods[0].native.is_leaf,
+            "sibling method takes no callback param itself but may reenter the \
+             one the constructor stored -- must not be declared isLeaf"
         );
     }
 
