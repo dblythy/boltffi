@@ -24,7 +24,7 @@ use crate::ir::definitions::{
     MethodDef, ParamDef, ParamPassing, Receiver, RecordDef, ReturnDef, StreamDef, VariantPayload,
 };
 use crate::ir::ids::{
-    BuiltinId, CallbackId, ClassId, EnumId, FieldName, FunctionId, MethodId, ParamName, RecordId,
+    BuiltinId, CallbackId, ClassId, EnumId, FieldName, MethodId, ParamName, RecordId,
 };
 use crate::ir::ops::{
     FieldReadOp, FieldWriteOp, OffsetExpr, ReadOp, ReadSeq, SizeExpr, ValueExpr, WireShape,
@@ -76,19 +76,37 @@ impl MethodHost for RecordDef {
     fn method_symbol(
         &self,
         method_id: &MethodId,
-        _lowerer: &Lowerer,
+        lowerer: &Lowerer,
     ) -> naming::Name<naming::GlobalSymbol> {
-        naming::method_ffi_name(self.id.as_str(), method_id.as_str())
+        match lowerer.naming_style {
+            boltffi_binding::NamingStyle::LegacyCompatible => {
+                naming::method_ffi_name(self.id.as_str(), method_id.as_str())
+            }
+            boltffi_binding::NamingStyle::Experimental => {
+                naming::experimental::method_ffi_name(
+                    "record",
+                    &self.qualified_path,
+                    method_id.as_str(),
+                )
+            }
+        }
     }
 
     fn constructor_symbol(
         &self,
         name: Option<&MethodId>,
-        _lowerer: &Lowerer,
+        lowerer: &Lowerer,
     ) -> naming::Name<naming::GlobalSymbol> {
-        match name {
-            Some(n) => naming::method_ffi_name(self.id.as_str(), n.as_str()),
-            None => naming::class_ffi_new(self.id.as_str()),
+        match lowerer.naming_style {
+            boltffi_binding::NamingStyle::LegacyCompatible => match name {
+                Some(n) => naming::method_ffi_name(self.id.as_str(), n.as_str()),
+                None => naming::class_ffi_new(self.id.as_str()),
+            },
+            boltffi_binding::NamingStyle::Experimental => naming::experimental::init_ffi_name(
+                "record",
+                &self.qualified_path,
+                name.map_or("new", |n| n.as_str()),
+            ),
         }
     }
 
@@ -181,6 +199,7 @@ pub struct Lowerer<'c> {
     // encoded layout instead of blittable.
     record_stack: RefCell<HashSet<RecordId>>,
     enum_stack: RefCell<HashSet<EnumId>>,
+    naming_style: boltffi_binding::NamingStyle,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -193,7 +212,21 @@ impl<'c> Lowerer<'c> {
             contract,
             record_stack: RefCell::new(HashSet::new()),
             enum_stack: RefCell::new(HashSet::new()),
+            naming_style: boltffi_binding::NamingStyle::LegacyCompatible,
         }
+    }
+
+    /// Selects which native-symbol naming scheme this lowering pass mints —
+    /// see `boltffi_binding::NamingStyle`. Defaults to
+    /// [`NamingStyle::LegacyCompatible`](boltffi_binding::NamingStyle::LegacyCompatible)
+    /// (unchanged behavior for every existing caller — wasm codegen's
+    /// symbol names must stay byte-identical). Only a caller whose real
+    /// artifact links a `BindingExpansion`-built native library (the
+    /// react-native track's `native_async` codegen) should pass
+    /// [`NamingStyle::Experimental`](boltffi_binding::NamingStyle::Experimental).
+    pub fn naming_style(mut self, naming_style: boltffi_binding::NamingStyle) -> Self {
+        self.naming_style = naming_style;
+        self
     }
 }
 
@@ -547,6 +580,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let func = FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("greet"),
             params: vec![ParamDef {
                 name: ParamName::new("name"),
@@ -576,6 +610,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let func = FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("fetch"),
             params: vec![],
             returns: ReturnDef::Value(TypeExpr::String),
@@ -594,6 +629,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Client");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -633,6 +669,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Utils");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -664,6 +701,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Builder");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -701,6 +739,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Parser");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -736,6 +775,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let callback = CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("EventHandler"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("on_event"),
@@ -763,6 +803,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let callback = CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("Listener"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("notify"),
@@ -798,6 +839,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Point");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -832,6 +874,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Person");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -950,6 +993,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Connection");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -995,6 +1039,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Packed");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -1050,6 +1095,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Vec2");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -1090,6 +1136,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Vec2");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -1135,6 +1182,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Vec2");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -1158,6 +1206,7 @@ mod tests {
             deprecated: None,
         });
         contract.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("take_points"),
             params: vec![ParamDef {
                 name: ParamName::new("points"),
@@ -1257,6 +1306,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let callback = CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("MyCallback"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("invoke"),
@@ -1315,6 +1365,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Service");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -1353,6 +1404,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Factory");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![],
             methods: vec![],
@@ -1403,6 +1455,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Message");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -1458,6 +1511,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let func = FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("greet"),
             params: vec![ParamDef {
                 name: ParamName::new("name"),
@@ -1495,6 +1549,7 @@ mod tests {
         let mut contract = test_contract();
         let record_id = RecordId::new("Point");
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: record_id.clone(),
@@ -1521,6 +1576,7 @@ mod tests {
         let lowerer = lowerer_for_contract(&contract);
 
         let func = FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("move_to"),
             params: vec![ParamDef {
                 name: ParamName::new("point"),
@@ -1559,6 +1615,7 @@ mod tests {
         let mut contract = test_contract();
         let class_id = ClassId::new("Connection");
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: class_id.clone(),
             constructors: vec![ConstructorDef::Default {
                 params: vec![ParamDef {
@@ -1596,6 +1653,7 @@ mod tests {
     ) -> FfiContract {
         let mut contract = test_contract();
         contract.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new(callback_id),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("call"),
@@ -1661,6 +1719,7 @@ mod tests {
             ReturnDef::Value(TypeExpr::Record(RecordId::new("Point"))),
         );
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Point"),
@@ -1709,6 +1768,7 @@ mod tests {
 
     fn blittable_point_record() -> RecordDef {
         RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Point"),
@@ -1735,6 +1795,7 @@ mod tests {
 
     fn wire_encoded_person_record() -> RecordDef {
         RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Person"),
@@ -2165,6 +2226,7 @@ mod tests {
         let mut contract = test_contract();
         contract.catalog.insert_enum(c_style_enum_with_method());
         contract.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("DirectionMapper"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("map_direction"),

@@ -201,6 +201,7 @@ mod tests {
 
     fn parse_error_record() -> RecordDef {
         RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("ParseError"),
             is_repr_c: false,
             is_error: true,
@@ -221,6 +222,7 @@ mod tests {
     fn free_function_sync_void_renders_top_level_with_no_receiver() {
         let mut ffi = test::empty_contract();
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("set_client_platform"),
             params: vec![string_param("tag")],
             returns: ReturnDef::Void,
@@ -244,6 +246,7 @@ mod tests {
     fn free_function_sync_scalar_in_and_out() {
         let mut ffi = test::empty_contract();
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("live_query_reconnect_delay_ms"),
             params: vec![ParamDef {
                 name: ParamName::new("attempt"),
@@ -273,6 +276,7 @@ mod tests {
     fn free_function_encoded_string_return_frees_the_wire_buffer() {
         let mut ffi = test::empty_contract();
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("sdk_version"),
             params: vec![],
             returns: ReturnDef::Value(TypeExpr::String),
@@ -297,6 +301,7 @@ mod tests {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(parse_error_record());
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("validate_role_name"),
             params: vec![string_param("name")],
             returns: ReturnDef::Result {
@@ -353,6 +358,7 @@ mod tests {
 
     fn boxed_dyn_callback(id: &str) -> CallbackTraitDef {
         CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new(id),
             methods: vec![CallbackMethodDef {
                 execution_kind: ExecutionKind::Sync,
@@ -372,6 +378,7 @@ mod tests {
         ffi.catalog
             .insert_callback(boxed_dyn_callback("HttpTransport"));
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("set_http_transport"),
             params: vec![ParamDef {
                 name: ParamName::new("transport"),
@@ -407,6 +414,7 @@ mod tests {
     fn free_function_async_drives_bolt_ffi_async_create() {
         let mut ffi = test::empty_contract();
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("fetch_remote_config"),
             params: vec![],
             returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::U32)),
@@ -437,6 +445,7 @@ mod tests {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(parse_error_record());
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("fetch_session"),
             params: vec![],
             returns: ReturnDef::Result {

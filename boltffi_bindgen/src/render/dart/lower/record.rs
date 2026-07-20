@@ -158,6 +158,7 @@ mod test {
     pub fn blittable_record_produces_dart_ffi_struct() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Point"),
             is_repr_c: true,
             is_error: false,
@@ -197,6 +198,7 @@ mod test {
     pub fn non_blittable_record_does_not_produce_dart_ffi_struct() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Person"),
             is_repr_c: false,
             is_error: false,
@@ -229,6 +231,7 @@ mod test {
     pub fn error_record_implements_exception() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("AppError"),
             is_repr_c: false,
             is_error: true,

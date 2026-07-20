@@ -8,6 +8,11 @@ use super::types::{Deprecation, Type};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Record {
     pub name: String,
+    /// The record's fully qualified Rust path (crate name first, e.g.
+    /// `parse_core::ffi::acl::Acl`), or empty when unknown. Only consulted
+    /// for `NamingStyle::Experimental` symbol naming.
+    #[serde(default)]
+    pub qualified_path: String,
     #[serde(default = "default_true")]
     pub is_repr_c: bool,
     #[serde(default)]
@@ -29,6 +34,7 @@ impl Record {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             fields: Vec::new(),
@@ -37,6 +43,11 @@ impl Record {
             doc: None,
             deprecated: None,
         }
+    }
+
+    pub fn with_qualified_path(mut self, qualified_path: impl Into<String>) -> Self {
+        self.qualified_path = qualified_path.into();
+        self
     }
 
     pub fn with_repr_c(mut self, is_repr_c: bool) -> Self {

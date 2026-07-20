@@ -315,6 +315,11 @@ fn legacy_function_for_binding(
 
     Some(FunctionDef {
         id: legacy_id.into(),
+        // Synthesized from an already-resolved `Bindings<Native>` entry (a
+        // different pipeline's real ABI symbol) — no scanned Rust source
+        // path to qualify, and none is needed: this `FunctionDef` only
+        // drives KMP JVM-delegate rendering, never symbol-name minting.
+        qualified_path: String::new(),
         params,
         returns,
         execution_kind: ExecutionKind::Sync,
@@ -674,6 +679,7 @@ mod tests {
         execution_kind: ExecutionKind,
     ) -> FunctionDef {
         FunctionDef {
+            qualified_path: String::new(),
             id: id.into(),
             params: params
                 .into_iter()
@@ -1048,6 +1054,7 @@ mod tests {
     fn adapter_covers_immutable_primitive_ref_params_as_direct_primitives() {
         let mut contract = empty_contract();
         contract.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: "read".into(),
             params: vec![ParamDef {
                 name: "value".into(),
@@ -1089,6 +1096,7 @@ mod tests {
     fn adapter_does_not_cover_non_primitive_functions_until_conversion_plan_exists() {
         let mut contract = empty_contract();
         contract.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: "load".into(),
             params: vec![ParamDef {
                 name: "name".into(),

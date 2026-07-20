@@ -25,7 +25,6 @@ use crate::ir::types::{PrimitiveType, TypeExpr};
 use crate::render::typescript::TypeScriptLowerError;
 use crate::render::typescript::emit;
 use crate::render::typescript::plan::*;
-use boltffi_ffi_rules::naming::ffi_prefix;
 
 struct AbiIndex {
     calls: HashMap<CallId, usize>,
@@ -217,6 +216,14 @@ pub struct TypeScriptExperimental {
     pub native_async: bool,
 }
 
+struct AsyncLifecycleFfiNames {
+    poll: String,
+    complete: String,
+    panic_message: String,
+    cancel: String,
+    free: String,
+}
+
 pub struct TypeScriptLowerer<'a> {
     contract: &'a FfiContract,
     abi: &'a AbiContract,
@@ -236,6 +243,41 @@ impl<'a> TypeScriptLowerer<'a> {
             abi,
             module_name,
             experimental,
+        }
+    }
+
+    /// The async-lifecycle FFI names (`poll`/`complete`/`panic_message`/
+    /// `cancel`/`free`) for an already-computed entry symbol
+    /// (`abi_call.symbol` — itself already `NamingStyle`-aware, see
+    /// `ir::Lowerer::naming_style`). `native_async` mode's real
+    /// `BindingExpansion` artifact inserts an `async_` infix right after the
+    /// `boltffi_` prefix (`boltffi_async_method_class_..._poll`, not
+    /// `boltffi_method_class_..._poll`) — plain suffix-appending, which is
+    /// exactly correct for the stable/legacy scheme, silently mismatches
+    /// under `native_async`. `poll_sync` stays a plain suffix (wasm-only;
+    /// never resolved against a native artifact).
+    fn async_lifecycle_ffi_names(&self, entry_ffi_name: &str) -> AsyncLifecycleFfiNames {
+        if self.experimental.native_async {
+            let named = |suffix: &str| {
+                naming::experimental::async_lifecycle_name(entry_ffi_name, suffix)
+                    .as_str()
+                    .to_string()
+            };
+            AsyncLifecycleFfiNames {
+                poll: named("poll"),
+                complete: named("complete"),
+                panic_message: named("panic_message"),
+                cancel: named("cancel"),
+                free: named("free"),
+            }
+        } else {
+            AsyncLifecycleFfiNames {
+                poll: format!("{entry_ffi_name}_poll"),
+                complete: format!("{entry_ffi_name}_complete"),
+                panic_message: format!("{entry_ffi_name}_panic_message"),
+                cancel: format!("{entry_ffi_name}_cancel"),
+                free: format!("{entry_ffi_name}_free"),
+            }
         }
     }
 
@@ -540,7 +582,18 @@ impl<'a> TypeScriptLowerer<'a> {
 
     fn lower_class(&self, def: &ClassDef, index: &AbiIndex) -> TsClass {
         let class_name = naming::to_upper_camel_case(def.id.as_str());
-        let ffi_free = naming::class_ffi_free(def.id.as_str()).as_str().to_string();
+        // `native_async` mode targets a `BindingExpansion`-built native artifact
+        // (long, module-qualified symbol names); plain wasm mode targets the
+        // stable macro path's short names — these must never cross (wasm output
+        // must stay byte-identical). See runtime/cpp/README.md's reconciliation
+        // note (boltffi fork) for the two artifacts' real, divergent ABIs.
+        let ffi_free = if self.experimental.native_async {
+            naming::experimental::class_ffi_free(&def.qualified_path)
+                .as_str()
+                .to_string()
+        } else {
+            naming::class_ffi_free(def.id.as_str()).as_str().to_string()
+        };
 
         let constructors = def
             .constructors
@@ -702,6 +755,7 @@ impl<'a> TypeScriptLowerer<'a> {
             }
             CallMode::Async(async_call) => {
                 let entry_ffi_name = abi_call.symbol.as_str().to_string();
+                let lifecycle = self.async_lifecycle_ffi_names(&entry_ffi_name);
                 let return_type_expr = match &method_def.returns {
                     ReturnDef::Value(type_expr) => Some(type_expr),
                     ReturnDef::Result { ok, .. } => Some(ok),
@@ -716,11 +770,11 @@ impl<'a> TypeScriptLowerer<'a> {
                     self.refine_value_type_output_route(return_route, return_type_expr);
                 TsValueTypeMethodMode::Async(TsValueTypeAsyncMethod {
                     poll_sync_ffi_name: format!("{entry_ffi_name}_poll_sync"),
-                    poll_ffi_name: format!("{entry_ffi_name}_poll"),
-                    complete_ffi_name: format!("{entry_ffi_name}_complete"),
-                    panic_message_ffi_name: format!("{entry_ffi_name}_panic_message"),
-                    cancel_ffi_name: format!("{entry_ffi_name}_cancel"),
-                    free_ffi_name: format!("{entry_ffi_name}_free"),
+                    poll_ffi_name: lifecycle.poll,
+                    complete_ffi_name: lifecycle.complete,
+                    panic_message_ffi_name: lifecycle.panic_message,
+                    cancel_ffi_name: lifecycle.cancel,
+                    free_ffi_name: lifecycle.free,
                     native_async: self.experimental.native_async,
                     return_route,
                 })
@@ -856,6 +910,7 @@ impl<'a> TypeScriptLowerer<'a> {
             }
             CallMode::Async(async_call) => {
                 let entry_ffi_name = abi_call.symbol.as_str().to_string();
+                let lifecycle = self.async_lifecycle_ffi_names(&entry_ffi_name);
                 let (return_type, return_route) = self.select_output_route(
                     &async_call.result,
                     TsReturnSemantics::Source(&method_def.returns),
@@ -882,11 +937,11 @@ impl<'a> TypeScriptLowerer<'a> {
                     return_callback,
                     TsClassMethodMode::Async(TsClassAsyncMethod {
                         poll_sync_ffi_name: format!("{entry_ffi_name}_poll_sync"),
-                        poll_ffi_name: format!("{entry_ffi_name}_poll"),
-                        complete_ffi_name: format!("{entry_ffi_name}_complete"),
-                        panic_message_ffi_name: format!("{entry_ffi_name}_panic_message"),
-                        cancel_ffi_name: format!("{entry_ffi_name}_cancel"),
-                        free_ffi_name: format!("{entry_ffi_name}_free"),
+                        poll_ffi_name: lifecycle.poll,
+                        complete_ffi_name: lifecycle.complete,
+                        panic_message_ffi_name: lifecycle.panic_message,
+                        cancel_ffi_name: lifecycle.cancel,
+                        free_ffi_name: lifecycle.free,
                         native_async: self.experimental.native_async,
                         return_route,
                     }),
@@ -1322,8 +1377,14 @@ impl<'a> TypeScriptLowerer<'a> {
         };
 
         let func_name = camel_case(def.id.as_str());
-        let fn_name_snake = naming::to_snake_case(def.id.as_str());
-        let base_ffi_name = format!("{}_{}", ffi_prefix(), fn_name_snake);
+        // Was re-derived locally (`to_snake_case(def.id) `+ hardcoded `boltffi_` prefix,
+        // bypassing `abi_call.symbol` — the SAME `lower_function` sync counterpart above
+        // already uses `abi_call.symbol.as_str()` directly). The two coincide under the
+        // legacy/wasm scheme (bare-name symbols), but not under `NamingStyle::Experimental`
+        // (module-path-qualified symbols) — the local recompute silently mismatched
+        // `native_async` mode's real artifact.
+        let base_ffi_name = abi_call.symbol.as_str().to_string();
+        let lifecycle = self.async_lifecycle_ffi_names(&base_ffi_name);
 
         let param_defs: HashMap<&str, &ParamDef> =
             def.params.iter().map(|p| (p.name.as_str(), p)).collect();
@@ -1350,11 +1411,11 @@ impl<'a> TypeScriptLowerer<'a> {
             name: emit::escape_ts_keyword(&func_name),
             entry_ffi_name: base_ffi_name.clone(),
             poll_sync_ffi_name: format!("{}_poll_sync", base_ffi_name),
-            poll_ffi_name: format!("{}_poll", base_ffi_name),
-            complete_ffi_name: format!("{}_complete", base_ffi_name),
-            panic_message_ffi_name: format!("{}_panic_message", base_ffi_name),
-            cancel_ffi_name: format!("{}_cancel", base_ffi_name),
-            free_ffi_name: format!("{}_free", base_ffi_name),
+            poll_ffi_name: lifecycle.poll,
+            complete_ffi_name: lifecycle.complete,
+            panic_message_ffi_name: lifecycle.panic_message,
+            cancel_ffi_name: lifecycle.cancel,
+            free_ffi_name: lifecycle.free,
             native_async: self.experimental.native_async,
             params,
             return_type,
@@ -2404,6 +2465,7 @@ mod tests {
         execution_kind: ExecutionKind,
     ) -> FunctionDef {
         FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new(name),
             params,
             returns,
@@ -2458,7 +2520,19 @@ mod tests {
         contract: &FfiContract,
         experimental: TypeScriptExperimental,
     ) -> TsModule {
-        let abi = IrLowerer::new(contract).to_abi_contract();
+        // Mirrors the real CLI wiring (`boltffi_cli`'s `generate typescript`):
+        // `native_async` always drives BOTH the render-layer flag here AND the
+        // ABI-layer `NamingStyle` together (a real native artifact is only ever
+        // built through `BindingExpansion` when native_async codegen targets
+        // it) -- never one without the other.
+        let naming_style = if experimental.native_async {
+            boltffi_binding::NamingStyle::Experimental
+        } else {
+            boltffi_binding::NamingStyle::LegacyCompatible
+        };
+        let abi = IrLowerer::new(contract)
+            .naming_style(naming_style)
+            .to_abi_contract();
         TypeScriptLowerer::new(contract, &abi, "Test".to_string(), experimental)
             .lower()
             .expect("typescript lowering should succeed")
@@ -2493,6 +2567,7 @@ mod tests {
 
     fn class_with_sync_and_async_methods() -> ClassDef {
         ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Counter"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -2529,6 +2604,7 @@ mod tests {
 
     fn callback_trait(name: &str, methods: Vec<CallbackMethodDef>) -> CallbackTraitDef {
         CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new(name),
             methods,
             kind: CallbackKind::Trait,
@@ -2812,6 +2888,7 @@ mod tests {
     fn result_unit_class_method_returns_void_and_does_not_read_ok_payload() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Counter"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -3222,6 +3299,7 @@ mod tests {
     fn vec_blittable_record_param_uses_composite_buffer_route() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Point"),
@@ -3288,6 +3366,7 @@ mod tests {
     fn borrowed_blittable_record_slice_param_passes_element_count() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Point"),
@@ -3459,6 +3538,7 @@ mod tests {
     fn class_constructor_generates_correct_ffi_name_and_params() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Counter"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![primitive_param("initial", PrimitiveType::I32)],
@@ -3491,6 +3571,7 @@ mod tests {
     fn class_named_factory_constructor_uses_name_in_ffi() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Connection"),
             constructors: vec![
                 ConstructorDef::Default {
@@ -3537,6 +3618,7 @@ mod tests {
         // constructor's null does.
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Inventory"),
             constructors: vec![ConstructorDef::NamedFactory {
                 name: MethodId::new("try_new"),
@@ -3573,6 +3655,7 @@ mod tests {
     fn class_infallible_constructor_never_throws() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Counter"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -3602,6 +3685,7 @@ mod tests {
     fn value_type_constructor_name_collision_returns_error() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Point"),
             is_repr_c: true,
             is_error: false,
@@ -3643,6 +3727,7 @@ mod tests {
     fn value_type_default_constructor_names_stay_native() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Point"),
             is_repr_c: true,
             is_error: false,
@@ -3744,6 +3829,7 @@ mod tests {
     fn class_static_method_excludes_handle_from_ffi_args() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Factory"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -3776,6 +3862,7 @@ mod tests {
     fn class_ref_mut_self_method_passes_handle_same_as_ref_self() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Buffer"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -3808,6 +3895,7 @@ mod tests {
     fn class_async_method_with_params_includes_handle_in_entry_ffi() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Database"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -3847,6 +3935,7 @@ mod tests {
     fn class_ffi_free_uses_correct_naming() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Resource"),
             constructors: vec![],
             methods: vec![],
@@ -3889,6 +3978,7 @@ mod tests {
     fn class_async_method_with_mut_self_generates_correct_ffi_structure() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Counter"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -3933,6 +4023,7 @@ mod tests {
     fn class_lowering_generates_pascal_case_class_name() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("http_client"),
             constructors: vec![],
             methods: vec![],
@@ -3955,6 +4046,7 @@ mod tests {
     fn class_method_with_string_param_uses_string_conversion() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Logger"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -3993,6 +4085,7 @@ mod tests {
     fn class_constructor_with_string_param_generates_wrapper_and_cleanup() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Connection"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![ParamDef {
@@ -4029,6 +4122,7 @@ mod tests {
     fn class_method_returns_none_for_void_return_type() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Printer"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4066,6 +4160,7 @@ mod tests {
     fn class_method_with_record_param_uses_codec_conversion() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Point"),
@@ -4089,6 +4184,7 @@ mod tests {
             deprecated: None,
         });
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Canvas"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4132,6 +4228,7 @@ mod tests {
     fn wasm_record_function_uses_struct_param_and_return_slot() {
         let mut contract = empty_contract();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             is_repr_c: true,
             is_error: false,
             id: RecordId::new("Point"),
@@ -4199,6 +4296,7 @@ mod tests {
     fn class_sync_method_with_direct_return_has_correct_abi() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Counter"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4240,6 +4338,7 @@ mod tests {
         // returning null on failure too.
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Map"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4281,6 +4380,7 @@ mod tests {
     fn class_async_method_returning_result_of_handle_lowers_to_a_throwing_binding() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Map"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4321,6 +4421,7 @@ mod tests {
         // failure. Must keep returning null, never throw.
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Cache"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4361,6 +4462,7 @@ mod tests {
     fn class_method_ts_name_uses_camel_case() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Service"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4414,6 +4516,7 @@ mod tests {
     fn class_async_method_all_ffi_names_follow_convention() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("NetworkClient"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4473,8 +4576,12 @@ mod tests {
         // coverage) -- react-native track stage 3: class methods are the required remaining
         // gap (ParseClient IS a class), so `experimental.native_async` must thread through
         // class-method lowering exactly the same way it already does for top-level functions.
+        // `native_async` mode always pairs with `NamingStyle::Experimental` (real CLI
+        // wiring, `lower_contract_with_experimental` below) -- a qualified path is
+        // required for the entry symbol to mean anything under that style.
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: "test_crate::NetworkClient".to_string(),
             id: ClassId::new("NetworkClient"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4508,15 +4615,20 @@ mod tests {
         match &method.mode {
             TsClassMethodMode::Async(async_method) => {
                 assert!(async_method.native_async);
+                // Real `BindingExpansion` ABI shape (verified against parse-core-rs's real
+                // dylib, `boltffi_ffi_rules::naming::experimental`): the entry symbol is
+                // module-path- and family-qualified (`method_class_...`), and the lifecycle
+                // suffix gets an `async_` infix right after `boltffi_`, not a bare suffix.
                 assert_eq!(
                     async_method.poll_ffi_name,
-                    "boltffi_network_client_fetch_data_poll"
+                    "boltffi_async_method_class_test_crate_network_client_fetch_data_poll"
                 );
                 // The wasm-only symbol is still computed (cheap, other backends may want it)
-                // but the native template branch never references it.
+                // but the native template branch never references it -- it is a plain suffix
+                // on the (now qualified) entry symbol, not lifecycle-infixed.
                 assert_eq!(
                     async_method.poll_sync_ffi_name,
-                    "boltffi_network_client_fetch_data_poll_sync"
+                    "boltffi_method_class_test_crate_network_client_fetch_data_poll_sync"
                 );
             }
             _ => panic!("expected async method"),
@@ -4537,6 +4649,7 @@ mod tests {
     fn wasm_async_class_scalar_return_uses_direct_completion() {
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("SharedCounter"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -4607,15 +4720,21 @@ mod tests {
     #[test]
     fn native_async_flag_populates_native_poll_symbol_and_marker() {
         let mut contract = empty_contract();
-        contract.functions.push(function(
-            "async_add",
-            vec![
-                primitive_param("a", PrimitiveType::I32),
-                primitive_param("b", PrimitiveType::I32),
-            ],
-            ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::I32)),
-            ExecutionKind::Async,
-        ));
+        // `native_async` mode always pairs with `NamingStyle::Experimental` (real CLI
+        // wiring, `lower_contract_with_experimental` below) -- a qualified path is
+        // required for the entry symbol to mean anything under that style.
+        contract.functions.push(FunctionDef {
+            qualified_path: "test_crate::async_add".to_string(),
+            ..function(
+                "async_add",
+                vec![
+                    primitive_param("a", PrimitiveType::I32),
+                    primitive_param("b", PrimitiveType::I32),
+                ],
+                ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::I32)),
+                ExecutionKind::Async,
+            )
+        });
 
         let module = lower_contract_with_experimental(
             &contract,
@@ -4631,9 +4750,20 @@ mod tests {
             .expect("async function should be lowered");
 
         assert!(function.native_async);
-        assert_eq!(function.poll_ffi_name, "boltffi_async_add_poll");
+        // Real `BindingExpansion` ABI shape (verified against parse-core-rs's real dylib,
+        // `boltffi_ffi_rules::naming::experimental`): the entry symbol is module-path-qualified
+        // and the lifecycle suffix gets an `async_` infix right after `boltffi_`, not a bare
+        // suffix append.
+        assert_eq!(
+            function.poll_ffi_name,
+            "boltffi_async_function_test_crate_async_add_poll"
+        );
         // The wasm-only symbol is still computed (cheap, and other backends of this same struct
-        // may want it later) but the native template branch never references it.
-        assert_eq!(function.poll_sync_ffi_name, "boltffi_async_add_poll_sync");
+        // may want it later) but the native template branch never references it -- it is a
+        // plain suffix on the (now qualified) entry symbol, not lifecycle-infixed.
+        assert_eq!(
+            function.poll_sync_ffi_name,
+            "boltffi_function_test_crate_async_add_poll_sync"
+        );
     }
 }

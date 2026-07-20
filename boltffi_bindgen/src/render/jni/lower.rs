@@ -3089,6 +3089,7 @@ mod tests {
     fn contract_with_blittable_point() -> FfiContract {
         let mut catalog = TypeCatalog::default();
         catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Point"),
             is_repr_c: true,
             is_error: false,
@@ -3159,6 +3160,7 @@ mod tests {
     fn contract_with_non_blittable_record() -> FfiContract {
         let mut catalog = TypeCatalog::default();
         catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Message"),
             is_repr_c: false,
             is_error: false,
@@ -3190,6 +3192,7 @@ mod tests {
             CallbackKind::Closure => "call",
         };
         contract.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new(id),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new(method_id),
@@ -3219,6 +3222,7 @@ mod tests {
             functions: vec![],
         };
         contract.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("AsyncFetcher"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("fetch_value"),
@@ -3246,6 +3250,7 @@ mod tests {
             },
             catalog: TypeCatalog::default(),
             functions: vec![FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("get_name"),
                 params: vec![],
                 returns: ReturnDef::Value(TypeExpr::String),
@@ -3264,6 +3269,7 @@ mod tests {
             },
             catalog: TypeCatalog::default(),
             functions: vec![FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("get_name"),
                 params: vec![],
                 returns: ReturnDef::Value(TypeExpr::String),
@@ -3277,6 +3283,7 @@ mod tests {
     fn contract_with_string_value_method() -> FfiContract {
         let mut catalog = TypeCatalog::default();
         catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Named"),
             is_repr_c: false,
             is_error: false,
@@ -3325,6 +3332,7 @@ mod tests {
         returns: ReturnDef,
     ) -> ReturnShape {
         contract.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("__Closure_Test"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("call"),
@@ -3435,6 +3443,7 @@ mod tests {
     fn blittable_record_self_param_uses_composite_jni_lowering() {
         let mut contract = contract_with_blittable_point();
         contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new("Point"),
             is_repr_c: true,
             is_error: false,
@@ -3544,6 +3553,7 @@ mod tests {
         let marker_id = ClassId::new("Marker");
         let mut contract = empty_contract();
         contract.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: marker_id.clone(),
             constructors: vec![],
             methods: vec![],

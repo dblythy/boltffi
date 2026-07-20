@@ -636,6 +636,7 @@ mod tests {
 
     fn callback_with_method(method: CallbackMethodDef) -> CallbackTraitDef {
         CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("Listener"),
             methods: vec![method],
             kind: CallbackKind::Trait,
@@ -869,6 +870,7 @@ mod tests {
         // unrelated to the shape under test here, `DartType::from_type_expr`
         // needs it for the callback's own *public* method signature.
         ffi.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("Other"),
             methods: vec![CallbackMethodDef {
                 execution_kind: ExecutionKind::Sync,

@@ -6,6 +6,11 @@ use super::types::{Deprecation, ReturnType, Type};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallbackTrait {
     pub name: String,
+    /// The trait's fully qualified Rust path (crate name first, e.g.
+    /// `parse_core::ffi::transport::SessionStorage`), or empty when unknown.
+    /// Only consulted for `NamingStyle::Experimental` symbol naming.
+    #[serde(default)]
+    pub qualified_path: String,
     pub methods: Vec<TraitMethod>,
     pub doc: Option<String>,
     pub deprecated: Option<Deprecation>,
@@ -15,10 +20,16 @@ impl CallbackTrait {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            qualified_path: String::new(),
             methods: Vec::new(),
             doc: None,
             deprecated: None,
         }
+    }
+
+    pub fn with_qualified_path(mut self, qualified_path: impl Into<String>) -> Self {
+        self.qualified_path = qualified_path.into();
+        self
     }
 
     pub fn with_method(mut self, method: TraitMethod) -> Self {

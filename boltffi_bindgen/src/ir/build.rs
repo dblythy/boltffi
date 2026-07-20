@@ -95,6 +95,7 @@ impl<'m> ContractBuilder<'m> {
 
         RecordDef {
             id: RecordId::new(&record.name),
+            qualified_path: record.qualified_path.clone(),
             is_repr_c: record.is_repr_c,
             is_error: record.is_error,
             fields: record
@@ -215,6 +216,7 @@ impl<'m> ContractBuilder<'m> {
     fn convert_function(&self, func: &model::Function) -> FunctionDef {
         FunctionDef {
             id: FunctionId::new(&func.name),
+            qualified_path: func.qualified_path.clone(),
             params: func
                 .inputs
                 .iter()
@@ -230,6 +232,7 @@ impl<'m> ContractBuilder<'m> {
     fn convert_class(&self, class: &model::Class) -> ClassDef {
         ClassDef {
             id: ClassId::new(&class.name),
+            qualified_path: class.qualified_path.clone(),
             constructors: {
                 let has_default_init = class.constructors.iter().any(|c| c.name == "new");
                 let mut promoted_no_param = has_default_init;
@@ -340,6 +343,7 @@ impl<'m> ContractBuilder<'m> {
     fn convert_callback_trait(&self, cb: &model::CallbackTrait) -> CallbackTraitDef {
         CallbackTraitDef {
             id: CallbackId::new(&cb.name),
+            qualified_path: cb.qualified_path.clone(),
             methods: cb
                 .methods
                 .iter()
@@ -399,6 +403,9 @@ impl<'m> ContractBuilder<'m> {
 
         CallbackTraitDef {
             id: CallbackId::new(sig_id),
+            // Compiler-synthesized closure signature (`__Closure_N`) — no
+            // real Rust source path exists to qualify.
+            qualified_path: String::new(),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("call"),
                 params,

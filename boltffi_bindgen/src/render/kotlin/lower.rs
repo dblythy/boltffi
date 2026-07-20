@@ -5002,6 +5002,7 @@ mod tests {
 
     fn record_def(id: &str, fields: Vec<FieldDef>) -> RecordDef {
         RecordDef {
+            qualified_path: String::new(),
             id: RecordId::new(id),
             is_repr_c: true,
             is_error: false,
@@ -5033,6 +5034,7 @@ mod tests {
             },
             catalog: TypeCatalog::default(),
             functions: vec![FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("fetch_name"),
                 params: vec![],
                 returns: ReturnDef::Value(TypeExpr::String),
@@ -5051,6 +5053,7 @@ mod tests {
             },
             catalog: TypeCatalog::default(),
             functions: vec![FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("fetch_name"),
                 params: vec![],
                 returns: ReturnDef::Value(TypeExpr::String),
@@ -5224,6 +5227,7 @@ mod tests {
     fn async_string_method_contract() -> FfiContract {
         let mut catalog = TypeCatalog::default();
         catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Named"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -5257,6 +5261,7 @@ mod tests {
     fn sync_string_method_contract() -> FfiContract {
         let mut catalog = TypeCatalog::default();
         catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Named"),
             constructors: vec![],
             methods: vec![MethodDef {
@@ -5299,6 +5304,7 @@ mod tests {
             ],
         ));
         catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("EventBus"),
             constructors: vec![],
             methods: vec![],
@@ -5496,6 +5502,7 @@ mod tests {
             ],
         ));
         catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("DataProvider"),
             methods: vec![CallbackMethodDef {
                 id: MethodId::new("get_item"),
