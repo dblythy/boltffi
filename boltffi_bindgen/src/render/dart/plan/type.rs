@@ -228,6 +228,7 @@ pub enum DartType {
     },
     Bytes,
     List(Box<DartType>),
+    Map(Box<DartType>, Box<DartType>),
     Function {
         params: Vec<DartType>,
         ret_ty: Box<DartType>,
@@ -266,6 +267,10 @@ impl DartType {
                 TypeExpr::Primitive(PrimitiveType::U8) => DartType::Bytes,
                 _ => DartType::List(Box::new(Self::from_type_expr(inner, type_catalog))),
             },
+            TypeExpr::Map(key, value) => DartType::Map(
+                Box::new(Self::from_type_expr(key, type_catalog)),
+                Box::new(Self::from_type_expr(value, type_catalog)),
+            ),
             TypeExpr::Option(inner) => {
                 DartType::Option(Box::new(Self::from_type_expr(inner, type_catalog)))
             }
@@ -341,6 +346,9 @@ impl DartType {
             }
             DartType::Bytes => "$$typed_data.Uint8List".to_string(),
             DartType::List(inner) => format!("List<{}>", inner.dart_type()),
+            DartType::Map(key, value) => {
+                format!("Map<{}, {}>", key.dart_type(), value.dart_type())
+            }
             DartType::Function { params, ret_ty } => format!(
                 "{} Function({})",
                 ret_ty.dart_type(),

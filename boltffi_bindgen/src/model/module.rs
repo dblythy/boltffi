@@ -317,6 +317,10 @@ impl DerivedTypeCollector {
                 self.visit(ok);
                 self.visit(err);
             }
+            Type::Map(key, value) => {
+                self.visit(key);
+                self.visit(value);
+            }
             Type::Custom { repr, .. } => {
                 self.visit(repr);
             }

@@ -12,6 +12,7 @@ pub enum TypeExpr {
     Str,
 
     Vec(Box<TypeExpr>),
+    Map(Box<TypeExpr>, Box<TypeExpr>),
     Option(Box<TypeExpr>),
     Result {
         ok: Box<TypeExpr>,

@@ -204,6 +204,12 @@ pub enum Type {
     Slice(Box<Type>),
     MutSlice(Box<Type>),
     Vec(Box<Type>),
+    /// A `HashMap<K, V>`/`BTreeMap<K, V>` field or parameter. Only the old
+    /// syn-based scanner pipeline (TypeScript + Dart targets) produces this
+    /// variant — the newer `boltffi_ast`/`boltffi_binding` pipeline (Python,
+    /// Java, Kotlin, KotlinMultiplatform, CSharp, Swift) has its own,
+    /// independent map support and never touches this enum.
+    Map(Box<Type>, Box<Type>),
     Option(Box<Type>),
     Result { ok: Box<Type>, err: Box<Type> },
     Closure(ClosureSignature),
@@ -258,6 +264,10 @@ impl Type {
 
     pub fn vec(element: Type) -> Self {
         Self::Vec(Box::new(element))
+    }
+
+    pub fn map(key: Type, value: Type) -> Self {
+        Self::Map(Box::new(key), Box::new(value))
     }
 
     pub fn option(inner: Type) -> Self {
@@ -322,6 +332,17 @@ impl Type {
         }
     }
 
+    pub fn is_map(&self) -> bool {
+        matches!(self, Self::Map(..))
+    }
+
+    pub fn map_types(&self) -> Option<(&Type, &Type)> {
+        match self {
+            Self::Map(key, value) => Some((key, value)),
+            _ => None,
+        }
+    }
+
     pub fn type_id(&self) -> String {
         match self {
             Self::Void => "Void".into(),
@@ -330,6 +351,7 @@ impl Type {
             Self::Str => "Str".into(),
             Self::Builtin(id) => id.type_id().into(),
             Self::Vec(inner) => format!("Vec{}", inner.type_id()),
+            Self::Map(key, value) => format!("Map{}{}", key.type_id(), value.type_id()),
             Self::Option(inner) => format!("Opt{}", inner.type_id()),
             Self::Slice(inner) => format!("Slice{}", inner.type_id()),
             Self::MutSlice(inner) => format!("MutSlice{}", inner.type_id()),
@@ -350,9 +372,8 @@ impl CLayout for Type {
     fn c_layout(&self) -> Layout {
         match self {
             Self::Primitive(primitive) => primitive.c_layout(),
-            Self::String | Self::Str | Self::Vec(_) | Self::Slice(_) | Self::MutSlice(_) => {
-                Layout::new(24, 8)
-            }
+            Self::String | Self::Str | Self::Vec(_) | Self::Map(..) | Self::Slice(_)
+            | Self::MutSlice(_) => Layout::new(24, 8),
             Self::Object(_) | Self::BoxedTrait(_) | Self::Closure(_) => Layout::new(8, 8),
             Self::Builtin(_) | Self::Record(_) | Self::Enum(_) | Self::Custom { .. } => {
                 Layout::new(8, 8)

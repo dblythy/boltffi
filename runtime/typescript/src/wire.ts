@@ -193,6 +193,16 @@ export class WireReader {
     return result;
   }
 
+  readMap<V>(readKey: () => string, readValue: () => V): Record<string, V> {
+    const len = this.readU32();
+    const result: Record<string, V> = {};
+    for (let i = 0; i < len; i++) {
+      const key = readKey();
+      result[key] = readValue();
+    }
+    return result;
+  }
+
   readResult<T, E>(readOk: () => T, readErr: () => E): T {
     const tag = this.readU8();
     if (tag === 0) {
@@ -487,6 +497,19 @@ export class WireWriter {
     this.writeU32(values.length);
     for (const v of values) {
       writeElement(v);
+    }
+  }
+
+  writeMap<V>(
+    value: Record<string, V>,
+    writeKey: (k: string) => void,
+    writeValue: (v: V) => void
+  ): void {
+    const entries = Object.entries(value);
+    this.writeU32(entries.length);
+    for (const [key, v] of entries) {
+      writeKey(key);
+      writeValue(v);
     }
   }
 

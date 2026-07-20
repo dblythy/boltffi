@@ -673,6 +673,19 @@ impl<'a> KotlinLowerer<'a> {
                 element: Box::new(self.strip_field_access_in_write_seq(element)),
                 layout: layout.clone(),
             },
+            WriteOp::Map {
+                value,
+                key_type,
+                value_type,
+                key,
+                entry_value,
+            } => WriteOp::Map {
+                value: Self::strip_field_access_in_value(value),
+                key_type: key_type.clone(),
+                value_type: value_type.clone(),
+                key: Box::new(self.strip_field_access_in_write_seq(key)),
+                entry_value: Box::new(self.strip_field_access_in_write_seq(entry_value)),
+            },
             WriteOp::Record { id, value, fields } => WriteOp::Record {
                 id: id.clone(),
                 value: Self::strip_field_access_in_value(value),
@@ -1786,6 +1799,19 @@ impl<'a> KotlinLowerer<'a> {
                 element_type: element_type.clone(),
                 element: Box::new(self.rebase_read_seq(element, old_base, new_base)),
                 layout: layout.clone(),
+            },
+            ReadOp::Map {
+                len_offset,
+                key_type,
+                value_type,
+                key,
+                value,
+            } => ReadOp::Map {
+                len_offset: self.rebase_offset_expr(len_offset, old_base, new_base),
+                key_type: key_type.clone(),
+                value_type: value_type.clone(),
+                key: Box::new(self.rebase_read_seq(key, old_base, new_base)),
+                value: Box::new(self.rebase_read_seq(value, old_base, new_base)),
             },
             ReadOp::Record { id, offset, fields } => ReadOp::Record {
                 id: id.clone(),
@@ -2972,6 +2998,13 @@ impl<'a> KotlinLowerer<'a> {
             }
             TypeExpr::Enum(id) => NamingConvention::class_name(id.as_str()),
             TypeExpr::Vec(inner) => self.kotlin_vec_type(inner),
+            // This legacy `boltffi_bindgen::render::kotlin` renderer is dead
+            // code — real Kotlin generation goes through the `Native`
+            // pipeline (`boltffi_backend::target::kotlin`). Kept in sync
+            // only so the crate compiles.
+            TypeExpr::Map(key, value) => {
+                format!("Map<{}, {}>", self.kotlin_type(key), self.kotlin_type(value))
+            }
             TypeExpr::Option(inner) => format!("{}?", self.kotlin_type(inner)),
             TypeExpr::Result { ok, err } => {
                 format!(
@@ -3203,6 +3236,9 @@ impl<'a> KotlinLowerer<'a> {
             ReadOp::Record { id, .. } => NamingConvention::class_name(id.as_str()),
             ReadOp::Enum { id, .. } => NamingConvention::class_name(id.as_str()),
             ReadOp::Vec { element_type, .. } => self.kotlin_vec_type(element_type),
+            ReadOp::Map { key_type, value_type, .. } => {
+                format!("Map<{}, {}>", self.kotlin_type(key_type), self.kotlin_type(value_type))
+            }
             ReadOp::Option { some, .. } => format!("{}?", self.return_type_from_decode_ops(some)),
             ReadOp::Result { ok, .. } => self.return_type_from_decode_ops(ok),
             ReadOp::Custom { id, .. } => NamingConvention::class_name(id.as_str()),

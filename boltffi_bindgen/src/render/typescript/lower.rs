@@ -2300,6 +2300,15 @@ fn infer_ts_type_from_read_ops(seq: &ReadSeq) -> String {
                     format!("{}[]", emit::ts_type(element_type))
                 }
             }
+            ReadOp::Map {
+                key_type,
+                value_type,
+                ..
+            } => format!(
+                "Record<{}, {}>",
+                emit::ts_type(key_type),
+                emit::ts_type(value_type)
+            ),
             ReadOp::Record { id, .. } => naming::to_upper_camel_case(id.as_str()),
             ReadOp::Enum { id, .. } => naming::to_upper_camel_case(id.as_str()),
             ReadOp::Result { ok, .. } => infer_ts_type_from_read_ops(ok),
@@ -2422,6 +2431,19 @@ fn remap_named_in_write_op(op: &WriteOp) -> WriteOp {
             element_type: element_type.clone(),
             element: Box::new(remap_named_to_field(element)),
             layout: layout.clone(),
+        },
+        WriteOp::Map {
+            value,
+            key_type,
+            value_type,
+            key,
+            entry_value,
+        } => WriteOp::Map {
+            value: remap_named_in_value(value),
+            key_type: key_type.clone(),
+            value_type: value_type.clone(),
+            key: Box::new(remap_named_to_field(key)),
+            entry_value: Box::new(remap_named_to_field(entry_value)),
         },
         WriteOp::Record { id, value, fields } => WriteOp::Record {
             id: id.clone(),
@@ -4273,6 +4295,46 @@ mod tests {
             }
             _ => panic!("expected direct struct conversion"),
         }
+    }
+
+    #[test]
+    fn record_field_with_string_map_lowers_to_record_type_and_map_codec() {
+        let mut contract = empty_contract();
+        contract.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
+            is_repr_c: false,
+            is_error: false,
+            id: RecordId::new("ClientConfig"),
+            fields: vec![FieldDef {
+                name: FieldName::new("default_headers"),
+                type_expr: TypeExpr::Map(Box::new(TypeExpr::String), Box::new(TypeExpr::String)),
+                doc: None,
+                default: None,
+            }],
+            constructors: vec![],
+            methods: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let module = lower_contract(&contract);
+        let record = module
+            .records
+            .iter()
+            .find(|record| record.name == "ClientConfig")
+            .expect("ClientConfig record should be lowered");
+        let field = record
+            .fields
+            .iter()
+            .find(|field| field.name == "defaultHeaders")
+            .expect("defaultHeaders field should exist");
+
+        assert_eq!(field.ts_type, "Record<string, string>");
+        assert!(field.wire_decode_expr().contains("readMap"));
+        assert!(field.wire_encode_expr("writer", "value").contains("writeMap"));
+
+        let rendered = crate::render::typescript::templates::TypeScriptEmitter::emit(&module);
+        assert!(rendered.contains("defaultHeaders: Record<string, string>"));
     }
 
     #[test]
