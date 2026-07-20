@@ -58,7 +58,6 @@ final class _I$ICallbackVTable extends $$ffi.Struct {
         $$ffi.Uint64,
         $$ffi.Pointer<$$ffi.Uint8>,
         $$ffi.UintPtr,
-        $$ffi.Pointer<_$$FFIStatus>,
     )
     >
   > processBytes;
@@ -83,8 +82,22 @@ abstract interface class ICallback {
 }
 
 final class _I$ICallback {
+  // Deferred by one event-loop turn rather than removed immediately: `free`
+  // and each method below dispatch through *separate*
+  // `NativeCallable.listener`s (distinct native ports), so there is no
+  // guarantee that a `free` message posted from one thread is *processed*
+  // after a method-call message posted (perhaps concurrently, from another
+  // thread — a `Foreign*` handle is `Send + Sync`) for the same handle,
+  // even when the underlying native call that issued it happened first.
+  // Running the actual removal via `Timer.run` places it at the back of
+  // the event queue, after anything already queued when `free` was
+  // processed — including an in-flight method-dispatch message for this
+  // same handle — so that call still finds a live entry instead of
+  // spuriously hitting the "invalid handle" path.
   static void free(int handle) {
-    _k$ICallbackHandleMap.remove(handle);
+    $$async.Timer.run(() {
+      _k$ICallbackHandleMap.remove(handle);
+    });
   }
 
   static int clone(int handle) {
@@ -175,7 +188,6 @@ _p$outStatus.ref.code = -1;
     int _p$handle,
     $$ffi.Pointer<$$ffi.Uint8> _p$bytesPtr,
     int _p$bytesLen,
-    $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
   ) {
     try {
 final impl = _k$ICallbackHandleMap.get(_p$handle);
@@ -183,10 +195,11 @@ if (impl == null) {
 throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
 }
 final _p$r$bytes = _$$WireReader(_p$bytesPtr, _p$bytesLen);
-impl.processBytes(_p$r$bytes.readUint8List());
-_p$outStatus.ref.code = 0;
+final _p$d$bytes = _p$r$bytes.readUint8List();
+$$extffi.calloc.free(_p$bytesPtr);
+impl.processBytes(_p$d$bytes);
 } catch (e) {
-_p$outStatus.ref.code = -1;
+
 }
 
   }
@@ -211,7 +224,6 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
       $$ffi.Uint64,
       $$ffi.Pointer<$$ffi.Uint8>,
       $$ffi.UintPtr,
-      $$ffi.Pointer<_$$FFIStatus>,
     )
   >
   _c$processBytes;

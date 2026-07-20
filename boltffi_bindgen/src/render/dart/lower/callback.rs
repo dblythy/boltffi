@@ -9,7 +9,7 @@ use crate::{
     render::dart::{
         DartCallback, DartCallbackMethod, DartNativeCallback, DartNativeCallbackMethod,
         DartNativeFunctionKind, DartNativeFunctionParam, DartNativeType, DartType,
-        NamingConvention, emit,
+        NamingConvention, emit, should_dispatch_via_listener,
     },
 };
 
@@ -153,7 +153,17 @@ struct DecodedArgs {
 /// `Direct` (composite-by-value) is declared in the IR but never constructed;
 /// a param transport this renderer doesn't recognize fails loudly rather than
 /// silently mis-marshaling.
-fn decode_input_args(params: &[AbiParam]) -> DecodedArgs {
+///
+/// `is_deferred` must be `should_dispatch_via_listener`'s answer for this
+/// same method: on a deferred slot, `native.rs`'s matching macro hands this
+/// trampoline a `malloc`-owned buffer (a stack-scoped one would already be
+/// gone by the time this — a `NativeCallable.listener`-posted, not
+/// synchronous — call runs), so the decode is forced eager (into a plain
+/// local, not left as a lazy inline read expression) so a `calloc.free` can
+/// follow it before the value is used. A non-deferred slot's buffer is
+/// still Rust-stack-scoped for the (synchronous) duration of this call —
+/// freeing it here would be a use-after-free on Rust's side instead.
+fn decode_input_args(params: &[AbiParam], is_deferred: bool) -> DecodedArgs {
     let mut setup = Vec::new();
     let mut call_args = Vec::new();
 
@@ -193,7 +203,15 @@ fn decode_input_args(params: &[AbiParam]) -> DecodedArgs {
                 setup.push(format!(
                     "final {reader_var} = _$$WireReader({ptr_name}, {len_name});"
                 ));
-                call_args.push(emit::emit_reader_read(decode_ops, &reader_var));
+                let read_expr = emit::emit_reader_read(decode_ops, &reader_var);
+                if is_deferred {
+                    let decoded_var = format!("_p$d${base}");
+                    setup.push(format!("final {decoded_var} = {read_expr};"));
+                    setup.push(format!("$$extffi.calloc.free({ptr_name});"));
+                    call_args.push(decoded_var);
+                } else {
+                    call_args.push(read_expr);
+                }
             }
             other => call_args.push(format!(
                 "(throw UnsupportedError('unsupported callback param transport: {other:?}'))"
@@ -219,10 +237,23 @@ fn render_sync_completion(
     m: &AbiCallbackMethod,
     return_type: &DartNativeType,
 ) -> CompletionBody {
+    // A `void` return has no `_p$outStatus` param at all (this slot
+    // dispatches through a deferred `NativeCallable.listener`, and Rust
+    // never reads a status back for it — see `lower_native_callback_method`
+    // and `native.rs`'s matching `expand_sync`) — an exception here has
+    // nowhere left to report to; the `try`/`catch` still exists so it
+    // doesn't escape uncaught into the isolate's top-level error zone.
+    if matches!(return_type, DartNativeType::Void) {
+        return CompletionBody {
+            try_body: format!("{call_expr};"),
+            catch_body: String::new(),
+        };
+    }
+
     let catch_body = "_p$outStatus.ref.code = -1;".to_string();
 
     let try_body = match return_type {
-        DartNativeType::Void => format!("{call_expr};\n_p$outStatus.ref.code = 0;"),
+        DartNativeType::Void => unreachable!("handled above"),
         DartNativeType::Primitive(_) => {
             // `_p$value` (not the codec's `value`/`result` names — no codec
             // is involved for a bare scalar) can never collide with a
@@ -314,7 +345,8 @@ fn render_native_method_body(
     m: &AbiCallbackMethod,
     return_type: &DartNativeType,
 ) -> String {
-    let decoded = decode_input_args(&m.params[1..]);
+    let is_deferred = should_dispatch_via_listener(m.execution_kind, return_type);
+    let decoded = decode_input_args(&m.params[1..], is_deferred);
     let call_expr = format!("impl.{method_dart_name}({})", decoded.call_args.join(", "));
 
     let completion = match m.execution_kind {
@@ -377,12 +409,20 @@ impl<'a> super::DartLowerer<'a> {
             DartNativeType::from_return_shape_and_error_transport(&m.returns, &m.error);
 
         match m.execution_kind {
-            ExecutionKind::Sync => {
+            // A `void` return means this slot dispatches through a deferred
+            // `NativeCallable.listener` (`dispatch_via_listener`) — the
+            // matching Rust macro (`native.rs`'s `expand_sync`) drops the
+            // status out-param from this exact vtable slot entirely
+            // (nothing there ever reads it back), so this trampoline must
+            // not declare one either, or its native signature no longer
+            // matches the vtable field it's assigned to.
+            ExecutionKind::Sync if !matches!(return_type, DartNativeType::Void) => {
                 params.push(DartNativeFunctionParam {
                     name: "_p$outStatus".to_string(),
                     native_type: DartNativeType::Pointer(Box::new(DartNativeType::Status)),
                 });
             }
+            ExecutionKind::Sync => {}
             ExecutionKind::Async => {
                 let mut callback_params = vec![];
                 push_async_callback_params(&mut callback_params, &return_type);
@@ -511,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn sync_void_return_calls_impl_and_sets_status_ok() {
+    fn sync_void_return_calls_impl_with_no_status_channel() {
         let native = lower_first_native_method(CallbackMethodDef {
             execution_kind: ExecutionKind::Sync,
             id: crate::ir::MethodId::new("on_event"),
@@ -525,13 +565,27 @@ mod tests {
             doc: None,
         });
 
+        // No `_p$outStatus` param at all: this slot dispatches through a
+        // deferred `NativeCallable.listener`, and the matching Rust macro
+        // (`native.rs`'s `expand_sync`) drops the status out-param from
+        // this exact vtable slot — nothing there ever reads it back, and
+        // writing to one here would need a param this signature no longer
+        // declares.
         assert!(
-            native.body.contains("impl.onEvent("),
+            !native
+                .params
+                .iter()
+                .any(|p| p.name == "_p$outStatus"),
+            "params: {:?}",
+            native.params
+        );
+        assert!(
+            !native.body.contains("_p$outStatus"),
             "body: {}",
             native.body
         );
         assert!(
-            native.body.contains("_p$outStatus.ref.code = 0;"),
+            native.body.contains("impl.onEvent("),
             "body: {}",
             native.body
         );
@@ -540,16 +594,55 @@ mod tests {
             "body: {}",
             native.body
         );
-        // The handle-lookup null check reports through the same status
-        // channel as any other exception, rather than throwing uncaught
-        // across the `Pointer.fromFunction` boundary.
+        // Regression (Codex review finding, 2026-07-20, finding 1): the
+        // encoded param must be decoded eagerly, into a local, *before* the
+        // call — never left as a lazy inline read expression evaluated at
+        // the call site — so the buffer can be freed right after decoding
+        // and before `impl.onEvent` runs. Rust hands this trampoline a
+        // `malloc`-owned buffer for exactly this slot shape (see
+        // `native.rs`'s `is_deferred`), so it must be freed here, not
+        // borrowed indefinitely.
+        assert!(
+            native.body.contains("final _p$d$text = _p$r$text.readString();"),
+            "body: {}",
+            native.body
+        );
+        assert!(
+            native.body.contains("$$extffi.calloc.free(_p$textPtr);"),
+            "body: {}",
+            native.body
+        );
+        assert!(
+            native.body.contains("impl.onEvent(_p$d$text);"),
+            "body: {}",
+            native.body
+        );
+        // The free must happen strictly between the decode and the call.
+        let decode_pos = native
+            .body
+            .find("final _p$d$text = _p$r$text.readString();")
+            .expect(&native.body);
+        let free_pos = native
+            .body
+            .find("$$extffi.calloc.free(_p$textPtr);")
+            .expect(&native.body);
+        let call_pos = native.body.find("impl.onEvent(_p$d$text);").expect(&native.body);
+        assert!(
+            decode_pos < free_pos && free_pos < call_pos,
+            "body: {}",
+            native.body
+        );
+        // The handle-lookup null check still reports through *a* channel
+        // (an exception caught locally) rather than escaping uncaught
+        // across the deferred trampoline boundary — but there is nowhere
+        // left to report it to, so the catch body is empty.
         assert!(
             native.body.contains("throw _$$FFIException(-1,"),
             "body: {}",
             native.body
         );
         assert!(
-            native.body.contains("} catch (e) {\n_p$outStatus.ref.code = -1;"),
+            native.body.contains("} catch (e) {\n\n}"),
             "body: {}",
             native.body
         );
