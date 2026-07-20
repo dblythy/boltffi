@@ -335,6 +335,10 @@ fn validate_type_expr(expr: &TypeExpr, catalog: &TypeCatalog) -> Result<(), Stri
             .map(|_| ())
             .ok_or_else(|| format!("unresolved class handle: {}", id)),
         TypeExpr::Vec(inner) | TypeExpr::Option(inner) => validate_type_expr(inner, catalog),
+        TypeExpr::Map(key, value) => {
+            validate_type_expr(key, catalog)?;
+            validate_type_expr(value, catalog)
+        }
         TypeExpr::Result { ok, err } => {
             validate_type_expr(ok, catalog)?;
             validate_type_expr(err, catalog)
@@ -354,6 +358,10 @@ fn reject_non_encodable_in_data(expr: &TypeExpr, context: &str) -> Result<(), Va
         }),
         TypeExpr::Vec(inner) | TypeExpr::Option(inner) => {
             reject_non_encodable_in_data(inner, context)
+        }
+        TypeExpr::Map(key, value) => {
+            reject_non_encodable_in_data(key, context)?;
+            reject_non_encodable_in_data(value, context)
         }
         TypeExpr::Result { ok, err } => {
             reject_non_encodable_in_data(ok, context)?;
@@ -414,6 +422,7 @@ fn is_wire_encodable(ty: &TypeExpr) -> bool {
         | TypeExpr::Custom(_)
         | TypeExpr::Builtin(_) => true,
         TypeExpr::Option(inner) | TypeExpr::Vec(inner) => is_wire_encodable(inner),
+        TypeExpr::Map(key, value) => is_wire_encodable(key) && is_wire_encodable(value),
         TypeExpr::Result { ok, err } => is_wire_encodable(ok) && is_wire_encodable(err),
         TypeExpr::Handle(_) | TypeExpr::Callback(_) => false,
     }

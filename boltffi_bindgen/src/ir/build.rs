@@ -460,6 +460,10 @@ impl<'m> ContractBuilder<'m> {
             model::Type::Str => TypeExpr::Str,
             model::Type::Builtin(id) => TypeExpr::Builtin(BuiltinId::new(id.type_id())),
             model::Type::Vec(inner) => TypeExpr::Vec(Box::new(Self::convert_type(inner))),
+            model::Type::Map(key, value) => TypeExpr::Map(
+                Box::new(Self::convert_type(key)),
+                Box::new(Self::convert_type(value)),
+            ),
             model::Type::Option(inner) => TypeExpr::Option(Box::new(Self::convert_type(inner))),
             model::Type::Result { ok, err } => TypeExpr::Result {
                 ok: Box::new(Self::convert_type(ok)),

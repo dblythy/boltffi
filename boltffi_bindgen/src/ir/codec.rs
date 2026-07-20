@@ -21,6 +21,13 @@ pub enum CodecPlan {
         element: Box<CodecPlan>,
         layout: VecLayout,
     },
+    /// A `HashMap<K, V>`/`BTreeMap<K, V>` field or parameter. Always encoded
+    /// (a 4-byte entry count followed by each key then value in turn) —
+    /// there is no blittable representation, mirroring `VecLayout::Encoded`.
+    Map {
+        key: Box<CodecPlan>,
+        value: Box<CodecPlan>,
+    },
     Result {
         ok: Box<CodecPlan>,
         err: Box<CodecPlan>,
@@ -51,6 +58,10 @@ impl From<&CodecPlan> for TypeExpr {
             CodecPlan::Vec { element, .. } => {
                 TypeExpr::Vec(Box::new(TypeExpr::from(element.as_ref())))
             }
+            CodecPlan::Map { key, value } => TypeExpr::Map(
+                Box::new(TypeExpr::from(key.as_ref())),
+                Box::new(TypeExpr::from(value.as_ref())),
+            ),
             CodecPlan::Result { ok, err } => TypeExpr::Result {
                 ok: Box::new(TypeExpr::from(ok.as_ref())),
                 err: Box::new(TypeExpr::from(err.as_ref())),

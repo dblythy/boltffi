@@ -197,6 +197,11 @@ pub fn type_expr_dart_type(ty: &TypeExpr) -> String {
             },
             _ => format!("List<{}>", type_expr_dart_type(inner)),
         },
+        TypeExpr::Map(key, value) => format!(
+            "Map<{}, {}>",
+            type_expr_dart_type(key),
+            type_expr_dart_type(value)
+        ),
         TypeExpr::Option(inner) => format!("{}?", type_expr_dart_type(inner)),
         TypeExpr::Result { ok, err } => format!(
             "BoltFFIResult<{}, {}>",
@@ -619,6 +624,15 @@ pub fn emit_reader_read(seq: &ReadSeq, reader_name: &str) -> String {
             _ => format!("{reader_name}.readString()"),
         },
         ReadOp::Custom { underlying, .. } => emit_reader_read(underlying, reader_name),
+        // Follow-up: the Dart target has no `runtime/dart` package yet, so
+        // there is no `readMap`/`writeMap` wire helper to call — the record
+        // field's *type* still renders correctly (`type_expr_dart_type`
+        // above), only the wire codec is unimplemented. Wire this up
+        // alongside adding Map support to the Dart runtime once Dart is an
+        // active target.
+        ReadOp::Map { .. } => panic!(
+            "Dart Map<K, V> wire decoding is not yet implemented (no runtime/dart Map codec exists)"
+        ),
     }
 }
 

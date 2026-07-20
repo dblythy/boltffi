@@ -174,6 +174,13 @@ pub enum ReadOp {
         element: Box<ReadSeq>,
         layout: VecLayout,
     },
+    Map {
+        len_offset: OffsetExpr,
+        key_type: TypeExpr,
+        value_type: TypeExpr,
+        key: Box<ReadSeq>,
+        value: Box<ReadSeq>,
+    },
     Record {
         id: RecordId,
         offset: OffsetExpr,
@@ -217,6 +224,13 @@ pub enum WriteOp {
         element_type: TypeExpr,
         element: Box<WriteSeq>,
         layout: VecLayout,
+    },
+    Map {
+        value: ValueExpr,
+        key_type: TypeExpr,
+        value_type: TypeExpr,
+        key: Box<WriteSeq>,
+        entry_value: Box<WriteSeq>,
     },
     Record {
         id: RecordId,
@@ -340,6 +354,19 @@ fn remap_root_in_op(op: &WriteOp, new_root: &ValueExpr) -> WriteOp {
             element_type: element_type.clone(),
             element: element.clone(),
             layout: layout.clone(),
+        },
+        WriteOp::Map {
+            value,
+            key_type,
+            value_type,
+            key,
+            entry_value,
+        } => WriteOp::Map {
+            value: value.remap_root(new_root.clone()),
+            key_type: key_type.clone(),
+            value_type: value_type.clone(),
+            key: key.clone(),
+            entry_value: entry_value.clone(),
         },
         WriteOp::Record { id, value, fields } => WriteOp::Record {
             id: id.clone(),

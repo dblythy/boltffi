@@ -61,6 +61,17 @@ impl<'c> Lowerer<'c> {
                 }],
                 shape: WireShape::Sequence,
             },
+            CodecPlan::Map { key, value } => ReadSeq {
+                size: SizeExpr::Runtime,
+                ops: vec![ReadOp::Map {
+                    len_offset: offset,
+                    key_type: TypeExpr::from(key.as_ref()),
+                    value_type: TypeExpr::from(value.as_ref()),
+                    key: Box::new(self.expand_decode_with_offset(key, "pos")),
+                    value: Box::new(self.expand_decode_with_offset(value, "pos")),
+                }],
+                shape: WireShape::Sequence,
+            },
             CodecPlan::Result { ok, err } => ReadSeq {
                 size: SizeExpr::Runtime,
                 ops: vec![ReadOp::Result {
@@ -225,6 +236,21 @@ impl<'c> Lowerer<'c> {
                         element_type: TypeExpr::from(element.as_ref()),
                         element: Box::new(element_seq),
                         layout: layout.clone(),
+                    }],
+                    shape: WireShape::Sequence,
+                }
+            }
+            CodecPlan::Map { key, value: val } => {
+                let key_seq = self.expand_encode(key, ValueExpr::Var("k".into()));
+                let value_seq = self.expand_encode(val, ValueExpr::Var("v".into()));
+                WriteSeq {
+                    size: SizeExpr::Runtime,
+                    ops: vec![WriteOp::Map {
+                        value: value.clone(),
+                        key_type: TypeExpr::from(key.as_ref()),
+                        value_type: TypeExpr::from(val.as_ref()),
+                        key: Box::new(key_seq),
+                        entry_value: Box::new(value_seq),
                     }],
                     shape: WireShape::Sequence,
                 }

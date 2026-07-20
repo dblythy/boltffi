@@ -12,6 +12,10 @@ impl<'c> Lowerer<'c> {
                 element: Box::new(self.build_codec(inner)),
                 layout: self.vec_layout(inner),
             },
+            TypeExpr::Map(key, value) => CodecPlan::Map {
+                key: Box::new(self.build_codec(key)),
+                value: Box::new(self.build_codec(value)),
+            },
             TypeExpr::Result { ok, err } => CodecPlan::Result {
                 ok: Box::new(self.build_codec(ok)),
                 err: Box::new(self.build_codec(err)),

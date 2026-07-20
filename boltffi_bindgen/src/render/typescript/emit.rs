@@ -158,6 +158,7 @@ pub fn ts_type(type_expr: &TypeExpr) -> String {
                 format!("{}[]", ts_type(inner))
             }
         }
+        TypeExpr::Map(key, value) => format!("Record<{}, {}>", ts_type(key), ts_type(value)),
         TypeExpr::Result { ok, .. } => ts_type(ok),
         TypeExpr::Record(id) => to_pascal_case(id.as_str()),
         TypeExpr::Enum(id) => to_pascal_case(id.as_str()),
@@ -270,6 +271,11 @@ fn emit_reader_read_op(op: &ReadOp) -> String {
                 format!("reader.readArray(() => {inner})")
             }
         },
+        ReadOp::Map { key, value, .. } => {
+            let key_read = emit_reader_read(key);
+            let value_read = emit_reader_read(value);
+            format!("reader.readMap(() => {key_read}, () => {value_read})")
+        }
         ReadOp::Record { id, .. } => {
             format!("{}Codec.decode(reader)", to_pascal_case(id.as_str()))
         }
@@ -373,6 +379,19 @@ fn emit_writer_write_op(op: &WriteOp, w: &str, root_value: &str) -> String {
             }
             let inner = emit_writer_write(element, w, "item");
             format!("{w}.writeArray({val}, (item) => {{ {inner} }})")
+        }
+        WriteOp::Map {
+            value,
+            key,
+            entry_value,
+            ..
+        } => {
+            let val = render_value(value, root_value);
+            let key_write = emit_writer_write(key, w, "k");
+            let value_write = emit_writer_write(entry_value, w, "v");
+            format!(
+                "{w}.writeMap({val}, (k) => {{ {key_write} }}, (v) => {{ {value_write} }})"
+            )
         }
         WriteOp::Record { id, value, .. } => {
             format!(

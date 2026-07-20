@@ -1149,27 +1149,27 @@ impl SourceScanner {
                     || (has_attribute(&item_struct.attrs, "derive")
                         && has_ffi_type_derive(&item_struct.attrs))
                 {
-                    self.process_record(item_struct, file_module_path);
+                    self.process_record(item_struct, file_module_path)?;
                 }
             }
             Item::Impl(item_impl) => {
                 if has_data_impl_attribute(&item_impl.attrs) {
-                    self.process_value_type_impl(item_impl);
+                    self.process_value_type_impl(item_impl)?;
                 } else if has_attribute(&item_impl.attrs, "export") {
-                    self.process_class(item_impl, file_module_path);
+                    self.process_class(item_impl, file_module_path)?;
                 }
             }
             Item::Trait(item_trait)
                 if has_attribute(&item_trait.attrs, "ffi_trait")
                     || has_attribute(&item_trait.attrs, "export") =>
             {
-                self.process_callback_trait(item_trait, file_module_path);
+                self.process_callback_trait(item_trait, file_module_path)?;
             }
             Item::Fn(item_fn)
                 if has_attribute(&item_fn.attrs, "ffi_export")
                     || has_attribute(&item_fn.attrs, "export") =>
             {
-                self.process_function(item_fn, file_module_path);
+                self.process_function(item_fn, file_module_path)?;
             }
             Item::Enum(item_enum) => {
                 let is_error = has_attribute(&item_enum.attrs, "error");
@@ -1185,25 +1185,35 @@ impl SourceScanner {
         Ok(())
     }
 
+    /// Resolves every typed (non-`self`) parameter's Rust type to its FFI
+    /// type. A parameter whose type `rust_type_to_ffi_type` cannot classify
+    /// (an unsupported generic like a raw `HashMap<K, V>` before it was
+    /// taught to this scanner, or genuinely unsupported Rust) used to be
+    /// silently dropped — along with the entire function/method, since the
+    /// caller only compared list lengths. That hid the failure as "this API
+    /// doesn't exist" instead of naming the unresolved type. Now it is a
+    /// hard error naming `context`, the parameter, and the unresolved type.
     fn resolve_typed_params(
         &self,
         inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
         self_type: Option<&str>,
-    ) -> Option<Vec<(String, MType)>> {
-        let typed: Vec<_> = inputs
+        context: &str,
+    ) -> Result<Vec<(String, MType)>, String> {
+        inputs
             .iter()
             .filter_map(|arg| match arg {
                 FnArg::Typed(pat_type) => Some(pat_type),
                 _ => None,
             })
-            .collect();
-
-        let resolved: Vec<(String, MType)> = typed
-            .iter()
-            .filter_map(|pat_type| {
+            .map(|pat_type| {
                 let name = match &*pat_type.pat {
                     syn::Pat::Ident(ident) => ident.ident.to_string(),
-                    _ => return None,
+                    _ => {
+                        return Err(format!(
+                            "{context}: unsupported parameter pattern `{}` (only simple identifiers are supported)",
+                            normalize_type(&pat_type.ty)
+                        ));
+                    }
                 };
                 let ty = rust_type_to_ffi_type(
                     &pat_type.ty,
@@ -1212,17 +1222,30 @@ impl SourceScanner {
                     &self.compiler_canonical_types,
                     self_type,
                     FfiTypePosition::Value,
-                )?;
-                Some((name, ty))
+                )
+                .ok_or_else(|| {
+                    format!(
+                        "{context}: parameter `{name}` has an unsupported/unresolved type `{}`",
+                        normalize_type(&pat_type.ty)
+                    )
+                })?;
+                Ok((name, ty))
             })
-            .collect();
-
-        (resolved.len() == typed.len()).then_some(resolved)
+            .collect()
     }
 
-    fn resolve_output(&self, output: &syn::ReturnType, self_type: Option<&str>) -> Option<MType> {
+    /// Resolves a function/method's return type. `syn::ReturnType::Default`
+    /// (no `-> T` at all) is a legitimate `Ok(None)` — it is
+    /// `ReturnType::Type` failing to classify that is the hard-error case
+    /// (see `resolve_typed_params`'s doc for why this used to be silent).
+    fn resolve_output(
+        &self,
+        output: &syn::ReturnType,
+        self_type: Option<&str>,
+        context: &str,
+    ) -> Result<Option<MType>, String> {
         match output {
-            syn::ReturnType::Default => None,
+            syn::ReturnType::Default => Ok(None),
             syn::ReturnType::Type(_, ty) => rust_type_to_ffi_type(
                 ty,
                 &self.type_registry,
@@ -1230,7 +1253,14 @@ impl SourceScanner {
                 &self.compiler_canonical_types,
                 self_type,
                 FfiTypePosition::Return,
-            ),
+            )
+            .map(Some)
+            .ok_or_else(|| {
+                format!(
+                    "{context}: unsupported/unresolved return type `{}`",
+                    normalize_type(ty)
+                )
+            }),
         }
     }
 
@@ -1248,7 +1278,11 @@ impl SourceScanner {
             .unwrap_or(Receiver::None)
     }
 
-    fn process_record(&mut self, item_struct: &ItemStruct, file_module_path: &[String]) {
+    fn process_record(
+        &mut self,
+        item_struct: &ItemStruct,
+        file_module_path: &[String],
+    ) -> Result<(), String> {
         let name = item_struct.ident.to_string();
         self.type_registry
             .set_module_path(&name, file_module_path.to_vec());
@@ -1256,8 +1290,12 @@ impl SourceScanner {
             Fields::Named(named) => named
                 .named
                 .iter()
-                .filter_map(|f| {
-                    let field_name = f.ident.as_ref()?.to_string();
+                .map(|f| {
+                    let field_name = f
+                        .ident
+                        .as_ref()
+                        .expect("Fields::Named field always has an ident")
+                        .to_string();
                     let field_type = rust_type_to_ffi_type(
                         &f.ty,
                         &self.type_registry,
@@ -1265,7 +1303,13 @@ impl SourceScanner {
                         &self.compiler_canonical_types,
                         None,
                         FfiTypePosition::Value,
-                    )?;
+                    )
+                    .ok_or_else(|| {
+                        format!(
+                            "record `{name}`: field `{field_name}` has an unsupported/unresolved type `{}`",
+                            normalize_type(&f.ty)
+                        )
+                    })?;
                     let mut record_field = RecordField::new(&field_name, field_type);
                     if let Some(doc) = extract_doc_string(&f.attrs) {
                         record_field = record_field.with_doc(doc);
@@ -1273,9 +1317,9 @@ impl SourceScanner {
                     if let Some(default) = extract_default_value(&f.attrs) {
                         record_field = record_field.with_default(default);
                     }
-                    Some(record_field)
+                    Ok(record_field)
                 })
-                .collect(),
+                .collect::<Result<Vec<_>, String>>()?,
             _ => Vec::new(),
         };
 
@@ -1289,6 +1333,7 @@ impl SourceScanner {
         };
         self.type_registry
             .fill_record_fields(&name, fields, is_repr_c, is_error);
+        Ok(())
     }
 
     fn process_enum(
@@ -1332,8 +1377,12 @@ impl SourceScanner {
                     Fields::Named(named) => named
                         .named
                         .iter()
-                        .filter_map(|f| {
-                            let field_name = f.ident.as_ref()?.to_string();
+                        .map(|f| {
+                            let field_name = f
+                                .ident
+                                .as_ref()
+                                .expect("Fields::Named field always has an ident")
+                                .to_string();
                             let field_type = rust_type_to_ffi_type(
                                 &f.ty,
                                 &self.type_registry,
@@ -1341,19 +1390,25 @@ impl SourceScanner {
                                 &self.compiler_canonical_types,
                                 None,
                                 FfiTypePosition::Value,
-                            )?;
+                            )
+                            .ok_or_else(|| {
+                                format!(
+                                    "enum `{name}` variant `{variant_name}`: field `{field_name}` has an unsupported/unresolved type `{}`",
+                                    normalize_type(&f.ty)
+                                )
+                            })?;
                             let mut record_field = RecordField::new(&field_name, field_type);
                             if let Some(doc) = extract_doc_string(&f.attrs) {
                                 record_field = record_field.with_doc(doc);
                             }
-                            Some(record_field)
+                            Ok(record_field)
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>, String>>()?,
                     Fields::Unnamed(unnamed) => unnamed
                         .unnamed
                         .iter()
                         .enumerate()
-                        .filter_map(|(i, f)| {
+                        .map(|(i, f)| {
                             let field_type = rust_type_to_ffi_type(
                                 &f.ty,
                                 &self.type_registry,
@@ -1361,10 +1416,16 @@ impl SourceScanner {
                                 &self.compiler_canonical_types,
                                 None,
                                 FfiTypePosition::Value,
-                            )?;
-                            Some(RecordField::new(format!("value_{i}"), field_type))
+                            )
+                            .ok_or_else(|| {
+                                format!(
+                                    "enum `{name}` variant `{variant_name}`: tuple field {i} has an unsupported/unresolved type `{}`",
+                                    normalize_type(&f.ty)
+                                )
+                            })?;
+                            Ok(RecordField::new(format!("value_{i}"), field_type))
                         })
-                        .collect(),
+                        .collect::<Result<Vec<_>, String>>()?,
                     Fields::Unit => Vec::new(),
                 };
 
@@ -1390,17 +1451,17 @@ impl SourceScanner {
         Ok(())
     }
 
-    fn process_function(&mut self, item_fn: &syn::ItemFn, file_module_path: &[String]) {
+    fn process_function(
+        &mut self,
+        item_fn: &syn::ItemFn,
+        file_module_path: &[String],
+    ) -> Result<(), String> {
         let sig = &item_fn.sig;
-        let Some(params) = self.resolve_typed_params(&sig.inputs, None) else {
-            return;
-        };
-        let output = self.resolve_output(&sig.output, None);
-        if matches!(sig.output, syn::ReturnType::Type(..)) && output.is_none() {
-            return;
-        }
-
         let name = sig.ident.to_string();
+        let context = format!("function `{name}`");
+        let params = self.resolve_typed_params(&sig.inputs, None, &context)?;
+        let output = self.resolve_output(&sig.output, None, &context)?;
+
         let function = params
             .into_iter()
             .fold(Function::new(&name), |f, (name, ty)| {
@@ -1412,24 +1473,35 @@ impl SourceScanner {
             .maybe_async(sig.asyncness.is_some());
 
         self.functions.push(function);
+        Ok(())
     }
 
-    fn process_callback_trait(&mut self, item_trait: &ItemTrait, file_module_path: &[String]) {
+    fn process_callback_trait(
+        &mut self,
+        item_trait: &ItemTrait,
+        file_module_path: &[String],
+    ) -> Result<(), String> {
         let name = item_trait.ident.to_string();
 
-        let callback = item_trait
+        let methods = item_trait
             .items
             .iter()
             .filter_map(|item| match item {
-                syn::TraitItem::Fn(method) => self.build_trait_method(method),
+                syn::TraitItem::Fn(method) => Some(method),
                 _ => None,
             })
+            .map(|method| self.build_trait_method(method))
+            .collect::<Result<Vec<_>, String>>()?;
+
+        let callback = methods
+            .into_iter()
             .fold(CallbackTrait::new(&name), |ct, m| ct.with_method(m))
             .with_qualified_path(self.qualified_path(file_module_path, &name))
             .maybe_doc(extract_doc_string(&item_trait.attrs));
 
         self.type_registry.register_callback(name);
         self.callback_traits.push(callback);
+        Ok(())
     }
 
     /// Joins the crate name, a type/function's source module path, and its
@@ -1442,26 +1514,29 @@ impl SourceScanner {
         qualified_path(&self.module_name, module_path, leaf_name)
     }
 
-    fn build_trait_method(&self, method: &syn::TraitItemFn) -> Option<TraitMethod> {
+    fn build_trait_method(&self, method: &syn::TraitItemFn) -> Result<TraitMethod, String> {
         let sig = &method.sig;
-        let params = self.resolve_typed_params(&sig.inputs, None)?;
-        let output = self.resolve_output(&sig.output, None);
+        let context = format!("callback trait method `{}`", sig.ident);
+        let params = self.resolve_typed_params(&sig.inputs, None, &context)?;
+        let output = self.resolve_output(&sig.output, None, &context)?;
 
-        Some(
-            params
-                .into_iter()
-                .fold(TraitMethod::new(sig.ident.to_string()), |tm, (name, ty)| {
-                    tm.with_param(TraitMethodParam::new(&name, ty))
-                })
-                .maybe_doc(extract_doc_string(&method.attrs))
-                .maybe_return(output.map(ReturnType::from_output))
-                .maybe_async(sig.asyncness.is_some()),
-        )
+        Ok(params
+            .into_iter()
+            .fold(TraitMethod::new(sig.ident.to_string()), |tm, (name, ty)| {
+                tm.with_param(TraitMethodParam::new(&name, ty))
+            })
+            .maybe_doc(extract_doc_string(&method.attrs))
+            .maybe_return(output.map(ReturnType::from_output))
+            .maybe_async(sig.asyncness.is_some()))
     }
 
-    fn process_class(&mut self, item_impl: &ItemImpl, file_module_path: &[String]) {
+    fn process_class(
+        &mut self,
+        item_impl: &ItemImpl,
+        file_module_path: &[String],
+    ) -> Result<(), String> {
         let Some(class_name) = impl_self_type_ident(item_impl) else {
-            return;
+            return Ok(());
         };
 
         self.type_registry
@@ -1480,25 +1555,22 @@ impl SourceScanner {
             })
             .filter(|method| matches!(method.vis, syn::Visibility::Public(_)))
             .filter(|method| !has_attribute(&method.attrs, "skip"))
-            .for_each(|method| {
+            .try_for_each(|method| -> Result<(), String> {
                 if has_attribute(&method.attrs, "ffi_stream") {
                     if let Some(stream) = self.build_stream(method) {
                         streams.push(stream);
                     }
-                    return;
+                    return Ok(());
                 }
 
                 if self.is_constructor(method, &class_name) {
-                    if let Some(ctor) = self.build_constructor(method, &class_name) {
-                        constructors.push(ctor);
-                    }
-                    return;
+                    constructors.push(self.build_constructor(method, &class_name)?);
+                    return Ok(());
                 }
 
-                if let Some(built_method) = self.build_method(method, &class_name) {
-                    methods.push(built_method);
-                }
-            });
+                methods.push(self.build_method(method, &class_name)?);
+                Ok(())
+            })?;
 
         self.type_registry.fill(
             &class_name,
@@ -1508,18 +1580,19 @@ impl SourceScanner {
                 streams,
             },
         );
+        Ok(())
     }
 
-    fn process_value_type_impl(&mut self, item_impl: &ItemImpl) {
+    fn process_value_type_impl(&mut self, item_impl: &ItemImpl) -> Result<(), String> {
         let Some(type_name) = impl_self_type_ident(item_impl) else {
-            return;
+            return Ok(());
         };
 
         let is_record = self.type_registry.is_record(&type_name);
         let is_enum = self.type_registry.is_enum(&type_name);
 
         if !is_record && !is_enum {
-            return;
+            return Ok(());
         }
 
         let mut constructors = Vec::new();
@@ -1534,18 +1607,15 @@ impl SourceScanner {
             })
             .filter(|method| matches!(method.vis, syn::Visibility::Public(_)))
             .filter(|method| !has_attribute(&method.attrs, "skip"))
-            .for_each(|method| {
+            .try_for_each(|method| -> Result<(), String> {
                 if self.is_constructor(method, &type_name) {
-                    if let Some(ctor) = self.build_constructor(method, &type_name) {
-                        constructors.push(ctor);
-                    }
-                    return;
+                    constructors.push(self.build_constructor(method, &type_name)?);
+                    return Ok(());
                 }
 
-                if let Some(built_method) = self.build_method(method, &type_name) {
-                    methods.push(built_method);
-                }
-            });
+                methods.push(self.build_method(method, &type_name)?);
+                Ok(())
+            })?;
 
         if is_record {
             self.type_registry
@@ -1554,25 +1624,25 @@ impl SourceScanner {
             self.type_registry
                 .merge_enum_impl(&type_name, constructors, methods);
         }
+        Ok(())
     }
 
-    fn build_method(&self, method: &syn::ImplItemFn, self_type_name: &str) -> Option<Method> {
+    fn build_method(&self, method: &syn::ImplItemFn, self_type_name: &str) -> Result<Method, String> {
         let sig = &method.sig;
         let receiver = Self::extract_receiver(sig);
-        let params = self.resolve_typed_params(&sig.inputs, Some(self_type_name))?;
-        let output = self.resolve_output(&sig.output, Some(self_type_name));
+        let context = format!("method `{self_type_name}::{}`", sig.ident);
+        let params = self.resolve_typed_params(&sig.inputs, Some(self_type_name), &context)?;
+        let output = self.resolve_output(&sig.output, Some(self_type_name), &context)?;
 
-        Some(
-            params
-                .into_iter()
-                .fold(
-                    Method::new(sig.ident.to_string(), receiver),
-                    |m, (name, ty)| m.with_param(Parameter::new(&name, ty)),
-                )
-                .maybe_doc(extract_doc_string(&method.attrs))
-                .maybe_return(output.map(ReturnType::from_output))
-                .maybe_async(sig.asyncness.is_some()),
-        )
+        Ok(params
+            .into_iter()
+            .fold(
+                Method::new(sig.ident.to_string(), receiver),
+                |m, (name, ty)| m.with_param(Parameter::new(&name, ty)),
+            )
+            .maybe_doc(extract_doc_string(&method.attrs))
+            .maybe_return(output.map(ReturnType::from_output))
+            .maybe_async(sig.asyncness.is_some()))
     }
 
     fn build_stream(&self, method: &syn::ImplItemFn) -> Option<StreamMethod> {
@@ -1616,7 +1686,7 @@ impl SourceScanner {
         &self,
         method: &syn::ImplItemFn,
         self_type_name: &str,
-    ) -> Option<Constructor> {
+    ) -> Result<Constructor, String> {
         let sig = &method.sig;
         let is_fallible = match &sig.output {
             syn::ReturnType::Default => false,
@@ -1626,20 +1696,19 @@ impl SourceScanner {
             syn::ReturnType::Default => false,
             syn::ReturnType::Type(_, ty) => return_type_is_option_self(ty.as_ref(), self_type_name),
         };
-        let params = self.resolve_typed_params(&sig.inputs, Some(self_type_name))?;
+        let context = format!("constructor `{self_type_name}::{}`", sig.ident);
+        let params = self.resolve_typed_params(&sig.inputs, Some(self_type_name), &context)?;
 
-        Some(
-            params
-                .into_iter()
-                .fold(
-                    Constructor::new()
-                        .with_name(sig.ident.to_string())
-                        .with_fallible(is_fallible)
-                        .with_optional(is_optional),
-                    |c, (name, ty)| c.with_param(ConstructorParam::new(&name, ty)),
-                )
-                .maybe_doc(extract_doc_string(&method.attrs)),
-        )
+        Ok(params
+            .into_iter()
+            .fold(
+                Constructor::new()
+                    .with_name(sig.ident.to_string())
+                    .with_fallible(is_fallible)
+                    .with_optional(is_optional),
+                |c, (name, ty)| c.with_param(ConstructorParam::new(&name, ty)),
+            )
+            .maybe_doc(extract_doc_string(&method.attrs)))
     }
 
     pub fn into_module(self) -> Module {
@@ -2571,6 +2640,36 @@ fn rust_type_to_ffi_type(
                 return None;
             }
 
+            if ident == "HashMap" || ident == "BTreeMap" {
+                if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                    let mut args_iter = args.args.iter();
+                    if let (
+                        Some(syn::GenericArgument::Type(key_ty)),
+                        Some(syn::GenericArgument::Type(value_ty)),
+                    ) = (args_iter.next(), args_iter.next())
+                    {
+                        let key = rust_type_to_ffi_type(
+                            key_ty,
+                            registry,
+                            alias_resolver,
+                            compiler_canonical_types,
+                            self_type_name,
+                            FfiTypePosition::Value,
+                        )?;
+                        let value = rust_type_to_ffi_type(
+                            value_ty,
+                            registry,
+                            alias_resolver,
+                            compiler_canonical_types,
+                            self_type_name,
+                            FfiTypePosition::Value,
+                        )?;
+                        return Some(MType::Map(Box::new(key), Box::new(value)));
+                    }
+                }
+                return None;
+            }
+
             if ident == "Option" {
                 if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
                     && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
@@ -2810,6 +2909,28 @@ fn string_to_ffi_type(
                 compiler_canonical_types,
                 FfiTypePosition::Value,
             )?)))
+        }
+        s if s.starts_with("HashMap<") || s.starts_with("BTreeMap<") => {
+            let inner = s
+                .strip_prefix("HashMap<")
+                .or_else(|| s.strip_prefix("BTreeMap<"))?;
+            let inner = &inner[..inner.len() - 1];
+            let parts: Vec<&str> = inner.splitn(2, ',').map(|p| p.trim()).collect();
+            let key = string_to_ffi_type(
+                parts.first()?,
+                registry,
+                alias_resolver,
+                compiler_canonical_types,
+                FfiTypePosition::Value,
+            )?;
+            let value = string_to_ffi_type(
+                parts.get(1)?,
+                registry,
+                alias_resolver,
+                compiler_canonical_types,
+                FfiTypePosition::Value,
+            )?;
+            Some(MType::Map(Box::new(key), Box::new(value)))
         }
         s if s.starts_with("Result<") => {
             let inner = &s[7..s.len() - 1];
@@ -3707,6 +3828,31 @@ mod tests {
         module
     }
 
+    /// Like `scan_temp_crate`, but for tests asserting the scan itself fails
+    /// (an unresolvable/invalid type is now a hard error naming the
+    /// declaration and type — see `resolve_typed_params`'s doc — rather than
+    /// the old behavior of silently omitting the offending function/method
+    /// from an otherwise-successful scan).
+    fn scan_temp_crate_expect_err(source: &str) -> String {
+        let unique_suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let temp_root = std::env::temp_dir().join(format!(
+            "boltffi_scan_record_methods_{}_{}",
+            std::process::id(),
+            unique_suffix
+        ));
+        let src_dir = temp_root.join("src");
+        fs::create_dir_all(&src_dir).expect("create src dir");
+        fs::write(src_dir.join("lib.rs"), source).expect("write lib.rs");
+
+        let error = scan_crate_with_pointer_width(&temp_root, "testlib", None)
+            .expect_err("scan should fail");
+        fs::remove_dir_all(&temp_root).expect("cleanup");
+        error
+    }
+
     fn scan_temp_crate_multi(files: &[(&str, &str)]) -> Module {
         let unique_suffix = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -4080,9 +4226,10 @@ mod tests {
             }
         "#;
 
-        let module = scan_temp_crate(source);
+        let error = scan_temp_crate_expect_err(source);
 
-        assert!(module.functions.is_empty());
+        assert!(error.contains("accept_unit"), "error was: {error}");
+        assert!(error.contains("value"), "error was: {error}");
     }
 
     #[test]
@@ -4096,9 +4243,9 @@ mod tests {
             }
         "#;
 
-        let module = scan_temp_crate(source);
+        let error = scan_temp_crate_expect_err(source);
 
-        assert!(module.functions.is_empty());
+        assert!(error.contains("boxed_unit"), "error was: {error}");
     }
 
     #[test]

@@ -58,6 +58,15 @@ fn kotlin_type_for_type_expr(ty: &TypeExpr) -> String {
             },
             _ => format!("List<{}>", kotlin_type_for_type_expr(inner)),
         },
+        // This legacy `boltffi_bindgen::render::kotlin` renderer is dead code
+        // — real Kotlin generation goes through the `Native` pipeline
+        // (`boltffi_backend::target::kotlin`, see `generate.rs::render()`).
+        // Kept in sync only so the crate compiles; not exercised by the CLI.
+        TypeExpr::Map(key, value) => format!(
+            "Map<{}, {}>",
+            kotlin_type_for_type_expr(key),
+            kotlin_type_for_type_expr(value)
+        ),
         TypeExpr::Option(inner) => format!("{}?", kotlin_type_for_type_expr(inner)),
         TypeExpr::Result { ok, err } => format!(
             "BoltFFIResult<{}, {}>",
@@ -237,6 +246,10 @@ pub fn emit_reader_read(seq: &ReadSeq) -> String {
             _ => "reader.readString()".to_string(),
         },
         ReadOp::Custom { underlying, .. } => emit_reader_read(underlying),
+        // Dead legacy path — see `kotlin_type_for_type_expr`'s Map arm above.
+        ReadOp::Map { .. } => unimplemented!(
+            "legacy render::kotlin pipeline is unreachable from the CLI (Native pipeline owns Kotlin codegen)"
+        ),
     }
 }
 
@@ -348,6 +361,10 @@ pub fn emit_write_expr(seq: &WriteSeq) -> String {
         }
         WriteOp::Builtin { id, value } => emit_write_builtin(id, &render_value(value)),
         WriteOp::Custom { underlying, .. } => emit_write_expr(underlying),
+        // Dead legacy path — see `kotlin_type_for_type_expr`'s Map arm above.
+        WriteOp::Map { .. } => unimplemented!(
+            "legacy render::kotlin pipeline is unreachable from the CLI (Native pipeline owns Kotlin codegen)"
+        ),
     }
 }
 
