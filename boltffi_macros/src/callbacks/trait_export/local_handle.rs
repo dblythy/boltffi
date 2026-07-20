@@ -682,21 +682,27 @@ impl<'a> LocalHandleMethodExpander<'a> {
         };
 
         // A `void` method's vtable slot is exactly the one `native.rs`
-        // hands a `malloc`-owned buffer to (see its `lower_param`'s
-        // `is_deferred` branch — needed there because a real Dart consumer
-        // defers reading it past this call's return). This function *is*
-        // that call, invoked synchronously, so the read above is always
-        // safe regardless of ownership — but since the buffer is
-        // heap-owned here, something has to free it exactly once. Decoding
-        // always copies out an owned value (never borrows the bytes past
-        // this step), so freeing right after is safe.
+        // hands an owned buffer to via `transfer_deferred_callback_bytes`
+        // (see its `lower_param`'s `is_deferred` branch — needed there
+        // because a real Dart consumer defers reading it past this call's
+        // return). This function *is* that call, invoked synchronously, so
+        // the read above is always safe regardless of ownership — but
+        // since the buffer is heap-owned here, something has to free it
+        // exactly once. Decoding always copies out an owned value (never
+        // borrows the bytes past this step), so freeing right after is
+        // safe. `free_local_callback_param_bytes` picks the dealloc that
+        // actually pairs with whoever allocated this buffer (native:
+        // this crate's own Rust allocator; wasm32: the JS caller's
+        // `boltffi_wasm_alloc`) — never a raw libc `free`, which isn't
+        // guaranteed to pair with either and doesn't exist to import on
+        // wasm32 at all (see that function's doc comment).
         if matches!(self.method.sig.output, syn::ReturnType::Default) {
             decode_steps.push(quote! {
                 if !#pointer_name.is_null() {
-                    unsafe extern "C" {
-                        fn free(ptr: *mut ::core::ffi::c_void);
-                    }
-                    unsafe { free(#pointer_name as *mut ::core::ffi::c_void) };
+                    ::boltffi::__private::free_local_callback_param_bytes(
+                        #pointer_name as *mut u8,
+                        #length_name,
+                    );
                 }
             });
         }
@@ -812,5 +818,34 @@ mod tests {
                 .contains("let value : String = :: boltffi :: __private :: wire :: decode")
         );
         assert!(!decode_tokens.contains("value_owned"));
+    }
+
+    // Regression coverage for the `env.free` wasm32 LinkError (the deferred-buffer
+    // ownership rework wired the native.rs -> Dart/JNI direction onto
+    // `transfer_deferred_callback_bytes`/`boltffi_free_deferred_callback_bytes`, but this
+    // module's own decode step -- the reverse direction, where Rust is the callee reading
+    // a buffer through a *local* vtable slot -- still declared and called a bare libc
+    // `free`. That's a real allocator mismatch on every target (it only "worked" on
+    // native by coincidence of the system allocator; wasm32 has no libc `free` to import
+    // at all, so the generated module failed to even instantiate).
+    #[test]
+    fn void_method_buffer_param_frees_via_the_paired_dealloc_not_raw_libc_free() {
+        let decode_tokens = decode_tokens_for(parse_quote!(String));
+
+        assert!(
+            decode_tokens.contains(
+                ":: boltffi :: __private :: free_local_callback_param_bytes (value_ptr as * mut u8 , value_len ,)"
+            ),
+            "expected the paired dealloc call, got: {decode_tokens}"
+        );
+        assert!(
+            !decode_tokens.contains("extern \"C\""),
+            "must never declare a raw extern \"C\" `free` import -- that's the exact wasm32 \
+             env.free LinkError this test guards against: {decode_tokens}"
+        );
+        assert!(
+            !decode_tokens.contains("fn free"),
+            "must never reference a bare libc `free` symbol: {decode_tokens}"
+        );
     }
 }

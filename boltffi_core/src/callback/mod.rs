@@ -16,7 +16,10 @@ mod ownership;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 
-pub use deferred_buffer::{boltffi_free_deferred_callback_bytes, transfer_deferred_callback_bytes};
+pub use deferred_buffer::{
+    boltffi_free_deferred_callback_bytes, free_local_callback_param_bytes,
+    transfer_deferred_callback_bytes,
+};
 pub use foreign::CallbackForeignType;
 pub use handle::CallbackHandle;
 pub use native::NativeCallbackOwner;
