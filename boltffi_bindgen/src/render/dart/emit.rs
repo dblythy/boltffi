@@ -483,6 +483,16 @@ pub fn emit_writer_write(seq: &WriteSeq, writer_name: &str, value: &str) -> Stri
             emit_writer_write(ok, writer_name, "value"),
             emit_writer_write(err, writer_name, "value"),
         ),
+        // Same constraint as the read side's `ReadOp::Map` arm: a deferred Dart-runtime throw,
+        // never a build-time panic — encoding a Map is unimplemented (no `runtime/dart` package),
+        // but `boltffi pack dart` must still succeed for every record whose schema merely
+        // contains one. Previously fell into the wildcard `_ => ";"` below, which silently
+        // no-op'd instead of failing loudly — a real data-loss bug in its own right (an app that
+        // set a Map field would have it vanish on the wire with no error at all).
+        Some(WriteOp::Map { .. }) => "throw UnimplementedError(\
+            'Map<K, V> wire encoding is not yet implemented (no runtime/dart Map codec exists)'\
+        );"
+        .to_string(),
         _ => ";".to_string(),
     }
 }
@@ -624,15 +634,18 @@ pub fn emit_reader_read(seq: &ReadSeq, reader_name: &str) -> String {
             _ => format!("{reader_name}.readString()"),
         },
         ReadOp::Custom { underlying, .. } => emit_reader_read(underlying, reader_name),
-        // Follow-up: the Dart target has no `runtime/dart` package yet, so
-        // there is no `readMap`/`writeMap` wire helper to call — the record
-        // field's *type* still renders correctly (`type_expr_dart_type`
-        // above), only the wire codec is unimplemented. Wire this up
-        // alongside adding Map support to the Dart runtime once Dart is an
-        // active target.
-        ReadOp::Map { .. } => panic!(
-            "Dart Map<K, V> wire decoding is not yet implemented (no runtime/dart Map codec exists)"
-        ),
+        // Follow-up: the Dart target has no `runtime/dart` package yet, so there is no
+        // `readMap`/`writeMap` wire helper to call — the record field's *type* still renders
+        // correctly (`type_expr_dart_type` above), only the wire codec is unimplemented. This
+        // MUST stay a deferred Dart-runtime throw, never a Rust-side `panic!`: codegen itself
+        // (`boltffi pack dart`) has to succeed for every record whose schema merely CONTAINS a
+        // Map field, even one Dart never actually decodes — a `panic!` here aborts the whole
+        // pack for every OTHER field/record too. Wire this up for real alongside adding Map
+        // support to the Dart runtime once Dart is an active target.
+        ReadOp::Map { .. } => "(throw UnimplementedError(\
+            'Map<K, V> wire decoding is not yet implemented (no runtime/dart Map codec exists)'\
+        ))"
+        .to_string(),
     }
 }
 
