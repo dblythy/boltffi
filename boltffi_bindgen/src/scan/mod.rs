@@ -2640,6 +2640,36 @@ fn rust_type_to_ffi_type(
                 return None;
             }
 
+            if ident == "HashMap" || ident == "BTreeMap" {
+                if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments {
+                    let mut args_iter = args.args.iter();
+                    if let (
+                        Some(syn::GenericArgument::Type(key_ty)),
+                        Some(syn::GenericArgument::Type(value_ty)),
+                    ) = (args_iter.next(), args_iter.next())
+                    {
+                        let key = rust_type_to_ffi_type(
+                            key_ty,
+                            registry,
+                            alias_resolver,
+                            compiler_canonical_types,
+                            self_type_name,
+                            FfiTypePosition::Value,
+                        )?;
+                        let value = rust_type_to_ffi_type(
+                            value_ty,
+                            registry,
+                            alias_resolver,
+                            compiler_canonical_types,
+                            self_type_name,
+                            FfiTypePosition::Value,
+                        )?;
+                        return Some(MType::Map(Box::new(key), Box::new(value)));
+                    }
+                }
+                return None;
+            }
+
             if ident == "Option" {
                 if let syn::PathArguments::AngleBracketed(args) = &last_segment.arguments
                     && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
@@ -2879,6 +2909,28 @@ fn string_to_ffi_type(
                 compiler_canonical_types,
                 FfiTypePosition::Value,
             )?)))
+        }
+        s if s.starts_with("HashMap<") || s.starts_with("BTreeMap<") => {
+            let inner = s
+                .strip_prefix("HashMap<")
+                .or_else(|| s.strip_prefix("BTreeMap<"))?;
+            let inner = &inner[..inner.len() - 1];
+            let parts: Vec<&str> = inner.splitn(2, ',').map(|p| p.trim()).collect();
+            let key = string_to_ffi_type(
+                parts.first()?,
+                registry,
+                alias_resolver,
+                compiler_canonical_types,
+                FfiTypePosition::Value,
+            )?;
+            let value = string_to_ffi_type(
+                parts.get(1)?,
+                registry,
+                alias_resolver,
+                compiler_canonical_types,
+                FfiTypePosition::Value,
+            )?;
+            Some(MType::Map(Box::new(key), Box::new(value)))
         }
         s if s.starts_with("Result<") => {
             let inner = &s[7..s.len() - 1];
