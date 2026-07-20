@@ -43,15 +43,15 @@ void* BoltFFIGenericHostObject::resolveSymbol(const std::string& name) {
   return sym;
 }
 
-void BoltFFIGenericHostObject::bindArena(std::uint8_t* baseAddress) { arenaBase_.store(baseAddress); }
-
-CValue BoltFFIGenericHostObject::translateIfPointer(const TypeRef& paramType, CValue value) const {
-  // `isArenaPointerKind` (abi_header.h) is `false` for `OpaqueHandle` (e.g. `RustFutureHandle`) --
-  // finding 3's fix: an opaque, Rust-owned handle must cross verbatim, never rebased against the
-  // arena the way a REAL inline `PtrConst`/`PtrMut` data pointer (`key_ptr`, `value_ptr`, ...) is.
+CValue BoltFFIGenericHostObject::translateIfPointer(const TypeRef& paramType, CValue value,
+                                                     std::uint8_t* base) const {
+  // `isArenaPointerKind` (abi_header.h) is `false` for `OpaqueHandle` (e.g. `RustFutureHandle`, or
+  // a `boltffi_register_callback_*` vtable pointer -- finding 1, second adversarial round): an
+  // opaque, process-owned handle must cross verbatim, never rebased against the arena the way a
+  // REAL inline `PtrConst`/`PtrMut` data pointer (`key_ptr`, `value_ptr`, ...) is (finding 3,
+  // first session).
   if (!isArenaPointerKind(paramType.kind)) return value;
   if (value.u64 == 0) return value;  // null stays null -- never offset against the arena base
-  std::uint8_t* base = arenaBase_.load();
   if (!base) {
     throw std::runtime_error(
         "boltffi: pointer-shaped argument received with no arena bound (call "
@@ -98,18 +98,17 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
             throw facebook::jsi::JSError(rt2, "__boltffi_native_bind_arena expects an ArrayBuffer");
           }
           ArrayBuffer buffer = args[0].asObject(rt2).getArrayBuffer(rt2);
-          std::uint8_t* base = buffer.data(rt2);
-          {
-            // Keeps the REAL jsi::ArrayBuffer object alive (not just its raw address, which
-            // `bindArena` tracks for JSI-independent testability) so a call in flight can pin its
-            // own `shared_ptr` to the CURRENT buffer before this one replaces the member -- see
-            // the module doc's finding-8 note. `jsi::Pointer` is move-only, so the buffer is moved
-            // into a fresh heap allocation rather than copied.
-            auto held = std::make_shared<ArrayBuffer>(std::move(buffer));
-            std::lock_guard<std::mutex> lock(arenaObjectMutex_);
-            currentArenaBuffer_ = std::move(held);
-          }
-          bindArena(base);
+          // Keeps the REAL jsi::ArrayBuffer object alive so a call in flight can pin its own
+          // `shared_ptr` to the CURRENT buffer before this one replaces the member -- see the
+          // module doc's finding-8 note. A call derives its base address directly from its OWN
+          // pin (`pinnedArena->data(rt)`, see `get()` below) rather than from any address stored
+          // here, which is what eliminates the torn-snapshot hazard the second adversarial
+          // round's finding 1 residual named: there is only ever one fact (this buffer object),
+          // never a separate address that could disagree with it. `jsi::Pointer` is move-only, so
+          // the buffer is moved into a fresh heap allocation rather than copied.
+          auto held = std::make_shared<ArrayBuffer>(std::move(buffer));
+          std::lock_guard<std::mutex> lock(arenaObjectMutex_);
+          currentArenaBuffer_ = std::move(held);
           return Value::undefined();
         });
   }
@@ -136,15 +135,21 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
                                                              std::size_t count) -> Value {
         // Pin the CURRENTLY bound arena for this call's ENTIRE duration (finding 8): a synchronous
         // host-callback shape invoked by the native call below could reenter JS, which could grow
-        // the arena (replacing `currentArenaBuffer_`/`arenaBase_`) before this call returns -- a
-        // local copy of the `shared_ptr` keeps the underlying buffer's backing store alive via
-        // JSI's own refcounting regardless of what the MEMBER field is reassigned to mid-call.
+        // the arena (replacing `currentArenaBuffer_`) before this call returns -- a local copy of
+        // the `shared_ptr` keeps the underlying buffer's backing store alive via JSI's own
+        // refcounting regardless of what the MEMBER field is reassigned to mid-call. The base
+        // address used to translate every pointer argument THIS call makes is derived from this
+        // SAME pinned object, once, right here -- never from a separately-tracked address that a
+        // concurrent rebind could tear apart from the pin (the second adversarial round's finding
+        // 1 residual). Pinning the object's lifetime does not, by itself, make a reentrant grow's
+        // effect on an OUT-param write coherent with what JS reads after the call returns -- that
+        // half of the fix is the JS-side arena's call-in-flight growth guard (`native_arena.ts`).
         std::shared_ptr<ArrayBuffer> pinnedArena;
         {
           std::lock_guard<std::mutex> lock(arenaObjectMutex_);
           pinnedArena = currentArenaBuffer_;
         }
-        (void)pinnedArena;  // kept alive for this scope's duration; never read directly
+        std::uint8_t* pinnedBase = pinnedArena ? pinnedArena->data(rt2) : nullptr;
 
         std::vector<LogicalArg> logicalArgs(fn->params.size());
         for (std::size_t i = 0; i < fn->params.size() && i < count; ++i) {
@@ -182,7 +187,9 @@ Value BoltFFIGenericHostObject::get(Runtime& rt, const PropNameID& name) {
           }
         }
 
-        auto translate = [this](const TypeRef& paramType, CValue v) { return translateIfPointer(paramType, v); };
+        auto translate = [this, pinnedBase](const TypeRef& paramType, CValue v) {
+          return translateIfPointer(paramType, v, pinnedBase);
+        };
         std::vector<CValue> registerArgs = buildRegisterArgs(*fn, *plan, logicalArgs, translate);
 
         if (returnPlan == ReturnPlan::Sret) {

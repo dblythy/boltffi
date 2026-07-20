@@ -13,15 +13,27 @@
 // pure-JS-simulated arena (`NativeMemoryArena`), not a real address -- it calls
 // `exports.__boltffi_native_bind_arena(buffer)` once at construction and again on every arena
 // GROWTH (which replaces the backing `ArrayBuffer`). This HostObject exposes that reserved
-// property: `bindArena` stores the `jsi::ArrayBuffer` handle (a cheap, ref-counted wrapper -- the
-// real bytes live in the JS engine's heap) and RE-DERIVES its `data(rt)` pointer on every single
-// generic call, never caching it across calls -- caching would read freed memory the instant JS
-// grows the arena and gets a new backing buffer (the exact HIGH bug the coordinator's update
-// names). `translateIfPointer` (via `abi_header.h`'s `isArenaPointerKind`) is the one place a
-// REAL inline-pointer-classified argument's JS `number` (an arena offset) becomes a real address
-// for the call -- an `OpaqueHandle`-classified argument (e.g. `RustFutureHandle`) is explicitly
-// NEVER rebased (finding 3, this session): it crosses verbatim, since it is a real Rust-owned
-// pointer already, not an offset into anything this side owns.
+// property: it stores the CURRENT `jsi::ArrayBuffer` handle (`currentArenaBuffer_`, a cheap,
+// ref-counted wrapper -- the real bytes live in the JS engine's heap) and RE-DERIVES its `data(rt)`
+// pointer on every single generic call from a LOCAL PIN of that same handle, never caching a raw
+// address across calls -- caching would read freed memory the instant JS grows the arena and gets
+// a new backing buffer (the exact HIGH bug the coordinator's update names). `translateIfPointer`
+// (via `abi_header.h`'s `isArenaPointerKind`) is the one place a REAL inline-pointer-classified
+// argument's JS `number` (an arena offset) becomes a real address for the call, given that call's
+// own pinned base -- an `OpaqueHandle`-classified argument (e.g. `RustFutureHandle`, or a
+// `boltffi_register_callback_*` vtable pointer, finding 1 of the second adversarial round) is
+// explicitly NEVER rebased (finding 3, first session): it crosses verbatim, since it is a real
+// process-owned pointer already, not an offset into anything this side owns.
+//
+// One base, derived once, from the SAME pin (finding 1 of the second adversarial round's OTHER
+// residual: a torn snapshot): an earlier revision tracked the base address in a SEPARATE
+// `std::atomic<uint8_t*>` (`arenaBase_`, updated via a `bindArena` setter) alongside
+// `currentArenaBuffer_` (guarded by `arenaObjectMutex_`) -- two independently-updated pieces of
+// state a concurrent `__boltffi_native_bind_arena` rebind could tear apart (observing the NEW
+// buffer object paired with the OLD base address, or vice versa). There is no such thing to tear
+// anymore: a call pins `currentArenaBuffer_` ONCE under `arenaObjectMutex_` and derives its base
+// address from that SAME pinned object (`pinnedArena->data(rt)`) -- the two facts can never
+// disagree because they are now one fact.
 //
 // Argument/return shapes wider than one register (findings 1+2, this session): a logical
 // parameter/return classified `Aggregate` by the ABI parser is either the one 16-byte
@@ -35,20 +47,24 @@
 // symmetrically expected as that exact ArrayBuffer shape, so a value `create_callback_*` just
 // returned can be handed straight back into a setter like `set_http_transport` unmodified.
 //
-// Reentrant arena growth (finding 8, this session): a SYNCHRONOUS host-callback shape (e.g.
+// Reentrant arena growth (finding 8, first session): a SYNCHRONOUS host-callback shape (e.g.
 // `Multiplier::factor`) can, in principle, call back into JS before the outer native call this
 // HostObject dispatched returns -- and that reentrant JS code could grow the arena (replacing its
 // backing `ArrayBuffer`) while the OUTER call's already-translated pointer arguments still point
-// into the OLD one. `currentArenaBuffer_` holds the actual `jsi::ArrayBuffer` object (not just its
-// raw address, which is all `arenaBase_`/`bindArena` track for JSI-INDEPENDENT testability); each
-// generic call PINS a local copy of it for the call's entire duration before doing any pointer
+// into the OLD one. `currentArenaBuffer_` holds the actual `jsi::ArrayBuffer` object; each generic
+// call PINS a local copy of it for the call's entire duration before doing any pointer
 // translation, keeping the backing store alive (via JSI's own refcounting) even if a reentrant
-// `__boltffi_native_bind_arena` call replaces the MEMBER copy mid-call.
+// `__boltffi_native_bind_arena` call replaces the MEMBER copy mid-call. Pinning fixes the
+// object's LIFETIME, not the WRITE's coherence -- an out-param pointer computed against the
+// pinned (possibly now-stale) buffer, written to by Rust after a reentrant grow, lands in memory
+// JS is no longer looking at once it reads `arena.buffer` post-call (the second adversarial
+// round's finding 2). That coherence half of the fix lives on the JS side
+// (`native_arena.ts`'s call-in-flight growth guard -- see its module doc); this file only owns
+// eliminating the (separate) torn-snapshot hazard described above.
 #pragma once
 
 #include <jsi/jsi.h>
 
-#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -87,35 +103,30 @@ class BoltFFIGenericHostObject : public facebook::jsi::HostObject {
   /// `vtable` word for this exact shape.
   TwoWord callTwoWord(const std::string& name, const std::vector<CValue>& registerArgs);
 
-  /// Stores `buffer`'s real backing address as the arena's current base -- called once at JS-side
-  /// construction and again on every arena grow (see the module doc). `baseAddress` is a real
-  /// process address for the duration this HostObject is alive to translate against it; a real
-  /// adapter re-derives it via `jsi::ArrayBuffer::data(rt)` (this pure-C++-testable overload takes
-  /// the address directly so it's exercisable without a live `jsi::Runtime`).
-  void bindArena(std::uint8_t* baseAddress);
-
   const ParsedAbi& abi() const { return abi_; }
 
  private:
   void* resolveSymbol(const std::string& name);
-  CValue translateIfPointer(const TypeRef& paramType, CValue value) const;
+  /// `base` is the CURRENT call's pinned arena base (`pinnedArena->data(rt)`, computed once in
+  /// `get()`'s lambda from the SAME buffer object the call pinned) -- passed explicitly rather
+  /// than read from shared member state so there is exactly one source of truth per call and no
+  /// separate atomic to tear against a concurrent rebind (the second adversarial round's finding 1
+  /// residual; see the module doc). `base == nullptr` means no arena has ever been bound.
+  CValue translateIfPointer(const TypeRef& paramType, CValue value, std::uint8_t* base) const;
 
   void* dylib_;
   ParsedAbi abi_;
   std::mutex symbolsMutex_;
   std::unordered_map<std::string, void*> resolvedSymbols_;
-  std::atomic<std::uint8_t*> arenaBase_{nullptr};
 
-  /// The JSI-COUPLED counterpart of `arenaBase_`: a heap-held handle to the actual
-  /// `jsi::ArrayBuffer` object currently bound, so a call can PIN a local copy of the
-  /// `shared_ptr` itself (keeping the underlying buffer alive via JSI's own refcounting for as
-  /// long as ANY `shared_ptr` to it survives) for its entire duration -- see the module doc's
-  /// finding-8 note. `shared_ptr` copy is used deliberately instead of copying the
-  /// `jsi::ArrayBuffer` value directly: `jsi::Pointer` (its base class) is move-only, so a
-  /// `shared_ptr<ArrayBuffer>` is the straightforward way to hold one MORE-THAN-ONE-owner
-  /// reference to it. Only ever touched from `get()`'s real (jsi::Runtime&-bearing) code path;
-  /// `bindArena`'s pure-C++-testable overload never sees it, matching that overload's own
-  /// "exercisable without a live Runtime" contract.
+  /// The arena's current backing buffer, as a heap-held handle to the actual `jsi::ArrayBuffer`
+  /// object (not a raw address -- a call derives its own address from a PIN of this same object,
+  /// see `translateIfPointer`'s doc) so a call can PIN a local copy of the `shared_ptr` itself
+  /// (keeping the underlying buffer alive via JSI's own refcounting for as long as ANY
+  /// `shared_ptr` to it survives) for its entire duration -- see the module doc's finding-8 note.
+  /// `shared_ptr` copy is used deliberately instead of copying the `jsi::ArrayBuffer` value
+  /// directly: `jsi::Pointer` (its base class) is move-only, so a `shared_ptr<ArrayBuffer>` is the
+  /// straightforward way to hold one MORE-THAN-ONE-owner reference to it.
   std::mutex arenaObjectMutex_;
   std::shared_ptr<facebook::jsi::ArrayBuffer> currentArenaBuffer_;
 };

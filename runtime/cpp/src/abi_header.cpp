@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace boltffi {
 
@@ -58,6 +59,14 @@ bool looksLikeFnPtrType(const std::string& text) {
 struct AliasTable {
   std::unordered_map<std::string, PrimKind> aliases;
   std::unordered_map<std::string, std::size_t> recordSizes;
+  // Names of `typedef struct { ... } Name;` blocks classified as callback VTABLEs (every field a
+  // function pointer -- see the `typedef struct` handling below). Populated as each vtable block
+  // is parsed, which always precedes (in the real, generated header) any `boltffi_register_callback_*`
+  // declaration naming it as `const Name *vtable` -- a single forward pass suffices. Consulted by
+  // `resolveParamOrReturnType` so an inline pointer TO one of these classifies as `OpaqueHandle`
+  // (a real process pointer `registerVTableForProcessLifetime` hands back), never `PtrConst`/
+  // `PtrMut` (finding 1, second adversarial round -- see `PrimKind::OpaqueHandle`'s own doc).
+  std::unordered_set<std::string> vtableNames;
 
   AliasTable() {
     aliases["void"] = PrimKind::Void;
@@ -186,7 +195,15 @@ TypeRef resolveParamOrReturnType(const std::string& text, const AliasTable& alia
   TypeText parts = splitTypeText(trimmed);
   if (parts.isPointer) {
     TypeRef ref;
-    ref.kind = parts.isConst ? PrimKind::PtrConst : PrimKind::PtrMut;
+    if (aliases.vtableNames.count(parts.identifier)) {
+      // `const ___FooVTable *vtable` -- a pointer to a NAMED VTABLE STRUCT is always the real
+      // process pointer `registerVTableForProcessLifetime` returns (see `PrimKind::OpaqueHandle`'s
+      // doc), never an offset into a JS-simulated arena, regardless of the `const`/mutable
+      // spelling a future header might use -- finding 1, second adversarial round.
+      ref.kind = PrimKind::OpaqueHandle;
+    } else {
+      ref.kind = parts.isConst ? PrimKind::PtrConst : PrimKind::PtrMut;
+    }
     ref.name = parts.name;
     return ref;
   }
@@ -403,6 +420,10 @@ ParsedAbi parseAbiHeader(std::string_view source) {
           if (f == "uint8_t _unused;") continue;
           vtable.fields.push_back(parseVTableField(f, aliases));
         }
+        // Recorded BEFORE this loop moves on so any LATER `const Name *vtable` parameter (every
+        // real header's `boltffi_register_callback_*` declarations follow their vtable's typedef)
+        // classifies as `OpaqueHandle` via `resolveParamOrReturnType` above.
+        aliases.vtableNames.insert(name);
         result.vtables.push_back(std::move(vtable));
       } else {
         std::size_t size = 0;
