@@ -80,9 +80,15 @@ export const RETURN_SLOT_SIZE = 16;
  * with the arena's own existing state, and turns a silent data-corruption bug into a loud,
  * immediate failure at the exact moment coherence would otherwise be lost -- the honest answer
  * when reentrant growth genuinely can't be made coherent for free is to refuse it, not paper over
- * it. Wiring `beginCall()`/`endCall()` around the actual native-call dispatch (native.ts's
- * `NativeBoltFFIModule`, and the equivalent point in the C++ HostObject) is a follow-up outside
- * this file's scope; this class only owns the enforced primitive and its own tests.
+ * it. `native.ts` wires `beginCall()`/`endCall()` around its own native-call dispatch funnels
+ * (`NativeAsyncFutureManager.dispatchPoll`, `NativeBoltFFIModule.completeAsync`,
+ * `takeLastErrorMessage`) -- every generated async completion/poll/last-error call site routes
+ * through one of those three, so this closes the gap for all of them. It does NOT cover a plain
+ * non-async `_exports.ffiName(...)` call a generated `function.txt` function (or the one
+ * synchronous "start the async op" call `async_function.txt` emits) makes directly, bypassing
+ * `_module` entirely -- that remains an open gap a future codegen change must close, since there
+ * is no JS call site of this arena's own to bracket it. This class only owns the enforced
+ * primitive and its own tests.
  */
 export class NativeMemoryArena {
   private buf: ArrayBuffer;
