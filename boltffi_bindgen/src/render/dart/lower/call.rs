@@ -762,6 +762,7 @@ mod tests {
     fn sync_constructor_with_string_and_scalar_params_builds_one_writer_and_wraps_handle() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Person"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![
@@ -809,6 +810,7 @@ mod tests {
     fn fallible_constructor_throws_on_null_handle() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Widget"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -838,6 +840,7 @@ mod tests {
     fn method_returning_result_with_encoded_error_wraps_bolt_ffi_result() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: crate::ir::RecordId::new("AppError"),
             is_repr_c: false,
             is_error: true,
@@ -853,6 +856,7 @@ mod tests {
             deprecated: None,
         });
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Widget"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -903,6 +907,7 @@ mod tests {
     fn fallible_constructor_with_encoded_error_unwraps_or_throws() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: crate::ir::RecordId::new("Acl"),
             is_repr_c: false,
             is_error: false,
@@ -939,6 +944,7 @@ mod tests {
     fn async_method_drives_bolt_ffi_async_create() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Widget"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -981,6 +987,7 @@ mod tests {
 
     fn callback_trait(id: &str, method_id: &str) -> crate::ir::CallbackTraitDef {
         crate::ir::CallbackTraitDef {
+            qualified_path: String::new(),
             id: crate::ir::CallbackId::new(id),
             methods: vec![crate::ir::CallbackMethodDef {
                 execution_kind: ExecutionKind::Sync,
@@ -1000,6 +1007,7 @@ mod tests {
         ffi.catalog
             .insert_callback(callback_trait("Listener", "on_event"));
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Subject"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -1051,6 +1059,7 @@ mod tests {
         ffi.catalog
             .insert_callback(callback_trait("Listener", "on_event"));
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Subject"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -1139,6 +1148,7 @@ mod tests {
         ffi.catalog
             .insert_callback(callback_trait("Listener", "on_event"));
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Subject"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],
@@ -1200,6 +1210,7 @@ mod tests {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_callback(callback_trait("Listener", "on_event"));
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("make_listener"),
             params: vec![],
             returns: ReturnDef::Value(TypeExpr::Callback(crate::ir::CallbackId::new("Listener"))),
@@ -1226,6 +1237,7 @@ mod tests {
     fn impl_trait_callback_param_still_reports_unsupported() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_callback(crate::ir::CallbackTraitDef {
+            qualified_path: String::new(),
             id: crate::ir::CallbackId::new("ClosureCb"),
             methods: vec![crate::ir::CallbackMethodDef {
                 execution_kind: ExecutionKind::Sync,
@@ -1238,6 +1250,7 @@ mod tests {
             doc: None,
         });
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Subject"),
             constructors: vec![ConstructorDef::Default {
                 params: vec![],

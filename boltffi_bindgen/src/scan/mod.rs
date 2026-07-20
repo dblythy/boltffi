@@ -63,6 +63,13 @@ pub struct TypeMeta {
 pub struct TypeRegistry {
     types: IndexMap<String, TypeMeta>,
     custom_type_names_by_remote_key: HashMap<CustomTypeLookupKey, String>,
+    /// The source-file-derived module path each type was declared under
+    /// (crate name first, e.g. `["parse_core", "ffi", "client"]`), kept
+    /// alongside `types` rather than inside `TypeMeta` so the many existing
+    /// `TypeMeta` literals never had to change. Consulted only when building
+    /// `Record`/`Class::qualified_path` for `NamingStyle::Experimental`
+    /// symbol naming.
+    module_paths: HashMap<String, Vec<String>>,
 }
 
 impl TypeRegistry {
@@ -194,6 +201,18 @@ impl TypeRegistry {
         if let Some(meta) = self.types.get_mut(name) {
             meta.doc = Some(doc);
         }
+    }
+
+    /// Records the module path a type was declared under, the first time it
+    /// is seen (an impl block's own file — e.g. `impl X { ... }` for a class
+    /// whose plain `struct X` carries no ffi attributes — must not clobber a
+    /// path already captured from the struct's own file).
+    pub fn set_module_path(&mut self, name: &str, module_path: Vec<String>) {
+        self.module_paths.entry(name.to_string()).or_insert(module_path);
+    }
+
+    pub fn module_path(&self, name: &str) -> Vec<String> {
+        self.module_paths.get(name).cloned().unwrap_or_default()
     }
 
     pub fn is_record(&self, name: &str) -> bool {
@@ -1109,10 +1128,20 @@ impl SourceScanner {
     fn process_item(&mut self, item: &Item, file_module_path: &[String]) -> Result<(), String> {
         match item {
             Item::Struct(item_struct) => {
+                let name = item_struct.ident.to_string();
                 if let Some(doc) = extract_doc_string(&item_struct.attrs) {
-                    self.type_registry
-                        .set_doc(&item_struct.ident.to_string(), doc);
+                    self.type_registry.set_doc(&name, doc);
                 }
+                // NOT unconditional, unlike `set_doc` above's registry-gated
+                // no-op-if-unregistered behavior: `module_paths` is a plain
+                // side map with no such gate, so setting it here for EVERY
+                // struct would let an irrelevant same-named plain Rust struct
+                // (e.g. the domain `client::ParseClient` next to the FFI
+                // `ffi::client::ParseClient`, both real in parse-core-rs)
+                // win the `or_insert` race and silently mis-qualify the real
+                // FFI type's symbol path. Only `process_record` (gated to
+                // actual FFI records, below) and `process_class` (gated to
+                // actual `#[export] impl` blocks) may set it.
                 if has_attribute(&item_struct.attrs, "ffi_record")
                     || has_attribute(&item_struct.attrs, "data")
                     || has_attribute(&item_struct.attrs, "error")
@@ -1120,27 +1149,27 @@ impl SourceScanner {
                     || (has_attribute(&item_struct.attrs, "derive")
                         && has_ffi_type_derive(&item_struct.attrs))
                 {
-                    self.process_record(item_struct);
+                    self.process_record(item_struct, file_module_path);
                 }
             }
             Item::Impl(item_impl) => {
                 if has_data_impl_attribute(&item_impl.attrs) {
                     self.process_value_type_impl(item_impl);
                 } else if has_attribute(&item_impl.attrs, "export") {
-                    self.process_class(item_impl);
+                    self.process_class(item_impl, file_module_path);
                 }
             }
             Item::Trait(item_trait)
                 if has_attribute(&item_trait.attrs, "ffi_trait")
                     || has_attribute(&item_trait.attrs, "export") =>
             {
-                self.process_callback_trait(item_trait);
+                self.process_callback_trait(item_trait, file_module_path);
             }
             Item::Fn(item_fn)
                 if has_attribute(&item_fn.attrs, "ffi_export")
                     || has_attribute(&item_fn.attrs, "export") =>
             {
-                self.process_function(item_fn);
+                self.process_function(item_fn, file_module_path);
             }
             Item::Enum(item_enum) => {
                 let is_error = has_attribute(&item_enum.attrs, "error");
@@ -1219,8 +1248,10 @@ impl SourceScanner {
             .unwrap_or(Receiver::None)
     }
 
-    fn process_record(&mut self, item_struct: &ItemStruct) {
+    fn process_record(&mut self, item_struct: &ItemStruct, file_module_path: &[String]) {
         let name = item_struct.ident.to_string();
+        self.type_registry
+            .set_module_path(&name, file_module_path.to_vec());
         let fields = match &item_struct.fields {
             Fields::Named(named) => named
                 .named
@@ -1359,7 +1390,7 @@ impl SourceScanner {
         Ok(())
     }
 
-    fn process_function(&mut self, item_fn: &syn::ItemFn) {
+    fn process_function(&mut self, item_fn: &syn::ItemFn, file_module_path: &[String]) {
         let sig = &item_fn.sig;
         let Some(params) = self.resolve_typed_params(&sig.inputs, None) else {
             return;
@@ -1369,11 +1400,13 @@ impl SourceScanner {
             return;
         }
 
+        let name = sig.ident.to_string();
         let function = params
             .into_iter()
-            .fold(Function::new(sig.ident.to_string()), |f, (name, ty)| {
+            .fold(Function::new(&name), |f, (name, ty)| {
                 f.with_param(Parameter::new(&name, ty))
             })
+            .with_qualified_path(self.qualified_path(file_module_path, &name))
             .maybe_doc(extract_doc_string(&item_fn.attrs))
             .maybe_return(output.map(ReturnType::from_output))
             .maybe_async(sig.asyncness.is_some());
@@ -1381,7 +1414,7 @@ impl SourceScanner {
         self.functions.push(function);
     }
 
-    fn process_callback_trait(&mut self, item_trait: &ItemTrait) {
+    fn process_callback_trait(&mut self, item_trait: &ItemTrait, file_module_path: &[String]) {
         let name = item_trait.ident.to_string();
 
         let callback = item_trait
@@ -1392,10 +1425,21 @@ impl SourceScanner {
                 _ => None,
             })
             .fold(CallbackTrait::new(&name), |ct, m| ct.with_method(m))
+            .with_qualified_path(self.qualified_path(file_module_path, &name))
             .maybe_doc(extract_doc_string(&item_trait.attrs));
 
         self.type_registry.register_callback(name);
         self.callback_traits.push(callback);
+    }
+
+    /// Joins the crate name, a type/function's source module path, and its
+    /// own leaf name into the fully qualified Rust path
+    /// (`parse_core::ffi::client::ParseClient`) `NamingStyle::Experimental`
+    /// symbol naming derives its path segment from — see
+    /// `boltffi_binding::lower::symbol::SymbolOwner::method_symbol_name`,
+    /// which this mirrors.
+    fn qualified_path(&self, module_path: &[String], leaf_name: &str) -> String {
+        qualified_path(&self.module_name, module_path, leaf_name)
     }
 
     fn build_trait_method(&self, method: &syn::TraitItemFn) -> Option<TraitMethod> {
@@ -1415,10 +1459,13 @@ impl SourceScanner {
         )
     }
 
-    fn process_class(&mut self, item_impl: &ItemImpl) {
+    fn process_class(&mut self, item_impl: &ItemImpl, file_module_path: &[String]) {
         let Some(class_name) = impl_self_type_ident(item_impl) else {
             return;
         };
+
+        self.type_registry
+            .set_module_path(&class_name, file_module_path.to_vec());
 
         let mut constructors = Vec::new();
         let mut methods = Vec::new();
@@ -1596,9 +1643,16 @@ impl SourceScanner {
     }
 
     pub fn into_module(self) -> Module {
+        let crate_name = self.module_name.clone();
         let mut module = Module::new(&self.module_name);
+        let module_paths = self.type_registry.module_paths.clone();
 
         for (name, entry) in self.type_registry.drain() {
+            let path = qualified_path(
+                &crate_name,
+                module_paths.get(&name).map(Vec::as_slice).unwrap_or(&[]),
+                &name,
+            );
             match entry.shape {
                 TypeShape::Record {
                     fields,
@@ -1610,6 +1664,7 @@ impl SourceScanner {
                     let record = fields
                         .into_iter()
                         .fold(Record::new(&name), |r, f| r.with_field(f))
+                        .with_qualified_path(&path)
                         .with_repr_c(is_repr_c)
                         .maybe_doc(entry.doc);
                     let record = constructors
@@ -1649,7 +1704,8 @@ impl SourceScanner {
                 } => {
                     let class = constructors
                         .into_iter()
-                        .fold(Class::new(&name), |c, ctor| c.with_constructor(ctor));
+                        .fold(Class::new(&name), |c, ctor| c.with_constructor(ctor))
+                        .with_qualified_path(&path);
                     let class = methods.into_iter().fold(class, |c, m| c.with_method(m));
                     let class = streams
                         .into_iter()
@@ -1974,6 +2030,17 @@ fn extract_repr_int(attrs: &[Attribute]) -> Option<Primitive> {
             .iter()
             .find_map(|ident| ident.to_string().parse().ok())
     })
+}
+
+/// Joins a crate name, a module path, and a leaf item name into the fully
+/// qualified Rust path used as `NamingStyle::Experimental` symbol naming's
+/// path segment (`parse_core::ffi::client::ParseClient`).
+fn qualified_path(crate_name: &str, module_path: &[String], leaf_name: &str) -> String {
+    std::iter::once(crate_name)
+        .chain(module_path.iter().map(String::as_str))
+        .chain(std::iter::once(leaf_name))
+        .collect::<Vec<_>>()
+        .join("::")
 }
 
 fn module_path_for_source_file(
@@ -3654,7 +3721,11 @@ mod tests {
         fs::create_dir_all(&src_dir).expect("create src dir");
 
         files.iter().for_each(|(name, content)| {
-            fs::write(src_dir.join(name), content).expect("write file");
+            let path = src_dir.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create nested module dir");
+            }
+            fs::write(path, content).expect("write file");
         });
 
         let module =
@@ -4118,6 +4189,131 @@ mod tests {
         assert_eq!(record.constructors[0].name, "origin");
         assert_eq!(record.methods.len(), 1);
         assert_eq!(record.methods[0].name, "magnitude");
+    }
+
+    // The following pin `qualified_path` — the fully qualified Rust source
+    // path (`NamingStyle::Experimental` symbol naming's path segment,
+    // boltffi_binding::lower::symbol::SymbolOwner) each scanned item carries.
+    // Real values are cross-checked against `nm` on parse-core-rs's real
+    // BindingExpansion-built dylib (see runtime/cpp/README.md's reconciliation
+    // note): e.g. `parse_core::ffi::client::ParseClient` for a class declared
+    // in `src/ffi/client.rs`.
+
+    #[test]
+    fn class_qualified_path_reflects_its_source_file_module_path() {
+        let module = scan_temp_crate_multi(&[
+            ("lib.rs", "pub mod ffi;\n"),
+            ("ffi/mod.rs", "pub mod client;\n"),
+            (
+                "ffi/client.rs",
+                r#"
+                    pub struct ParseClient {
+                        pub app_id: String,
+                    }
+
+                    #[boltffi::export]
+                    impl ParseClient {
+                        pub fn new(app_id: String) -> Self {
+                            Self { app_id }
+                        }
+
+                        pub fn app_id(&self) -> String {
+                            self.app_id.clone()
+                        }
+                    }
+                "#,
+            ),
+        ]);
+
+        let class = module.find_class("ParseClient").expect("class not found");
+        assert_eq!(class.qualified_path, "testlib::ffi::client::ParseClient");
+    }
+
+    #[test]
+    fn record_qualified_path_reflects_its_source_file_module_path() {
+        let module = scan_temp_crate_multi(&[
+            ("lib.rs", "pub mod ffi;\n"),
+            ("ffi/mod.rs", "pub mod acl;\n"),
+            (
+                "ffi/acl.rs",
+                r#"
+                    #[boltffi::data]
+                    pub struct Acl {
+                        pub public_read: bool,
+                    }
+                "#,
+            ),
+        ]);
+
+        let record = module.find_record("Acl").expect("record not found");
+        assert_eq!(record.qualified_path, "testlib::ffi::acl::Acl");
+    }
+
+    #[test]
+    fn callback_trait_qualified_path_reflects_its_source_file_module_path() {
+        let module = scan_temp_crate_multi(&[
+            ("lib.rs", "pub mod ffi;\n"),
+            ("ffi/mod.rs", "pub mod transport;\n"),
+            (
+                "ffi/transport.rs",
+                r#"
+                    #[boltffi::export]
+                    pub trait SessionStorage {
+                        fn get(&self) -> Option<String>;
+                    }
+                "#,
+            ),
+        ]);
+
+        let callback = module
+            .find_callback_trait("SessionStorage")
+            .expect("callback trait not found");
+        assert_eq!(
+            callback.qualified_path,
+            "testlib::ffi::transport::SessionStorage"
+        );
+    }
+
+    #[test]
+    fn free_function_qualified_path_reflects_its_source_file_module_path() {
+        let module = scan_temp_crate_multi(&[
+            ("lib.rs", "pub mod ffi;\n"),
+            ("ffi/mod.rs", "pub mod transport;\n"),
+            (
+                "ffi/transport.rs",
+                r#"
+                    #[boltffi::export]
+                    pub fn fire_timer(id: u64) {}
+                "#,
+            ),
+        ]);
+
+        let function = module
+            .functions
+            .iter()
+            .find(|f| f.name == "fire_timer")
+            .expect("function not found");
+        assert_eq!(
+            function.qualified_path,
+            "testlib::ffi::transport::fire_timer"
+        );
+    }
+
+    #[test]
+    fn crate_root_item_has_no_module_path_segment() {
+        let module = scan_temp_crate(
+            r#"
+                #[boltffi::export]
+                pub fn ping() {}
+            "#,
+        );
+
+        let function = module
+            .functions
+            .iter()
+            .find(|f| f.name == "ping")
+            .expect("function not found");
+        assert_eq!(function.qualified_path, "testlib::ping");
     }
 
     #[test]

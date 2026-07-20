@@ -138,6 +138,7 @@ mod tests {
         ffi.functions.insert(
             0,
             FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("echo_u64"),
                 params: vec![ParamDef {
                     name: ParamName::new("v"),
@@ -173,6 +174,7 @@ mod tests {
         ffi.functions.insert(
             0,
             FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("echo_f32"),
                 params: vec![],
                 returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::F32)),
@@ -199,6 +201,7 @@ mod tests {
         ffi.functions.insert(
             0,
             FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("noop"),
                 params: vec![],
                 returns: ReturnDef::Void,
@@ -231,6 +234,7 @@ mod tests {
         ffi.functions.insert(
             0,
             FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("send"),
                 params: vec![
                     ParamDef {
@@ -272,6 +276,7 @@ mod tests {
     pub fn native_function_closure_in() {
         let mut ffi = test::empty_contract();
         ffi.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("ClosureCb"),
             methods: vec![crate::ir::CallbackMethodDef {
                 execution_kind: ExecutionKind::Sync,
@@ -286,6 +291,7 @@ mod tests {
         ffi.functions.insert(
             0,
             FunctionDef {
+                qualified_path: String::new(),
                 id: FunctionId::new("function_with_callback"),
                 params: vec![ParamDef {
                     name: ParamName::new("cb"),
@@ -314,6 +320,7 @@ mod tests {
     pub fn native_function_async() {
         let mut ffi = test::empty_contract();
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: FunctionId::new("async_add"),
             params: vec![
                 ParamDef {

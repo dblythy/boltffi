@@ -17,6 +17,10 @@ pub struct DeprecationInfo {
 #[derive(Debug, Clone)]
 pub struct RecordDef {
     pub id: RecordId,
+    /// The record's fully qualified Rust path (crate name first), empty when
+    /// unknown. Only consulted for `NamingStyle::Experimental` symbol
+    /// naming — see `crate::model::Record::qualified_path`.
+    pub qualified_path: String,
     pub is_repr_c: bool,
     pub is_error: bool,
     pub fields: Vec<FieldDef>,
@@ -183,6 +187,10 @@ pub enum VariantPayload {
 #[derive(Debug, Clone)]
 pub struct FunctionDef {
     pub id: FunctionId,
+    /// The function's fully qualified Rust path (crate name first), empty
+    /// when unknown. Only consulted for `NamingStyle::Experimental` symbol
+    /// naming — see `crate::model::Function::qualified_path`.
+    pub qualified_path: String,
     pub params: Vec<ParamDef>,
     pub returns: ReturnDef,
     pub execution_kind: ExecutionKind,
@@ -247,6 +255,10 @@ pub struct StreamDef {
 #[derive(Debug, Clone)]
 pub struct ClassDef {
     pub id: ClassId,
+    /// The class's fully qualified Rust path (crate name first), empty when
+    /// unknown. Only consulted for `NamingStyle::Experimental` symbol
+    /// naming — see `crate::model::Class::qualified_path`.
+    pub qualified_path: String,
     pub constructors: Vec<ConstructorDef>,
     pub methods: Vec<MethodDef>,
     pub streams: Vec<StreamDef>,
@@ -377,6 +389,10 @@ pub enum CallbackKind {
 #[derive(Debug, Clone)]
 pub struct CallbackTraitDef {
     pub id: CallbackId,
+    /// The trait's fully qualified Rust path (crate name first), empty when
+    /// unknown. Only consulted for `NamingStyle::Experimental` symbol
+    /// naming — see `crate::model::CallbackTrait::qualified_path`.
+    pub qualified_path: String,
     pub methods: Vec<CallbackMethodDef>,
     pub kind: CallbackKind,
     pub doc: Option<String>,

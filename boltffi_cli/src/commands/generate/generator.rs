@@ -124,6 +124,23 @@ impl<'a> GenerateRequest<'a> {
     }
 
     pub fn lowered_crate(&self, pointer_width: ScanPointerWidth) -> Result<LoweredCrate> {
+        self.lowered_crate_with_naming_style(pointer_width, boltffi_binding::NamingStyle::LegacyCompatible)
+    }
+
+    /// Like [`Self::lowered_crate`], but selects which native-symbol naming
+    /// scheme the ABI contract's call symbols are minted with — see
+    /// `boltffi_binding::NamingStyle`. Pass
+    /// [`NamingStyle::Experimental`](boltffi_binding::NamingStyle::Experimental)
+    /// only when the generated bindings will link a `BindingExpansion`-built
+    /// native artifact (the react-native track's `native_async` mode);
+    /// every other caller (plain wasm codegen, Dart) must keep
+    /// [`NamingStyle::LegacyCompatible`](boltffi_binding::NamingStyle::LegacyCompatible)
+    /// so their output stays byte-identical.
+    pub fn lowered_crate_with_naming_style(
+        &self,
+        pointer_width: ScanPointerWidth,
+        naming_style: boltffi_binding::NamingStyle,
+    ) -> Result<LoweredCrate> {
         let mut scanned_module = scan_crate_with_pointer_width(
             self.source_crate.source_directory(),
             self.source_crate.crate_name(),
@@ -135,7 +152,9 @@ impl<'a> GenerateRequest<'a> {
         })?;
 
         let ffi_contract = ir::build_contract(&mut scanned_module);
-        let abi_contract = ir::Lowerer::new(&ffi_contract).to_abi_contract();
+        let abi_contract = ir::Lowerer::new(&ffi_contract)
+            .naming_style(naming_style)
+            .to_abi_contract();
 
         Ok(LoweredCrate {
             ffi_contract,

@@ -283,6 +283,217 @@ pub mod naming {
         format!("{}FFI", module_name(crate_name))
     }
 
+    /// The long-form, module-path-qualified symbol scheme
+    /// `boltffi_macros::experimental` compiles (`BindingExpansion` —
+    /// `apple`/`android`/`kotlin_multiplatform` real artifact builds), as
+    /// opposed to this module's other functions, which mirror the STABLE
+    /// macro path's short scheme. See
+    /// `boltffi_binding::lower::symbol::NamingStyle` for the two schemes'
+    /// full contrast; every format string below is cross-checked against
+    /// `nm` on a real `parse-core-rs` BindingExpansion dylib (e.g.
+    /// `boltffi_method_class_parse_core_ffi_client_parse_client_become_user`).
+    pub mod experimental {
+        use super::{FFI_PREFIX, GlobalSymbol, Name, to_snake_case};
+
+        /// Joins a fully qualified Rust path (`parse_core::ffi::client::ParseClient`)
+        /// into the snake-cased, underscore-joined path segment every
+        /// experimental symbol embeds (`parse_core_ffi_client_parse_client`).
+        pub fn symbol_path(qualified_path: &str) -> String {
+            qualified_path
+                .split("::")
+                .map(to_snake_case)
+                .collect::<Vec<_>>()
+                .join("_")
+        }
+
+        pub fn function_ffi_name(qualified_path: &str) -> Name<GlobalSymbol> {
+            Name::new(format!(
+                "{}_function_{}",
+                FFI_PREFIX,
+                symbol_path(qualified_path)
+            ))
+        }
+
+        /// `family` is the owner kind's tag (`"class"` or `"record"`).
+        pub fn method_ffi_name(
+            family: &str,
+            owner_qualified_path: &str,
+            method_name: &str,
+        ) -> Name<GlobalSymbol> {
+            Name::new(format!(
+                "{}_method_{}_{}_{}",
+                FFI_PREFIX,
+                family,
+                symbol_path(owner_qualified_path),
+                method_name
+            ))
+        }
+
+        /// `family` is the owner kind's tag (`"class"` or `"record"`).
+        pub fn init_ffi_name(
+            family: &str,
+            owner_qualified_path: &str,
+            ctor_name: &str,
+        ) -> Name<GlobalSymbol> {
+            Name::new(format!(
+                "{}_init_{}_{}_{}",
+                FFI_PREFIX,
+                family,
+                symbol_path(owner_qualified_path),
+                ctor_name
+            ))
+        }
+
+        pub fn class_ffi_free(class_qualified_path: &str) -> Name<GlobalSymbol> {
+            Name::new(format!(
+                "{}_release_class_{}",
+                FFI_PREFIX,
+                symbol_path(class_qualified_path)
+            ))
+        }
+
+        pub fn callback_register_fn(callback_qualified_path: &str) -> Name<GlobalSymbol> {
+            Name::new(format!(
+                "{}_register_callback_{}",
+                FFI_PREFIX,
+                symbol_path(callback_qualified_path)
+            ))
+        }
+
+        pub fn callback_create_fn(callback_qualified_path: &str) -> Name<GlobalSymbol> {
+            Name::new(format!(
+                "{}_create_callback_{}",
+                FFI_PREFIX,
+                symbol_path(callback_qualified_path)
+            ))
+        }
+
+        /// Appends an async-lifecycle suffix (`poll`/`complete`/`cancel`/
+        /// `free`/`panic_message`) to an already-minted base symbol (the
+        /// same name as the method/function's own sync-shaped entry point) —
+        /// e.g. `boltffi_method_class_..._become_user` ->
+        /// `boltffi_async_method_class_..._become_user_poll`. `base_symbol`
+        /// must include the leading `boltffi_` prefix (as returned by
+        /// `function_ffi_name`/`method_ffi_name` above); the prefix is
+        /// stripped and reinserted around the `async` infix, matching the
+        /// STABLE path's `<base>_poll` shape with an added `async_` marker.
+        pub fn async_lifecycle_name(base_symbol: &str, suffix: &str) -> Name<GlobalSymbol> {
+            let without_prefix = base_symbol
+                .strip_prefix(&format!("{FFI_PREFIX}_"))
+                .unwrap_or(base_symbol);
+            Name::new(format!("{}_async_{}_{}", FFI_PREFIX, without_prefix, suffix))
+        }
+
+        // Every expected string below is a REAL symbol observed via `nm` on
+        // parse-core-rs's actual BindingExpansion-built dylib
+        // (`dist/apple/ParseCoreFFI.xcframework`), not a value invented to
+        // match the implementation — see runtime/cpp/README.md's
+        // reconciliation note.
+        #[cfg(test)]
+        mod tests {
+            use super::*;
+
+            #[test]
+            fn function_symbol_matches_real_dylib() {
+                assert_eq!(
+                    function_ffi_name("parse_core::ffi::transport::fire_timer").as_str(),
+                    "boltffi_function_parse_core_ffi_transport_fire_timer"
+                );
+            }
+
+            #[test]
+            fn class_method_symbol_matches_real_dylib() {
+                assert_eq!(
+                    method_ffi_name(
+                        "class",
+                        "parse_core::ffi::client::ParseClient",
+                        "become_user"
+                    )
+                    .as_str(),
+                    "boltffi_method_class_parse_core_ffi_client_parse_client_become_user"
+                );
+            }
+
+            #[test]
+            fn record_method_symbol_matches_real_dylib() {
+                assert_eq!(
+                    method_ffi_name(
+                        "record",
+                        "parse_core::ffi::acl::Acl",
+                        "get_public_read_access"
+                    )
+                    .as_str(),
+                    "boltffi_method_record_parse_core_ffi_acl_acl_get_public_read_access"
+                );
+            }
+
+            #[test]
+            fn class_init_symbol_matches_real_dylib() {
+                assert_eq!(
+                    init_ffi_name("class", "parse_core::ffi::client::ParseClient", "new").as_str(),
+                    "boltffi_init_class_parse_core_ffi_client_parse_client_new"
+                );
+            }
+
+            #[test]
+            fn record_named_factory_init_symbol_matches_real_dylib() {
+                assert_eq!(
+                    init_ffi_name("record", "parse_core::ffi::acl::Acl", "owner").as_str(),
+                    "boltffi_init_record_parse_core_ffi_acl_acl_owner"
+                );
+            }
+
+            #[test]
+            fn class_release_symbol_matches_real_dylib() {
+                assert_eq!(
+                    class_ffi_free("parse_core::ffi::client::ParseClient").as_str(),
+                    "boltffi_release_class_parse_core_ffi_client_parse_client"
+                );
+            }
+
+            #[test]
+            fn callback_register_and_create_symbols_match_real_dylib() {
+                assert_eq!(
+                    callback_register_fn("parse_core::ffi::transport::SessionStorage").as_str(),
+                    "boltffi_register_callback_parse_core_ffi_transport_session_storage"
+                );
+                assert_eq!(
+                    callback_create_fn("parse_core::ffi::transport::SessionStorage").as_str(),
+                    "boltffi_create_callback_parse_core_ffi_transport_session_storage"
+                );
+            }
+
+            #[test]
+            fn async_lifecycle_symbols_match_real_dylib() {
+                let base = method_ffi_name(
+                    "class",
+                    "parse_core::ffi::client::ParseClient",
+                    "become_user",
+                );
+                assert_eq!(
+                    async_lifecycle_name(base.as_str(), "poll").as_str(),
+                    "boltffi_async_method_class_parse_core_ffi_client_parse_client_become_user_poll"
+                );
+                assert_eq!(
+                    async_lifecycle_name(base.as_str(), "complete").as_str(),
+                    "boltffi_async_method_class_parse_core_ffi_client_parse_client_become_user_complete"
+                );
+                assert_eq!(
+                    async_lifecycle_name(base.as_str(), "free").as_str(),
+                    "boltffi_async_method_class_parse_core_ffi_client_parse_client_become_user_free"
+                );
+                assert_eq!(
+                    async_lifecycle_name(base.as_str(), "cancel").as_str(),
+                    "boltffi_async_method_class_parse_core_ffi_client_parse_client_become_user_cancel"
+                );
+                assert_eq!(
+                    async_lifecycle_name(base.as_str(), "panic_message").as_str(),
+                    "boltffi_async_method_class_parse_core_ffi_client_parse_client_become_user_panic_message"
+                );
+            }
+        }
+    }
+
     pub fn cargo_crate_name(package_or_target_name: &str) -> String {
         package_or_target_name.replace('-', "_")
     }

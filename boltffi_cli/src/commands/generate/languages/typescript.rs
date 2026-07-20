@@ -30,7 +30,18 @@ impl LanguageGenerator for TypeScriptGenerator {
 
         request.ensure_output_directory(&output_directory)?;
 
-        let lowered_crate = request.lowered_crate(ScanPointerWidth::Fixed(32))?;
+        // `native_async` targets a real `BindingExpansion`-built native artifact
+        // (dist/apple, dist/android) — long, module-qualified symbol names.
+        // Plain wasm codegen must keep the stable macro path's short names
+        // (byte-identical output). See runtime/cpp/README.md's reconciliation
+        // note (boltffi fork) for why the two diverge.
+        let naming_style = if request.config().typescript_experimental().native_async {
+            boltffi_binding::NamingStyle::Experimental
+        } else {
+            boltffi_binding::NamingStyle::LegacyCompatible
+        };
+        let lowered_crate = request
+            .lowered_crate_with_naming_style(ScanPointerWidth::Fixed(32), naming_style)?;
         let type_script_module = TypeScriptLowerer::new(
             &lowered_crate.ffi_contract,
             &lowered_crate.abi_contract,

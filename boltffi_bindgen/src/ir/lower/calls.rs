@@ -33,7 +33,7 @@ impl<'c> Lowerer<'c> {
         };
 
         CallPlan {
-            target: CallTarget::GlobalSymbol(self.function_symbol(&func.id)),
+            target: CallTarget::GlobalSymbol(self.function_symbol(func)),
             params,
             kind,
         }
@@ -74,7 +74,7 @@ impl<'c> Lowerer<'c> {
         };
 
         CallPlan {
-            target: CallTarget::GlobalSymbol(self.method_symbol(&class.id, &method.id)),
+            target: CallTarget::GlobalSymbol(self.method_symbol(class, &method.id)),
             params,
             kind,
         }
@@ -104,7 +104,7 @@ impl<'c> Lowerer<'c> {
         };
 
         CallPlan {
-            target: CallTarget::GlobalSymbol(self.constructor_symbol(&class.id, ctor.name())),
+            target: CallTarget::GlobalSymbol(self.constructor_symbol(class, ctor.name())),
             params,
             kind: CallPlanKind::Sync { returns },
         }
@@ -521,26 +521,49 @@ impl<'c> Lowerer<'c> {
         }
     }
 
-    pub(super) fn function_symbol(&self, id: &FunctionId) -> naming::Name<naming::GlobalSymbol> {
-        naming::function_ffi_name(id.as_str())
+    pub(super) fn function_symbol(&self, func: &FunctionDef) -> naming::Name<naming::GlobalSymbol> {
+        match self.naming_style {
+            boltffi_binding::NamingStyle::LegacyCompatible => {
+                naming::function_ffi_name(func.id.as_str())
+            }
+            boltffi_binding::NamingStyle::Experimental => {
+                naming::experimental::function_ffi_name(&func.qualified_path)
+            }
+        }
     }
 
     pub(super) fn method_symbol(
         &self,
-        class_id: &ClassId,
+        class: &ClassDef,
         method_id: &MethodId,
     ) -> naming::Name<naming::GlobalSymbol> {
-        naming::method_ffi_name(class_id.as_str(), method_id.as_str())
+        match self.naming_style {
+            boltffi_binding::NamingStyle::LegacyCompatible => {
+                naming::method_ffi_name(class.id.as_str(), method_id.as_str())
+            }
+            boltffi_binding::NamingStyle::Experimental => naming::experimental::method_ffi_name(
+                "class",
+                &class.qualified_path,
+                method_id.as_str(),
+            ),
+        }
     }
 
     pub(super) fn constructor_symbol(
         &self,
-        class_id: &ClassId,
+        class: &ClassDef,
         name: Option<&MethodId>,
     ) -> naming::Name<naming::GlobalSymbol> {
-        match name {
-            Some(name) => naming::method_ffi_name(class_id.as_str(), name.as_str()),
-            None => naming::class_ffi_new(class_id.as_str()),
+        match self.naming_style {
+            boltffi_binding::NamingStyle::LegacyCompatible => match name {
+                Some(name) => naming::method_ffi_name(class.id.as_str(), name.as_str()),
+                None => naming::class_ffi_new(class.id.as_str()),
+            },
+            boltffi_binding::NamingStyle::Experimental => naming::experimental::init_ffi_name(
+                "class",
+                &class.qualified_path,
+                name.map_or("new", |n| n.as_str()),
+            ),
         }
     }
 

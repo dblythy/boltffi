@@ -7,6 +7,12 @@ use super::types::{Deprecation, ReturnType, Type};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Function {
     pub name: String,
+    /// The function's fully qualified Rust path (crate name first, e.g.
+    /// `parse_core::ffi::transport::fire_timer`), or empty when unknown.
+    /// Only consulted for `NamingStyle::Experimental` symbol naming — the
+    /// stable/legacy scheme names by bare `name` alone.
+    #[serde(default)]
+    pub qualified_path: String,
     pub inputs: Vec<Parameter>,
     pub returns: ReturnType,
     pub execution_kind: ExecutionKind,
@@ -19,6 +25,7 @@ impl Function {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            qualified_path: String::new(),
             inputs: Vec::new(),
             returns: ReturnType::Void,
             execution_kind: ExecutionKind::Sync,
@@ -26,6 +33,11 @@ impl Function {
             doc: None,
             deprecated: None,
         }
+    }
+
+    pub fn with_qualified_path(mut self, qualified_path: impl Into<String>) -> Self {
+        self.qualified_path = qualified_path.into();
+        self
     }
 
     pub fn with_wire_encoded(mut self) -> Self {

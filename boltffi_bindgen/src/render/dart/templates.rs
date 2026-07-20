@@ -102,6 +102,7 @@ mod tests {
 
     fn generic_callback_def(kind: ExecutionKind) -> CallbackTraitDef {
         CallbackTraitDef {
+            qualified_path: String::new(),
             id: CallbackId::new("ICallback"),
             methods: vec![
                 CallbackMethodDef {
@@ -233,6 +234,7 @@ mod tests {
         );
 
         ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
             id: ClassId::new("Person"),
             constructors: vec![
                 ConstructorDef::Default {
@@ -302,6 +304,7 @@ mod tests {
     pub fn top_level_functions_render_without_a_class_or_static_keyword() {
         let mut ffi = empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: ir::RecordId::new("ParseError"),
             is_repr_c: false,
             is_error: true,
@@ -317,6 +320,7 @@ mod tests {
             deprecated: None,
         });
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: ir::FunctionId::new("live_query_reconnect_delay_ms"),
             params: vec![ParamDef {
                 name: ParamName::new("attempt"),
@@ -330,6 +334,7 @@ mod tests {
             deprecated: None,
         });
         ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
             id: ir::FunctionId::new("fetch_session"),
             params: vec![],
             returns: ReturnDef::Result {
@@ -377,6 +382,7 @@ mod tests {
     pub fn record_native_declarations_render_once_before_class_body() {
         let mut ffi = empty_contract();
         ffi.catalog.insert_record(RecordDef {
+            qualified_path: String::new(),
             id: ir::RecordId::new("Acl"),
             is_repr_c: false,
             is_error: false,

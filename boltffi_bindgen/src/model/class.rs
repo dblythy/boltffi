@@ -7,6 +7,11 @@ use super::types::Deprecation;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Class {
     pub name: String,
+    /// The class's fully qualified Rust path (crate name first, e.g.
+    /// `parse_core::ffi::client::ParseClient`), or empty when unknown. Only
+    /// consulted for `NamingStyle::Experimental` symbol naming.
+    #[serde(default)]
+    pub qualified_path: String,
     pub doc: Option<String>,
     pub deprecated: Option<Deprecation>,
     pub constructors: Vec<Constructor>,
@@ -18,12 +23,18 @@ impl Class {
     pub fn new(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
+            qualified_path: String::new(),
             doc: None,
             deprecated: None,
             constructors: Vec::new(),
             methods: Vec::new(),
             streams: Vec::new(),
         }
+    }
+
+    pub fn with_qualified_path(mut self, qualified_path: impl Into<String>) -> Self {
+        self.qualified_path = qualified_path.into();
+        self
     }
 
     pub fn with_doc(mut self, doc: impl Into<String>) -> Self {
