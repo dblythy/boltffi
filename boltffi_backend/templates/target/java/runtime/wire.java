@@ -90,6 +90,21 @@ final class WireReader {
         return values;
     }
 
+    <K, V> java.util.Map<K, V> readMap(WireRead<K> readKey, WireRead<V> readValue) {
+        int length = readCount();
+        java.util.LinkedHashMap<K, V> values = new java.util.LinkedHashMap<>(length);
+        int index = 0;
+        while (index < length) {
+            K key = readKey.read();
+            if (values.containsKey(key)) {
+                throw new IllegalArgumentException("duplicate map key");
+            }
+            values.put(key, readValue.read());
+            index += 1;
+        }
+        return values;
+    }
+
     java.util.List<String> readStringSequence() {
         int length = readCount();
         java.util.ArrayList<String> values = new java.util.ArrayList<>(length);
@@ -256,6 +271,14 @@ final class WireWriter {
         }
     }
 
+    <K, V> void writeMap(java.util.Map<K, V> values, WireWrite<K> writeKey, WireWrite<V> writeValue) {
+        writeInt(values.size());
+        for (java.util.Map.Entry<K, V> entry : values.entrySet()) {
+            writeKey.write(entry.getKey());
+            writeValue.write(entry.getValue());
+        }
+    }
+
     void writeStringSequence(java.util.List<String> values) {
         writeInt(values.size());
         int index = 0;
@@ -329,6 +352,15 @@ final class WireSizes {
         while (index < values.size()) {
             total = Math.addExact(total, size.size(values.get(index)));
             index += 1;
+        }
+        return total;
+    }
+
+    static <K, V> int map(java.util.Map<K, V> values, WireSize<K> keySize, WireSize<V> valueSize) {
+        int total = 4;
+        for (java.util.Map.Entry<K, V> entry : values.entrySet()) {
+            total = Math.addExact(total, keySize.size(entry.getKey()));
+            total = Math.addExact(total, valueSize.size(entry.getValue()));
         }
         return total;
     }

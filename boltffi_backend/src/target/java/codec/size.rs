@@ -265,12 +265,25 @@ impl CodecSize for Sizer<'_> {
     fn map(
         &mut self,
         _kind: MapKind,
-        _value: &ValueRef,
-        _key_binder: BinderId,
-        _key: Self::Expr,
-        _value_binder: BinderId,
-        _map_value: Self::Expr,
+        value: &ValueRef,
+        key_binder: BinderId,
+        key: Self::Expr,
+        value_binder: BinderId,
+        map_value: Self::Expr,
     ) -> Self::Expr {
-        Self::unsupported("map wire size")
+        Ok(SizeExpression::new(self.runtime_call(
+            "map",
+            [
+                self.value(value)?,
+                Expression::lambda(
+                    [ValueExpression::binder(key_binder, self.version)?],
+                    key?.expression,
+                ),
+                Expression::lambda(
+                    [ValueExpression::binder(value_binder, self.version)?],
+                    map_value?.expression,
+                ),
+            ],
+        )))
     }
 }

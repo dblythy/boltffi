@@ -443,12 +443,31 @@ impl CodecWrite for Writer<'_> {
     fn map(
         &mut self,
         _kind: MapKind,
-        _value: &ValueRef,
-        _key_binder: BinderId,
-        _key: Vec<Self::Stmt>,
-        _value_binder: BinderId,
-        _map_value: Vec<Self::Stmt>,
+        value: &ValueRef,
+        key_binder: BinderId,
+        key: Vec<Self::Stmt>,
+        value_binder: BinderId,
+        map_value: Vec<Self::Stmt>,
     ) -> Vec<Self::Stmt> {
-        Self::unsupported("map wire write")
+        vec![self.value(value).and_then(|value| {
+            Ok(WriteStatement::new(Statement::expression(
+                Expression::identifier(self.writer.clone()).call(
+                    Identifier::known("writeMap"),
+                    [
+                        value,
+                        Expression::lambda_statement(
+                            [ValueExpression::binder(key_binder, self.version)?],
+                            Self::single(key)?,
+                        ),
+                        Expression::lambda_statement(
+                            [ValueExpression::binder(value_binder, self.version)?],
+                            Self::single(map_value)?,
+                        ),
+                    ]
+                    .into_iter()
+                    .collect(),
+                ),
+            )))
+        })]
     }
 }
