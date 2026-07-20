@@ -87,6 +87,64 @@ describe("NativeMemoryArena", () => {
     const reused = arena.alloc(8);
     expect(reused % 8).toBe(0);
   });
+
+  // Second adversarial round, finding 2 (HIGH): pinning the arena's backing buffer for a call's
+  // duration (runtime/cpp's `boltffi_generic_host_object.cpp`) preserves the buffer's LIFETIME,
+  // not the COHERENCE of a write through an out-param pointer computed before a reentrant grow --
+  // concretely, `subscribe_with_listener(..., int32_t* return_out)` synchronously invokes
+  // `transport.send` (parse-core-rs's `livequery.rs`), which can allocate JS-side and grow this
+  // arena, replacing the buffer BEFORE Rust writes the request id through the pointer it was
+  // already handed (into the OLD buffer) -- JS then reads the offset out of the NEW buffer and
+  // sees garbage, not the value Rust wrote. `beginCall`/`endCall` close that gap by making
+  // `grow()` refuse to run at all while ANY call is in flight, so a reentrant allocation that
+  // would need more room fails LOUDLY instead of silently corrupting an in-flight call's already-
+  // translated addresses. The call-boundary marking itself belongs at the native-call dispatch
+  // site (native.ts's `NativeBoltFFIModule` around each `exports.*` invocation, and the
+  // equivalent point in the C++ HostObject's per-call lambda) -- out of this file's scope, not yet
+  // wired; this suite proves the enforced PRIMITIVE in isolation.
+  describe("NativeMemoryArena: call-in-flight growth guard (reentrant-growth coherence)", () => {
+    it("refuses to grow while a call is marked in-flight, instead of silently reallocating", () => {
+      const arena = new NativeMemoryArena(32);
+      arena.beginCall();
+      try {
+        expect(() => arena.alloc(1024)).toThrow(/in flight/i);
+      } finally {
+        arena.endCall();
+      }
+    });
+
+    it("an alloc that fits within existing capacity still succeeds during an active call -- only GROWTH is forbidden", () => {
+      const arena = new NativeMemoryArena(4096);
+      arena.beginCall();
+      try {
+        expect(arena.alloc(8)).toBeGreaterThanOrEqual(0);
+      } finally {
+        arena.endCall();
+      }
+    });
+
+    it("allows growth again once the call has ended", () => {
+      const arena = new NativeMemoryArena(32);
+      arena.beginCall();
+      arena.endCall();
+      expect(() => arena.alloc(1024)).not.toThrow();
+    });
+
+    it("nests correctly: growth stays forbidden until the OUTERMOST call ends (a reentrant call nested inside an outer one must not re-enable growth early)", () => {
+      const arena = new NativeMemoryArena(32);
+      arena.beginCall(); // outer call begins
+      arena.beginCall(); // a reentrant call nested inside it begins
+      arena.endCall(); // the reentrant call returns
+      expect(() => arena.alloc(1024)).toThrow(/in flight/i); // outer call is still active
+      arena.endCall(); // outer call returns
+      expect(() => arena.alloc(1024)).not.toThrow();
+    });
+
+    it("endCall() without a matching beginCall() throws loudly rather than going silently negative", () => {
+      const arena = new NativeMemoryArena(32);
+      expect(() => arena.endCall()).toThrow();
+    });
+  });
 });
 
 describe("NativeBoltFFIModule: string/bytes/primitive-array params", () => {
