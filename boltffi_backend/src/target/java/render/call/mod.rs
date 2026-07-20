@@ -29,8 +29,7 @@ use crate::{
             type_name::JavaType,
         },
         syntax::{
-            ArgumentList, Expression, Identifier, Javadoc, Statement, StringLiteral,
-            TypeIdentifier, TypeName,
+            ArgumentList, Expression, Identifier, Javadoc, Statement, TypeIdentifier, TypeName,
         },
     },
 };
@@ -493,13 +492,7 @@ impl Call {
             ),
         };
         native.validate_return(&native_returns)?;
-        let success = error.wrap(
-            success,
-            scope.version,
-            scope.context,
-            scope.package,
-            scope.return_context,
-        )?;
+        let success = error.wrap(success, scope.version, scope.context, scope.package)?;
         let protected = receiver
             .iter()
             .flat_map(|receiver| receiver.native.prepare.iter().cloned())
@@ -560,16 +553,6 @@ impl CallExecution {
             .map(|method| method.render().map(Into::into).map(AuxChunk::ForwardDecl))
             .chain(matches!(self, Self::Asynchronous(_)).then(Runtime::async_callback))
             .collect()
-    }
-}
-
-impl ReturnContext {
-    fn initializer_failure(self) -> Option<&'static str> {
-        match self {
-            Self::Api => None,
-            Self::ClassFactory => Some("Factory constructor failed"),
-            Self::ClassInitializer(_) => Some("Constructor failed"),
-        }
     }
 }
 
@@ -1287,25 +1270,15 @@ impl ErrorConversion {
         version: JavaVersion,
         context: &RenderContext<Native>,
         package: Option<&JavaPackage>,
-        return_context: ReturnContext,
     ) -> Result<Vec<Statement>> {
-        match (self, return_context.initializer_failure()) {
-            (Self::None | Self::Status, _) => Ok(success),
-            (Self::Encoded { .. }, Some(message)) => Ok(vec![Statement::try_catch(
-                success,
-                TypeName::named(TypeIdentifier::known(
-                    "BoltFfiErrorBufferException",
-                    version,
-                )),
-                Identifier::known("__boltffi_error"),
-                vec![Statement::throw_value(Expression::construct(
-                    TypeName::named(TypeIdentifier::known("RuntimeException", version)),
-                    [Expression::string(StringLiteral::new(message))]
-                        .into_iter()
-                        .collect(),
-                ))],
-            )]),
-            (Self::Encoded { ty, codec }, None) => {
+        // A constructor's failure path (ClassInitializer/ClassFactory) decodes the real error the
+        // exact same way a regular method's does -- a fallible constructor is not a different
+        // error channel, just a different call shape (was previously special-cased into a bare
+        // fixed-message RuntimeException, discarding the actual decoded error; see
+        // docs/tracks/java.md in parse-core-sdks for the cross-repo gap this closes).
+        match self {
+            Self::None | Self::Status => Ok(success),
+            Self::Encoded { ty, codec } => {
                 let error = Identifier::known("__boltffi_error");
                 let reader = Identifier::known("__boltffi_error_reader");
                 let mut codec_reader = Reader::new(reader.clone(), version, context);

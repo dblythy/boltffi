@@ -77,7 +77,6 @@ impl AsyncCall {
             scope.version,
             scope.context,
             scope.package,
-            scope.return_context,
         )?;
         if matches!(returned.ty, ReturnType::Void) {
             complete_body.push(Statement::return_value(Expression::null()));
