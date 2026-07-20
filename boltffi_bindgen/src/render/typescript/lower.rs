@@ -1186,6 +1186,7 @@ impl<'a> TypeScriptLowerer<'a> {
                     };
 
                 Some(TsCallbackMethod {
+                    id: method_def.id.as_str().to_string(),
                     ts_name,
                     import_name,
                     params,
@@ -1334,6 +1335,7 @@ impl<'a> TypeScriptLowerer<'a> {
                 };
 
                 Some(TsAsyncCallbackMethod {
+                    id: method_def.id.as_str().to_string(),
                     ts_name,
                     start_import_name,
                     complete_export_name,
@@ -2241,14 +2243,20 @@ fn native_callback_vtable_slots(
     });
 
     for abi_method in &abi_callback.methods {
-        let ts_name = camel_case(abi_method.id.as_str());
-        if let Some(method) = methods.iter().find(|m| m.ts_name == ts_name) {
+        // Associate by the ORIGINAL ABI method id, never by `ts_name`: `camel_case` is not
+        // injective (`foo_bar` and `fooBar` both normalize to `fooBar`), so a sync method and an
+        // async method can collide on `ts_name` while remaining distinct `abi_callback.methods`
+        // entries. A `ts_name`-keyed `.find()` here would silently bind the WRONG closure shape
+        // (e.g. the sync method's, missing the trailing `complete`/`userdata` params) to the
+        // colliding method's real vtable slot — see this function's regression test.
+        let abi_id = abi_method.id.as_str();
+        if let Some(method) = methods.iter().find(|m| m.id == abi_id) {
             slots.push(native_sync_method_vtable_slot(
                 trait_name_snake,
                 closure_fn_type,
                 method,
             ));
-        } else if let Some(method) = async_methods.iter().find(|m| m.ts_name == ts_name) {
+        } else if let Some(method) = async_methods.iter().find(|m| m.id == abi_id) {
             slots.push(native_async_method_vtable_slot(
                 trait_name_snake,
                 closure_fn_type,
@@ -2261,15 +2269,22 @@ fn native_callback_vtable_slots(
 }
 
 /// Renders one WireEncoded/Primitive callback parameter's native-mode signature fragment
-/// (`params_sig`), shape entries (`shape_args`), decode statement, deferred-free statement (only
-/// when `free_after_decode` — an incoming buffer's ownership is only ever transferred, per
+/// (`params_sig`), shape entries (`shape_args`), decode statement, and call argument.
+///
+/// A `WireEncoded` param's decode statement folds its own deferred free (when `free_after_decode`
+/// — an incoming buffer's ownership is only ever transferred, per
 /// `AbiCallbackMethod::is_deferred_dispatch`'s doc, on a deferred slot; a non-deferred sync
-/// return's buffer is Rust-stack-scoped and freeing it here would double-free), and call argument.
+/// return's buffer is Rust-stack-scoped and freeing it here would double-free) into a `try/finally`
+/// wrapping ITS OWN decode, rather than handing back a separate free statement a caller runs after
+/// every param has decoded: a free that only runs after ALL decodes leaks every earlier param's
+/// buffer the moment any later param's decode throws (malformed wire bytes, an unregistered custom
+/// type, ...) — see `native_sync_method_vtable_slot`/`native_async_method_vtable_slot`'s own
+/// regression tests. Mirrors `render::dart::lower::callback::render_native_method_body`'s own
+/// per-call `try { ... } finally { frees }` discipline (that session's "Codex review finding 4").
 struct NativeParamRender {
     params_sig: String,
     shape_arg: String,
     decode_stmt: Option<String>,
-    free_stmt: Option<String>,
     call_arg: String,
 }
 
@@ -2283,23 +2298,41 @@ fn render_native_callback_param(param: &TsCallbackParam, free_after_decode: bool
             params_sig: format!(", {}: {}", param.name, import_ts_type),
             shape_arg: format!("\"{}\"", native_scalar_type),
             decode_stmt: None,
-            free_stmt: None,
             call_arg: call_expr.clone(),
         },
         TsCallbackParamKind::WireEncoded { decode_expr } => {
             let p = &param.name;
-            let decode_stmt = format!(
-                "const {p} = (() => {{ const reader = new WireReader(_module.callbackHost.readForeignBytes({p}_ptr, {p}_len).buffer as ArrayBuffer); return {decode}; }})();",
-                p = p,
-                decode = decode_expr
+            // `readForeignBytes` returns a `Uint8Array` — a VIEW that may be a subarray of a
+            // larger buffer (its contract makes no zero-offset guarantee; a JSI adapter could
+            // legitimately hand back a slice of a shared scratch arena). `.buffer` alone discards
+            // that view's `byteOffset`/`byteLength`, so a `WireReader` built straight from it would
+            // read from the START of the underlying buffer instead of this param's own window.
+            // `WireReader`'s own `(buffer, offset)` constructor exists exactly for this — pass the
+            // view's `byteOffset` through as the starting read cursor rather than reconstructing a
+            // `DataView`/copy by hand.
+            let read_expr = format!(
+                "const {p}_bytes = _module.callbackHost.readForeignBytes({p}_ptr, {p}_len); const reader = new WireReader({p}_bytes.buffer as ArrayBuffer, {p}_bytes.byteOffset);",
+                p = p
             );
-            let free_stmt = free_after_decode
-                .then(|| format!("_module.freeDeferredCallbackBytes({p}_ptr, {p}_len);", p = p));
+            let decode_stmt = if free_after_decode {
+                format!(
+                    "const {p} = (() => {{ {read} try {{ return {decode}; }} finally {{ _module.freeDeferredCallbackBytes({p}_ptr, {p}_len); }} }})();",
+                    p = p,
+                    read = read_expr,
+                    decode = decode_expr
+                )
+            } else {
+                format!(
+                    "const {p} = (() => {{ {read} return {decode}; }})();",
+                    p = p,
+                    read = read_expr,
+                    decode = decode_expr
+                )
+            };
             NativeParamRender {
                 params_sig: format!(", {p}_ptr: bigint, {p}_len: bigint", p = p),
                 shape_arg: "\"ptr\", \"u64\"".to_string(),
                 decode_stmt: Some(decode_stmt),
-                free_stmt,
                 call_arg: p.clone(),
             }
         }
@@ -2327,7 +2360,6 @@ pub(crate) fn native_sync_method_vtable_slot(
     let mut params_sig = String::from("handle: bigint");
     let mut shape_args = vec!["\"u64\"".to_string()];
     let mut decode_stmts = Vec::new();
-    let mut free_stmts = Vec::new();
     let mut call_args = Vec::new();
 
     for param in &method.params {
@@ -2337,9 +2369,6 @@ pub(crate) fn native_sync_method_vtable_slot(
         if let Some(decode) = rendered.decode_stmt {
             decode_stmts.push(decode);
         }
-        if let Some(free) = rendered.free_stmt {
-            free_stmts.push(free);
-        }
         call_args.push(rendered.call_arg);
     }
 
@@ -2347,7 +2376,6 @@ pub(crate) fn native_sync_method_vtable_slot(
     let lookup = format!("_{}_lookup(Number(handle))", trait_name_snake);
     let mut body_stmts = vec![format!("const impl = {};", lookup)];
     body_stmts.extend(decode_stmts);
-    body_stmts.extend(free_stmts);
 
     let (returns_shape, invoke_expr) = match &method.import_return {
         TsCallbackImportReturn::Void => {
@@ -2396,6 +2424,16 @@ pub(crate) fn native_sync_method_vtable_slot(
 /// async result -- `(callback_data, result: <scalar>, status)` -- is a real shape this function
 /// does not yet cover (no empirical proof against a compiled artifact) and is rejected as
 /// unsupported rather than emitting an unverified guess.
+///
+/// The whole dispatch runs inside an `async () => { try { ... } catch (e) { ... } }` IIFE — an
+/// `await` on the impl's return value catches BOTH a synchronous throw and a rejected promise the
+/// SAME way, and the `catch` always fires the completion pointer with a failure `FfiStatus`
+/// (`INTERNAL_ERROR` = 100) before returning. Without this, a JS impl throw/rejection never calls
+/// `complete`, and the Rust future this vtable slot backs polls `Pending` forever (mirrors
+/// `render::dart::lower::callback::render_native_method_body`'s own outer `try/catch` — Dart's
+/// `-1` status stands in for this file's `100`). The permanently-unsupported direct-scalar shape
+/// skips decoding its params entirely and throws immediately (still inside the same outer `try`),
+/// so it fails through the identical completion-pointer path rather than a bespoke one.
 pub(crate) fn native_async_method_vtable_slot(
     trait_name_snake: &str,
     closure_fn_type: &Option<String>,
@@ -2404,7 +2442,6 @@ pub(crate) fn native_async_method_vtable_slot(
     let mut params_sig = String::from("handle: bigint");
     let mut shape_args = vec!["\"u64\"".to_string()];
     let mut decode_stmts = Vec::new();
-    let mut free_stmts = Vec::new();
     let mut call_args = Vec::new();
 
     for param in &method.params {
@@ -2416,9 +2453,6 @@ pub(crate) fn native_async_method_vtable_slot(
         shape_args.push(rendered.shape_arg);
         if let Some(decode) = rendered.decode_stmt {
             decode_stmts.push(decode);
-        }
-        if let Some(free) = rendered.free_stmt {
-            free_stmts.push(free);
         }
         call_args.push(rendered.call_arg);
     }
@@ -2433,57 +2467,65 @@ pub(crate) fn native_async_method_vtable_slot(
     let has_wire_result = method.encode_expr.is_some();
     let has_direct_scalar_result = !has_wire_result && method.direct_write_method.is_some();
 
-    let (completion_shape, complete_call) = if has_wire_result {
-        (
-            "\"ptr\", \"u64\", \"i32\"".to_string(),
-            "const writer = _module.allocWriter(__size); __ENCODE__; complete(__userdata, BigInt(writer.ptr), BigInt(writer.len), 0n); _module.freeWriter(writer);".to_string(),
-        )
+    // The completion pointer's OWN shape (what `wrapForeignFunction` marshals `complete`'s call
+    // through) always carries a trailing status arg, matching the ABI's `(data, ..., status)`
+    // completion signature exactly for BOTH branches -- the previous `String::new()` here for the
+    // non-wire case under-declared the shape (one arg short of the real two-param `(callback_data,
+    // status)` signature) even though the call site already passed a status value positionally.
+    let completion_shape = if has_wire_result {
+        "\"ptr\", \"u64\", \"i32\""
     } else {
-        (String::new(), "complete(__userdata, 0n);".to_string())
+        "\"i32\""
     };
 
-    let mut body_stmts = vec![
-        format!("const impl = {};", lookup),
-        format!(
-            "const complete = _module.callbackHost.wrapForeignFunction(__complete, {{ args: [\"u64\"{}], returns: \"void\" }});",
-            if completion_shape.is_empty() {
-                String::new()
-            } else {
-                format!(", {}", completion_shape)
-            }
-        ),
-    ];
-    body_stmts.extend(decode_stmts);
-    body_stmts.extend(free_stmts);
+    let mut inner_stmts = vec![format!("const impl = {};", lookup)];
 
     if has_direct_scalar_result {
-        body_stmts.push(format!(
+        inner_stmts.push(format!(
             "throw new Error(\"boltffi: native_async callback method '{}' has a direct (non-wire) async scalar result, not yet supported\");",
             method.ts_name
         ));
-    } else if has_wire_result {
-        let size_expr = method.size_expr.clone().unwrap_or_else(|| "0".to_string());
-        let encode_expr = method
-            .encode_expr
-            .clone()
-            .unwrap_or_else(|| "void 0".to_string());
-        let complete_stmt = complete_call
-            .replace("__size", &size_expr)
-            .replace("__ENCODE__", &encode_expr);
-        body_stmts.push(format!(
-            "Promise.resolve({}).then((result) => {{ {} }});",
-            call_expr, complete_stmt
-        ));
     } else {
-        body_stmts.push(format!(
-            "Promise.resolve({}).then(() => {{ {} }});",
-            call_expr, complete_call
-        ));
+        inner_stmts.extend(decode_stmts);
+        if has_wire_result {
+            let size_expr = method.size_expr.clone().unwrap_or_else(|| "0".to_string());
+            let encode_expr = method
+                .encode_expr
+                .clone()
+                .unwrap_or_else(|| "void 0".to_string());
+            inner_stmts.push(format!("const result = await {};", call_expr));
+            inner_stmts.push(format!(
+                "const writer = _module.allocWriter({size}); {encode}; complete(__userdata, BigInt(writer.ptr), BigInt(writer.len), 0n); _module.freeWriter(writer);",
+                size = size_expr,
+                encode = encode_expr
+            ));
+        } else {
+            inner_stmts.push(format!("await {};", call_expr));
+            inner_stmts.push("complete(__userdata, 0n);".to_string());
+        }
     }
+
+    // On error, a wire-returning method encodes the JS error message as a real wire-encoded
+    // string (mirroring the wasm-mode `completeError`'s own `errWriter.writeString(errMsg)`) so a
+    // `Result<T, E>`-returning Rust future decodes a genuine `Err` message instead of reading
+    // uninitialized/null bytes; a void (or permanently-unsupported) method has no payload to
+    // carry, so the status alone communicates failure.
+    let error_stmt = if has_wire_result {
+        "const __errMsg = e instanceof Error ? e.message : String(e); const __errWriter = _module.allocWriter(4 + __errMsg.length * 3); __errWriter.writeString(__errMsg); complete(__userdata, BigInt(__errWriter.ptr), BigInt(__errWriter.len), 100n); _module.freeWriter(__errWriter);".to_string()
+    } else {
+        "complete(__userdata, 100n);".to_string()
+    };
+
+    let body = format!(
+        "const complete = _module.callbackHost.wrapForeignFunction(__complete, {{ args: [\"u64\", {completion_shape}], returns: \"void\" }});\n    (async () => {{\n      try {{\n        {inner}\n      }} catch (e) {{\n        {error}\n      }}\n    }})();",
+        completion_shape = completion_shape,
+        inner = inner_stmts.join("\n        "),
+        error = error_stmt
+    );
 
     TsNativeVTableSlot {
         slot_name: naming::to_snake_case(&method.ts_name),
-        invoke_expr: format!("({}): void => {{\n    {}\n  }}", params_sig, body_stmts.join("\n    ")),
+        invoke_expr: format!("({}): void => {{\n    {}\n  }}", params_sig, body),
         shape_literal: format!(
             "{{ args: [{}], returns: \"void\" }}",
             shape_args.join(", ")
@@ -5221,5 +5263,270 @@ mod tests {
             function.poll_sync_ffi_name,
             "boltffi_function_test_crate_async_add_poll_sync"
         );
+    }
+
+    #[test]
+    fn native_vtable_slots_do_not_confuse_a_sync_and_async_method_colliding_on_ts_name() {
+        // Adversarial-review finding 1: `foo_bar` (sync) and `fooBar` (async) both normalize to
+        // the SAME `ts_name` (`snake_to_camel` is not injective). Associating a vtable slot to its
+        // `TsCallbackMethod`/`TsAsyncCallbackMethod` by `ts_name` (rather than the original ABI
+        // method id) let a `.find()` over the SYNC list match first for BOTH abi methods, binding
+        // the sync closure's shape (no trailing `complete`/`userdata` params) to what should be
+        // the async method's vtable slot -- real ABI type confusion. This must produce one
+        // correctly-shaped sync slot and one correctly-shaped async slot, in declaration order,
+        // regardless of the name collision.
+        let mut contract = empty_contract();
+        contract.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: "test_crate::Colliding".to_string(),
+            id: CallbackId::new("Colliding"),
+            kind: CallbackKind::Trait,
+            doc: None,
+            methods: vec![
+                CallbackMethodDef {
+                    id: MethodId::new("foo_bar"),
+                    params: vec![primitive_param("value", PrimitiveType::I32)],
+                    returns: ReturnDef::Value(TypeExpr::Primitive(PrimitiveType::I32)),
+                    execution_kind: ExecutionKind::Sync,
+                    doc: None,
+                },
+                CallbackMethodDef {
+                    id: MethodId::new("fooBar"),
+                    params: vec![primitive_param("value", PrimitiveType::I32)],
+                    // A wire-encoded (not scalar) return so this method's slot exercises the
+                    // `await`/completion-pointer dispatch path rather than the still-unsupported
+                    // direct-scalar-result shape (a separate, deliberate limitation covered by its
+                    // own test below) -- this test is purely about slot/method ASSOCIATION.
+                    returns: ReturnDef::Value(TypeExpr::String),
+                    execution_kind: ExecutionKind::Async,
+                    doc: None,
+                },
+            ],
+        });
+
+        let module = lower_contract_with_experimental(
+            &contract,
+            TypeScriptExperimental {
+                native_async: true,
+                ..TypeScriptExperimental::default()
+            },
+        );
+        let callback = module
+            .callbacks
+            .iter()
+            .find(|c| c.interface_name == "Colliding")
+            .expect("colliding callback trait should be lowered");
+
+        // Both TS-facing names really do collide, confirming this is the described scenario and
+        // not an already-disambiguated one.
+        assert_eq!(callback.methods[0].ts_name, "fooBar");
+        assert_eq!(callback.async_methods[0].ts_name, "fooBar");
+
+        let method_slots: Vec<_> = callback
+            .native_vtable_slots
+            .iter()
+            .filter(|slot| slot.slot_name != "free" && slot.slot_name != "clone")
+            .collect();
+        assert_eq!(method_slots.len(), 2, "expected one slot per abi method, no dedup/overwrite");
+
+        let sync_slot = &method_slots[0];
+        let async_slot = &method_slots[1];
+
+        // The sync slot's closure has no completion-pointer params and no `await`.
+        assert!(!sync_slot.invoke_expr.contains("__complete"));
+        assert!(!sync_slot.invoke_expr.contains("await"));
+
+        // The async slot's closure has the trailing completion-pointer params and dispatches
+        // through the async IIFE.
+        assert!(async_slot.invoke_expr.contains("__complete: bigint, __userdata: bigint"));
+        assert!(async_slot.invoke_expr.contains("await impl.fooBar("));
+    }
+
+    #[test]
+    fn native_async_wire_result_dispatch_awaits_impl_and_reports_errors_through_completion() {
+        // Adversarial-review finding 2: a JS impl throw or a rejected promise must still call the
+        // completion pointer (with a failure status) rather than leaving the Rust future pending
+        // forever. `await` (inside the generated `async () => { try { ... } catch (e) { ... } }`
+        // IIFE) catches BOTH a synchronous throw and a rejected promise the same way.
+        let method = TsAsyncCallbackMethod {
+            id: "get".to_string(),
+            ts_name: "get".to_string(),
+            start_import_name: "__boltffi_callback_async_kv_get_start".to_string(),
+            complete_export_name: "boltffi_callback_async_kv_get_complete".to_string(),
+            params: vec![],
+            return_type: Some("string".to_string()),
+            encode_expr: Some(
+                "::boltffi::__private::wire::encode_into(&result, writer)".to_string(),
+            ),
+            size_expr: Some("32".to_string()),
+            direct_write_method: None,
+            direct_write_value_expr: None,
+            direct_size: None,
+            doc: None,
+        };
+        let slot = native_async_method_vtable_slot("async_kv", &None, &method);
+
+        assert!(slot.invoke_expr.contains("(async () => {"));
+        assert!(slot.invoke_expr.contains("try {"));
+        assert!(slot.invoke_expr.contains("const result = await impl.get();"));
+        assert!(slot.invoke_expr.contains("} catch (e) {"));
+        // The completion pointer's own shape now includes the status arg on every branch.
+        assert!(slot.invoke_expr.contains(
+            "_module.callbackHost.wrapForeignFunction(__complete, { args: [\"u64\", \"ptr\", \"u64\", \"i32\"], returns: \"void\" });"
+        ));
+        // On error, a real (non-null, non-zero-length) wire-encoded error message is sent with a
+        // non-OK status -- never a bare hang, never an unchecked null/zero read on the Rust side.
+        assert!(slot.invoke_expr.contains("__errWriter.writeString(__errMsg)"));
+        assert!(slot
+            .invoke_expr
+            .contains("complete(__userdata, BigInt(__errWriter.ptr), BigInt(__errWriter.len), 100n);"));
+        assert!(slot.invoke_expr.contains("_module.freeWriter(__errWriter);"));
+    }
+
+    #[test]
+    fn native_async_void_result_completion_shape_includes_status_arg() {
+        // The void completion signature is `(callback_data: u64, status: FfiStatus)` -- TWO
+        // params -- but the wrapped completion pointer's OWN declared shape previously omitted
+        // the status type entirely (`args: ["u64"]`), one element short of what the call site
+        // already passed. A caller that takes `NativeCallbackShape` seriously (e.g. to size an ABI
+        // marshaling buffer) would silently corrupt or drop the status value.
+        let method = TsAsyncCallbackMethod {
+            id: "set".to_string(),
+            ts_name: "set".to_string(),
+            start_import_name: "__boltffi_callback_async_kv_set_start".to_string(),
+            complete_export_name: "boltffi_callback_async_kv_set_complete".to_string(),
+            params: vec![],
+            return_type: None,
+            encode_expr: None,
+            size_expr: None,
+            direct_write_method: None,
+            direct_write_value_expr: None,
+            direct_size: None,
+            doc: None,
+        };
+        let slot = native_async_method_vtable_slot("async_kv", &None, &method);
+
+        assert!(slot.invoke_expr.contains(
+            "_module.callbackHost.wrapForeignFunction(__complete, { args: [\"u64\", \"i32\"], returns: \"void\" });"
+        ));
+        assert!(slot.invoke_expr.contains("complete(__userdata, 0n);"));
+        assert!(slot.invoke_expr.contains("complete(__userdata, 100n);"));
+    }
+
+    #[test]
+    fn native_async_unsupported_direct_scalar_result_fails_through_completion_before_decoding() {
+        // Adversarial-review finding 5: the permanently-unsupported direct-scalar async result
+        // shape must still invoke the completion pointer with a failure status (never strand the
+        // Rust future), and should fail before spending any effort on param decode/free.
+        let method = TsAsyncCallbackMethod {
+            id: "poll".to_string(),
+            ts_name: "poll".to_string(),
+            start_import_name: "__boltffi_callback_async_kv_poll_start".to_string(),
+            complete_export_name: "boltffi_callback_async_kv_poll_complete".to_string(),
+            params: vec![TsCallbackParam {
+                name: "key".to_string(),
+                ts_type: "string".to_string(),
+                kind: TsCallbackParamKind::WireEncoded {
+                    decode_expr: "reader.readString()".to_string(),
+                },
+            }],
+            return_type: Some("number".to_string()),
+            encode_expr: None,
+            size_expr: None,
+            direct_write_method: Some("writeI32".to_string()),
+            direct_write_value_expr: Some("result".to_string()),
+            direct_size: Some(4),
+            doc: None,
+        };
+        let slot = native_async_method_vtable_slot("async_kv", &None, &method);
+
+        assert!(slot.invoke_expr.contains(
+            "throw new Error(\"boltffi: native_async callback method 'poll' has a direct (non-wire) async scalar result, not yet supported\");"
+        ));
+        // No decode/free complexity is spent on the unsupported path.
+        assert!(!slot.invoke_expr.contains("readForeignBytes"));
+        assert!(!slot.invoke_expr.contains("freeDeferredCallbackBytes"));
+        // The failure still flows through the SAME completion-pointer error path as any other
+        // exception (the outer `catch`), never a bespoke one.
+        assert!(slot.invoke_expr.contains("complete(__userdata, 100n);"));
+    }
+
+    #[test]
+    fn native_sync_wire_param_decode_frees_its_own_buffer_even_when_a_later_param_decode_throws() {
+        // Adversarial-review finding 4: a free that only runs after ALL params have decoded leaks
+        // every earlier param's deferred buffer the moment a LATER param's decode throws. Each
+        // param must free its OWN buffer in a `finally` wrapping its OWN decode, so ordering
+        // between params can never matter.
+        let method = TsCallbackMethod {
+            id: "on_event".to_string(),
+            ts_name: "onEvent".to_string(),
+            import_name: "__boltffi_callback_x_on_event".to_string(),
+            proxy_export_name: "__boltffi_local_x_on_event".to_string(),
+            params: vec![
+                TsCallbackParam {
+                    name: "first".to_string(),
+                    ts_type: "Uint8Array".to_string(),
+                    kind: TsCallbackParamKind::WireEncoded {
+                        decode_expr: "reader.readBytes()".to_string(),
+                    },
+                },
+                TsCallbackParam {
+                    name: "second".to_string(),
+                    ts_type: "Uint8Array".to_string(),
+                    kind: TsCallbackParamKind::WireEncoded {
+                        decode_expr: "reader.readBytes()".to_string(),
+                    },
+                },
+            ],
+            proxy_params: vec![],
+            return_type: None,
+            import_return: TsCallbackImportReturn::Void,
+            proxy_return_route: TsOutputRoute::void(),
+            doc: None,
+        };
+        let slot = native_sync_method_vtable_slot("x", &None, &method);
+
+        // Each param's decode is immediately followed by ITS OWN `finally`-guarded free -- not a
+        // single trailing block of frees run only after every decode already succeeded.
+        let first_decode = slot
+            .invoke_expr
+            .find("const first =")
+            .expect("first param decode statement");
+        let first_free = slot
+            .invoke_expr
+            .find("_module.freeDeferredCallbackBytes(first_ptr, first_len);")
+            .expect("first param's own free");
+        let second_decode = slot
+            .invoke_expr
+            .find("const second =")
+            .expect("second param decode statement");
+        assert!(
+            first_free < second_decode,
+            "first param must free before second param's decode runs: {}",
+            slot.invoke_expr
+        );
+        assert!(first_decode < first_free);
+    }
+
+    #[test]
+    fn native_wire_param_decode_reads_the_foreign_bytes_view_at_its_own_byte_offset() {
+        // Adversarial-review finding 6: `readForeignBytes` returns a `Uint8Array` that may be a
+        // SUBARRAY view (nonzero `byteOffset`) over a larger underlying buffer -- taking `.buffer`
+        // alone discards that offset, so a `WireReader` built from it would read from byte 0 of
+        // the WHOLE underlying buffer instead of this param's own window. `WireReader`'s own
+        // `(buffer, offset)` constructor exists exactly to carry that offset through.
+        let param = TsCallbackParam {
+            name: "payload".to_string(),
+            ts_type: "Uint8Array".to_string(),
+            kind: TsCallbackParamKind::WireEncoded {
+                decode_expr: "reader.readBytes()".to_string(),
+            },
+        };
+        let rendered = render_native_callback_param(&param, false);
+        let decode_stmt = rendered.decode_stmt.expect("wire-encoded param decodes");
+
+        assert!(decode_stmt.contains("payload_bytes.byteOffset"));
+        assert!(decode_stmt.contains(
+            "new WireReader(payload_bytes.buffer as ArrayBuffer, payload_bytes.byteOffset)"
+        ));
     }
 }

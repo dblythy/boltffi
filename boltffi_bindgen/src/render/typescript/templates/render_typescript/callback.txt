@@ -275,6 +275,15 @@ _callbackImports["{{ method.start_import_name }}"] = (handle: number, requestId:
 // run yet) and cached here so a later `register{{ callback.interface_name }}` call for a SECOND
 // instance doesn't mint a fresh, leaked native callback token per slot on every call --
 // `bootstrapCallbackVTable` itself only guards the REGISTER call, not this array's construction.
+//
+// SINGLE-JS-REALM INVARIANT: this module-scope cache (and `bootstrapCallbackVTable`'s own
+// `registeredVTables`) assume exactly one JS realm registers this trait against the native dylib
+// for the process's whole lifetime. Two separate realms sharing one dylib (two `vm.Context`s, two
+// independently-instantiated copies of this bundle, ...) each get their OWN fresh cache, so both
+// will call the real `{{ callback.register_fn }}` export -- which unconditionally overwrites a
+// process-wide `AtomicPtr` with no query/CAS to detect this -- silently orphaning whichever
+// registered first. See `@boltffi/runtime`'s `native_callback.ts` (`registeredVTables`'s own doc)
+// for the one same-realm case that IS guarded (a different `exports` handle for the same trait).
 let __boltffi_native_vtable_field_ptrs_{{ callback.trait_name_snake }}: readonly bigint[] | null = null;
 
 function __bootstrap{{ callback.interface_name }}VTable(): void {

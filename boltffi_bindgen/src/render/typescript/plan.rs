@@ -287,6 +287,13 @@ pub struct TsNativeVTableSlot {
 
 #[derive(Debug, Clone)]
 pub struct TsCallbackMethod {
+    /// The original (pre-`camel_case`) ABI method id — e.g. `on_value`. Used to associate this
+    /// method with its `AbiCallbackMethod` slot by IDENTITY rather than by `ts_name`: two methods
+    /// with different ids can normalize to the SAME `ts_name` (`foo_bar` and `fooBar` both become
+    /// `fooBar`), and a `ts_name`-keyed lookup across a sync/async split would then silently bind
+    /// the wrong (e.g. sync) closure to an async vtable slot — see
+    /// `native_callback_vtable_slots`'s own doc and its collision regression test.
+    pub id: String,
     pub ts_name: String,
     pub import_name: String,
     pub params: Vec<TsCallbackParam>,
@@ -367,6 +374,8 @@ pub enum TsCallbackParamKind {
 
 #[derive(Debug, Clone)]
 pub struct TsAsyncCallbackMethod {
+    /// See `TsCallbackMethod::id`'s doc — the same identity-not-name association rule applies here.
+    pub id: String,
     pub ts_name: String,
     pub start_import_name: String,
     pub complete_export_name: String,

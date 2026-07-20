@@ -80,6 +80,35 @@ describe("bootstrapCallbackVTable", () => {
       /boltffi_register_callback_missing/
     );
   });
+
+  it("throws rather than silently rebinding to a different exports object for the same trait", () => {
+    // Adversarial-review finding 3: two JS realms sharing one dylib can't be detected from here
+    // (each gets its own fresh module-local cache -- see `registeredVTables`'s own doc). What IS
+    // detectable and must be guarded: the SAME realm calling this again for the SAME
+    // `registerFnName` against a DIFFERENT `exports` handle -- silently returning the old cached
+    // pointer there would hand back a vtable bound to the WRONG (stale) native module instance.
+    const exportsA: NativeCallbackHostExports = {
+      boltffi_register_callback_demo_listener: () => {},
+    };
+    const exportsB: NativeCallbackHostExports = {
+      boltffi_register_callback_demo_listener: () => {},
+    };
+
+    bootstrapCallbackVTable(exportsA, "boltffi_register_callback_demo_listener", [1n], () => 0xa1n);
+
+    expect(() =>
+      bootstrapCallbackVTable(exportsB, "boltffi_register_callback_demo_listener", [1n], () => 0xb2n)
+    ).toThrow(/boltffi_register_callback_demo_listener/);
+
+    // Re-registering against the ORIGINAL exports object is still the normal, guarded no-op.
+    const again = bootstrapCallbackVTable(
+      exportsA,
+      "boltffi_register_callback_demo_listener",
+      [1n],
+      () => 0xa1n
+    );
+    expect(again).toBe(0xa1n);
+  });
 });
 
 describe("NativeCallbackTraitRegistry", () => {

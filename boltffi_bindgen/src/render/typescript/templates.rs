@@ -1190,6 +1190,7 @@ mod tests {
             wrap_handle_fn: "wrapValueHandler".to_string(),
             proxy_class_name: "ValueHandlerProxy".to_string(),
             methods: vec![TsCallbackMethod {
+                id: "on_value".to_string(),
                 ts_name: "onValue".to_string(),
                 import_name: "__boltffi_callback_value_handler_on_value".to_string(),
                 proxy_export_name: "__boltffi_local_value_handler_on_value".to_string(),
@@ -1234,6 +1235,7 @@ mod tests {
             proxy_class_name: "AsyncFetcherProxy".to_string(),
             methods: vec![],
             async_methods: vec![TsAsyncCallbackMethod {
+                id: "fetch".to_string(),
                 ts_name: "fetch".to_string(),
                 start_import_name: "__boltffi_callback_async_fetcher_fetch_start".to_string(),
                 complete_export_name: "boltffi_callback_async_fetcher_fetch_complete".to_string(),
@@ -1434,6 +1436,7 @@ BigInt(__boltffi_native_tok_value_handler_on_value.ptr as unknown as number)];"
         // (Rust-stack-scoped, borrowed for the call only) -- must NOT free (a free there would
         // double-free once the caller's stack frame unwinds).
         let void_method = TsCallbackMethod {
+            id: "on_event".to_string(),
             ts_name: "onEvent".to_string(),
             import_name: "__boltffi_callback_x_on_event".to_string(),
             proxy_export_name: "__boltffi_local_x_on_event".to_string(),
@@ -1514,6 +1517,7 @@ BigInt(__boltffi_native_tok_value_handler_on_value.ptr as unknown as number)];"
     #[test]
     fn native_async_method_slot_wire_result_completes_via_wrapped_foreign_function_pointer() {
         let method = TsAsyncCallbackMethod {
+            id: "get".to_string(),
             ts_name: "get".to_string(),
             start_import_name: "__boltffi_callback_async_kv_get_start".to_string(),
             complete_export_name: "boltffi_callback_async_kv_get_complete".to_string(),
@@ -1542,6 +1546,7 @@ BigInt(__boltffi_native_tok_value_handler_on_value.ptr as unknown as number)];"
     #[test]
     fn native_async_method_slot_void_result_completes_with_status_only() {
         let method = TsAsyncCallbackMethod {
+            id: "set".to_string(),
             ts_name: "set".to_string(),
             start_import_name: "__boltffi_callback_async_kv_set_start".to_string(),
             complete_export_name: "boltffi_callback_async_kv_set_complete".to_string(),
