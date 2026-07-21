@@ -181,6 +181,7 @@ impl<'a> super::DartLowerer<'a> {
             name: NamingConvention::class_name(class.id.as_str()),
             create_symbol: naming::class_ffi_new(class.id.as_str()).to_string(),
             free_symbol: naming::class_ffi_free(class.id.as_str()).to_string(),
+            free_is_leaf: !self.class_id_owns_a_callback(&class.id),
             constructors,
             methods,
             streams,
@@ -193,5 +194,24 @@ impl<'a> super::DartLowerer<'a> {
             .all_classes()
             .map(|c| self.lower_one_class(c))
             .collect()
+    }
+}
+
+impl<'a> super::DartLowerer<'a> {
+    /// Whole-class "may reenter a stored callback" fact for the hardcoded free symbol — the
+    /// same conservatism `lower_method`'s heuristic applies to sibling methods.
+    fn class_id_owns_a_callback(&self, class_id: &crate::ir::ClassId) -> bool {
+        self.abi
+            .calls
+            .iter()
+            .filter(|c| c.id.class_id() == Some(class_id))
+            .any(|c| {
+                c.params.iter().any(|p| {
+                    matches!(
+                        p.abi_type,
+                        crate::ir::AbiType::InlineCallbackFn { .. } | crate::ir::AbiType::CallbackHandle
+                    )
+                })
+            })
     }
 }

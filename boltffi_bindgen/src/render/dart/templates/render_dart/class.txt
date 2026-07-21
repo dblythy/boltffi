@@ -1,6 +1,6 @@
 @$$ffi.Native<
   $$ffi.Void Function($$ffi.Pointer<$$ffi.Void>)
->(symbol: '{{ class.free_symbol }}', isLeaf: true)
+>(symbol: '{{ class.free_symbol }}', isLeaf: {{ class.free_is_leaf }})
 external void _f${{ class.free_symbol }}($$ffi.Pointer<$$ffi.Void> handle);
 {% for ctor in class.constructors %}
 {% let cfunc = ctor.native %}
