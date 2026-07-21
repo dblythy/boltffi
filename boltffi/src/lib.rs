@@ -15,6 +15,8 @@ pub mod __private {
         VecTransport, WaitResult, WirePassable, free_local_callback_param_bytes, rustfuture,
         set_last_error, take_last_error, transfer_deferred_callback_bytes, wire,
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    pub use boltffi_core::defer_release;
     #[cfg(target_arch = "wasm32")]
     pub use boltffi_core::{
         AsyncCallbackCompletion, AsyncCallbackCompletionCode, AsyncCallbackCompletionResult,

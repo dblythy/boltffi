@@ -13,6 +13,7 @@ mod foreign;
 mod handle;
 mod native;
 mod ownership;
+pub mod reaper;
 #[cfg(target_arch = "wasm32")]
 mod wasm;
 

@@ -22,6 +22,8 @@ pub use boltffi_macros::{
 };
 #[cfg(target_arch = "wasm32")]
 pub use callback::WasmCallbackOwner;
+#[cfg(not(target_arch = "wasm32"))]
+pub use callback::reaper::defer_release;
 pub use callback::{
     ArcFromCallbackHandle, BoxFromCallbackHandle, CallbackForeignType, CallbackHandle,
     NativeCallbackOwner, boltffi_free_deferred_callback_bytes, free_local_callback_param_bytes,
