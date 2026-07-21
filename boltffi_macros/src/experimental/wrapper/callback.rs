@@ -179,6 +179,17 @@ impl<'expansion, 'lowered> NativeProtocol<'expansion, 'lowered> {
         let vtable_ident = &names.vtable_ident;
         let foreign_vtable_static = &names.foreign_vtable_static;
         let register_ident = RustIdent::new(protocol.register().name().as_str())?;
+        let teardown_ident = {
+            let register_name = protocol.register().name();
+            let register_name = register_name.as_str();
+            let teardown_name = if register_name.contains("_register_callback_") {
+                register_name.replace("_register_callback_", "_teardown_callback_")
+            } else {
+                register_name.replacen("_register_", "_teardown_", 1)
+            };
+            RustIdent::new(&teardown_name)?
+        };
+        let dead_vtable_static = format_ident!("{}_DEAD", names.foreign_vtable_static);
         let create_ident = RustIdent::new(protocol.create_handle().name().as_str())?;
         let free_slot = RustIdent::new(vtable.free_slot().as_str())?;
         let clone_slot = RustIdent::new(vtable.clone_slot().as_str())?;
@@ -293,9 +304,27 @@ impl<'expansion, 'lowered> NativeProtocol<'expansion, 'lowered> {
             #cfg
             unsafe impl Sync for #foreign_ident {}
 
+            /// Set once the host runtime tears this trait's vtable down (isolate/VM death) — a
+            /// late drop must NOT dispatch through it: the trampolines died with the runtime and
+            /// the vtable memory may already be freed. One leaked host handle-map entry at
+            /// teardown beats aborting the host's shutdown path.
+            #cfg
+            static #dead_vtable_static: ::std::sync::atomic::AtomicPtr<::core::ffi::c_void> =
+                ::std::sync::atomic::AtomicPtr::new(::core::ptr::null_mut());
+
+            #cfg
+            #[unsafe(no_mangle)]
+            pub extern "C" fn #teardown_ident(vtable: *mut ::core::ffi::c_void) {
+                #dead_vtable_static.store(vtable, ::std::sync::atomic::Ordering::Release);
+            }
+
             #cfg
             impl Drop for #foreign_ident {
                 fn drop(&mut self) {
+                    let dead = #dead_vtable_static.load(::std::sync::atomic::Ordering::Acquire);
+                    if dead == self.vtable as *mut ::core::ffi::c_void {
+                        return;
+                    }
                     unsafe { ((*self.vtable).#free_slot)(self.handle) };
                 }
             }

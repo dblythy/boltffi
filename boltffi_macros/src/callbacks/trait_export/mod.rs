@@ -91,6 +91,18 @@ fn expand_ffi_trait(item_trait: syn::ItemTrait) -> Result<proc_macro2::TokenStre
         ),
         trait_name.span(),
     );
+    let teardown_fn = syn::Ident::new(
+        &format!(
+            "{}_teardown_{}_vtable",
+            naming::ffi_prefix(),
+            trait_name_snake
+        ),
+        trait_name.span(),
+    );
+    let dead_vtable_static = syn::Ident::new(
+        &format!("{}_DEAD_VTABLE", trait_name_snake.to_string().to_uppercase()),
+        trait_name.span(),
+    );
 
     let has_async_trait_attr = item_trait.attrs.iter().any(|attr| {
         attr.path()
@@ -193,9 +205,27 @@ fn expand_ffi_trait(item_trait: syn::ItemTrait) -> Result<proc_macro2::TokenStre
         unsafe impl Send for #foreign_name {}
         unsafe impl Sync for #foreign_name {}
 
+        /// Set once the host runtime tears its vtable down (isolate/VM death) — a late Rust
+        /// drop must NOT dispatch through it: the trampolines died with the runtime and the
+        /// vtable memory may be gone. One leaked handle-map entry at teardown beats a process
+        /// abort in the host's shutdown path.
+        #[cfg(not(target_arch = "wasm32"))]
+        static #dead_vtable_static: std::sync::atomic::AtomicPtr<std::ffi::c_void> =
+            std::sync::atomic::AtomicPtr::new(std::ptr::null_mut());
+
+        #[cfg(not(target_arch = "wasm32"))]
+        #[unsafe(no_mangle)]
+        pub extern "C" fn #teardown_fn(vtable: *mut std::ffi::c_void) {
+            #dead_vtable_static.store(vtable, std::sync::atomic::Ordering::Release);
+        }
+
         #[cfg(not(target_arch = "wasm32"))]
         impl Drop for #foreign_name {
             fn drop(&mut self) {
+                let dead = #dead_vtable_static.load(std::sync::atomic::Ordering::Acquire);
+                if dead == self.vtable as *mut std::ffi::c_void {
+                    return;
+                }
                 unsafe { ((*self.vtable).free)(self.handle) };
             }
         }

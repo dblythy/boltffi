@@ -608,6 +608,7 @@ impl<'a> super::DartLowerer<'a> {
             native: DartNativeCallback {
                 vtable_struct_name,
                 methods: native_methods,
+                teardown_symbol: teardown_symbol_for(abi_cb.register_fn.as_str()),
             },
         }
     }
@@ -1149,5 +1150,15 @@ mod tests {
             super::handle_map_instance_name(&CallbackId::new("live_query_listener")),
             "_k$LiveQueryListenerHandleMap"
         );
+    }
+}
+
+/// The teardown export's name, derived from the register export's — the one place (mirrored by
+/// the macro side) that encodes the convention for BOTH register-naming schemes in the codebase.
+fn teardown_symbol_for(register_symbol: &str) -> String {
+    if register_symbol.contains("_register_callback_") {
+        register_symbol.replace("_register_callback_", "_teardown_callback_")
+    } else {
+        register_symbol.replacen("_register_", "_teardown_", 1)
     }
 }

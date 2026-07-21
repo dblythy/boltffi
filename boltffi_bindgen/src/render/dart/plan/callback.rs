@@ -130,6 +130,9 @@ mod tests {
 pub struct DartNativeCallback {
     pub vtable_struct_name: String,
     pub methods: Vec<DartNativeCallbackMethod>,
+    /// The generated `*_teardown_callback_*` export: marks this trait's vtable dead so a
+    /// late Rust `Drop` never dispatches through freed trampolines (host-shutdown safety).
+    pub teardown_symbol: String,
 }
 
 #[derive(Debug, Clone)]

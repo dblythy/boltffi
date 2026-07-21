@@ -66,12 +66,21 @@ final class {{ cb.impl_class_name }} {
 {% endfor %}
 }
 
+@$$ffi.Native<$$ffi.Void Function($$ffi.Pointer<$$ffi.Void>)>(symbol: '{{ cb.native.teardown_symbol }}', isLeaf: true)
+external void _f${{ cb.native.teardown_symbol }}($$ffi.Pointer<$$ffi.Void> vtable);
+
 final class {{ cb.handle_map_class_name }} implements $$ffi.Finalizable {
   final Map<int, {{ cb.class_name }}> _map = {};
   int _counter = 1;
 
   late final $$ffi.Pointer<{{ cb.native.vtable_struct_name }}> _vtable;
-  static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer($$extffi.calloc.nativeFree);
+  // At isolate death the finalizer marks the vtable DEAD on the Rust side (a late Rust `Drop`
+  // then skips its free-slot dispatch instead of calling into freed trampolines). The calloc'd
+  // vtable block itself is deliberately never freed: it's a per-process singleton, and freeing it
+  // is exactly what turned late drops into wild pointer calls.
+  static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer(
+    $$ffi.Native.addressOf<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Pointer<$$ffi.Void>)>>(_f${{ cb.native.teardown_symbol }}).cast(),
+  );
 
   // `free` is void — its native call site never reads anything back — so
   // it dispatches through `NativeCallable.listener` like the qualifying
@@ -127,7 +136,9 @@ final class {{ cb.handle_map_class_name }} implements $$ffi.Finalizable {
 
   void dispose() {
     _vtableFinalizer.detach(this);
-    $$extffi.calloc.free(_vtable);
+    // Mark the vtable dead FIRST (see the finalizer comment), then close the trampolines. The
+    // block itself leaks by design; a disposed singleton's few bytes are reclaimed at exit.
+    _f${{ cb.native.teardown_symbol }}(_vtable.cast());
     _c$free.close();
 {%- for method in cb.native.methods %}
 {%- if method.dispatch_via_listener() %}

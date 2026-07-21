@@ -210,12 +210,21 @@ _f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_
 
 }
 
+@$$ffi.Native<$$ffi.Void Function($$ffi.Pointer<$$ffi.Void>)>(symbol: 'boltffi_teardown_i_callback_vtable', isLeaf: true)
+external void _f$boltffi_teardown_i_callback_vtable($$ffi.Pointer<$$ffi.Void> vtable);
+
 final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
   final Map<int, ICallback> _map = {};
   int _counter = 1;
 
   late final $$ffi.Pointer<_I$ICallbackVTable> _vtable;
-  static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer($$extffi.calloc.nativeFree);
+  // At isolate death the finalizer marks the vtable DEAD on the Rust side (a late Rust `Drop`
+  // then skips its free-slot dispatch instead of calling into freed trampolines). The calloc'd
+  // vtable block itself is deliberately never freed: it's a per-process singleton, and freeing it
+  // is exactly what turned late drops into wild pointer calls.
+  static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer(
+    $$ffi.Native.addressOf<$$ffi.NativeFunction<$$ffi.Void Function($$ffi.Pointer<$$ffi.Void>)>>(_f$boltffi_teardown_i_callback_vtable).cast(),
+  );
 
   // `free` is void — its native call site never reads anything back — so
   // it dispatches through `NativeCallable.listener` like the qualifying
@@ -272,7 +281,9 @@ final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
 
   void dispose() {
     _vtableFinalizer.detach(this);
-    $$extffi.calloc.free(_vtable);
+    // Mark the vtable dead FIRST (see the finalizer comment), then close the trampolines. The
+    // block itself leaks by design; a disposed singleton's few bytes are reclaimed at exit.
+    _f$boltffi_teardown_i_callback_vtable(_vtable.cast());
     _c$free.close();
     _c$processBytes.close();
   }
