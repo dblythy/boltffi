@@ -35,6 +35,22 @@ final class {{ record.name }}{% if record.is_error %} implements Exception{% end
   });
 {%- endif %}
 
+{%- match record.blittable_layout %}
+{%- when Some with (layout) %}
+  // The Rust side wire-encodes a blittable record as its whole #[repr(C)] struct (padding
+  // included, `Blittable::encode_value` memcpy) — so the wire codec MUST read/write the aligned
+  // struct layout, never a packed field sequence (a bool + i64 record decoded packed reads the
+  // padding as data).
+  factory {{ record.name }}._m$wireDecode(_$$WireReader _p$reader) {
+    final l$value = {{ record.name }}._m$fromStruct(_p$reader.getCurrPtr<{{ layout.struct_name }}>().ref);
+    _p$reader._offset += _k$structSize;
+    return l$value;
+  }
+
+  void _m$wireEncode(_$$WireWriter _p$writer) => _m$blittableEncode(_p$writer);
+
+  int _m$wireEncodedSize() => _k$structSize;
+{%- when None %}
   factory {{ record.name }}._m$wireDecode(_$$WireReader _p$reader) {
     return {{ record.name }}{% if record.has_explicit_default_constructor() %}._m$fieldsCtor{% endif %}(
 {%- for field in record.fields %}
@@ -53,6 +69,7 @@ final class {{ record.name }}{% if record.is_error %} implements Exception{% end
 {%- for field in record.fields %}
     {{ field.wire_encoded_size_expr() }}{% if !loop.last %} +{% endif %}
 {%- endfor %};
+{%- endmatch %}
 {% match record.blittable_layout %}
 {% when None %}
 {%- when Some with (layout) %}
