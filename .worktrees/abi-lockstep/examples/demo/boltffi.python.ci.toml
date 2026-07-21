@@ -1,3 +1,0 @@
-[targets.python]
-enabled = true
-output = "dist/python"

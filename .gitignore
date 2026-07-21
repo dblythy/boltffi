@@ -38,3 +38,4 @@ benchmarks/adapters/uniffi/dist/
 benchmarks/adapters/uniffi/UniffiPackage/
 runtime/cpp/build/
 runtime/cpp/build_*/
+.worktrees/

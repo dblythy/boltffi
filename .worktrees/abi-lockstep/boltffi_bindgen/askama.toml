@@ -1,2 +1,0 @@
-[general]
-dirs = ["templates", "src/render/jni/templates", "src/render/kotlin/templates", "src/render/typescript/templates", "src/render/c/templates", "src/render/csharp/templates", "src/render/dart/templates"]

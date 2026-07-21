@@ -1,3 +1,0 @@
-{%- for custom in custom_types %}
-typedef {{ custom.name }} = {{ custom.ty.dart_type() }};
-{%- endfor %}
