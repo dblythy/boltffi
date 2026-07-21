@@ -222,11 +222,20 @@ fn expand_ffi_trait(item_trait: syn::ItemTrait) -> Result<proc_macro2::TokenStre
         #[cfg(not(target_arch = "wasm32"))]
         impl Drop for #foreign_name {
             fn drop(&mut self) {
-                let dead = #dead_vtable_static.load(std::sync::atomic::Ordering::Acquire);
-                if dead == self.vtable as *mut std::ffi::c_void {
-                    return;
-                }
-                unsafe { ((*self.vtable).free)(self.handle) };
+                // Deferred to a plain OS thread: a drop can run inside a host GC/finalizer
+                // context where re-entering the host runtime aborts the process. The dead-vtable
+                // gate is re-checked at execution so a release racing host teardown skips
+                // instead of dispatching through freed trampolines.
+                let vtable = self.vtable as usize;
+                let handle = self.handle;
+                ::boltffi::__private::defer_release(Box::new(move || {
+                    let dead = #dead_vtable_static.load(std::sync::atomic::Ordering::Acquire);
+                    if dead == vtable as *mut std::ffi::c_void {
+                        return;
+                    }
+                    let vtable = vtable as *const #vtable_name;
+                    unsafe { ((*vtable).free)(handle) };
+                }));
             }
         }
 
