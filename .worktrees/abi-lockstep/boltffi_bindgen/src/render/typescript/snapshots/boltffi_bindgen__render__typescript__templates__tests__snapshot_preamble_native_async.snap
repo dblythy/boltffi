@@ -1,0 +1,37 @@
+---
+source: boltffi_bindgen/src/render/typescript/templates.rs
+expression: output
+---
+
+import { WireReader, WireWriter, wireStringSize, instantiateBoltFFINative } from "@boltffi/runtime";
+import type { Duration, WireCodec, NativeBoltFFIModule, NativeTrampolineFactory } from "@boltffi/runtime";
+
+const _callback_handle_js_namespace_start = 0x80000000;
+const _callback_handle_key = (handle: number): number => handle >>> 0;
+
+// Unlike wasm's `BoltFFIExports` (a fixed, known-shaped interface), a native module's exports are
+// whatever named call surface the platform's JSI HostObject exposes -- declared `unknown`-keyed
+// here on purpose. Every generated call site below does `(_exports.boltffi_foo as Function)(...)`,
+// which only needs an index-by-name lookup, not this type.
+type NativeExports = Record<string, unknown>;
+
+let _module: NativeBoltFFIModule<NativeExports>;
+let _exports: NativeExports;
+
+// Host callback registration (`setSessionStorage`, `setHttpTransport`, ...) still writes into
+// this bag, unchanged from the wasm bootstrap's shape -- the native host-callback vtable bridge
+// is a separate concern from this bootstrap (docs/tracks/react-native.md's "Host->native
+// callbacks" track item).
+const _callbackImports: Record<string, unknown> = {};
+
+// The native backend has no single wasm-style `source` to instantiate -- the native module is
+// already linked/loaded by the host (podspec/CMake). `init` takes the already-bound exports plus
+// the one continuation-trampoline factory every async method's `pollAsyncNative` call reuses
+// (mirrors `instantiateBoltFFINative`'s own two params).
+export default async function init(
+  exports: NativeExports,
+  createContinuationTrampoline: NativeTrampolineFactory<unknown>
+): Promise<void> {
+  _module = instantiateBoltFFINative(exports, createContinuationTrampoline);
+  _exports = _module.exports;
+}

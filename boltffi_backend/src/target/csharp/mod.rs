@@ -1418,4 +1418,36 @@ mod tests {
         assert!(module.contains("NativeModeOpposite(Mode receiver)"));
         assert!(output.diagnostics().is_empty());
     }
+    /// A record field whose NAME equals its own record TYPE (`retry_policy: RetryPolicy` ->
+    /// property `RetryPolicy` of type `RetryPolicy`): inside the declaring type, the bare
+    /// identifier resolves to the PROPERTY (CS0120), so every generated type position must be
+    /// fully qualified.
+    #[test]
+    fn csharp_optional_record_field_shadowing_its_type_name_stays_fully_qualified() {
+        let bindings = bindings(
+            r#"
+            #[data]
+            pub struct RetryPolicy {
+                pub max_attempts: i64,
+            }
+
+            #[data]
+            pub struct Config {
+                pub retry_policy: Option<RetryPolicy>,
+            }
+
+            #[export]
+            pub fn echo_config(config: Config) -> Config { config }
+            "#,
+        );
+        let output = target(CSharpHost::new())
+            .render(&bindings)
+            .expect("shadowed-name record should render");
+        let config = file(&output, "Config.cs");
+        assert!(
+            !config.contains("default(RetryPolicy?)"),
+            "unqualified default() resolves to the property, not the type:\n{config}"
+        );
+    }
+
 }

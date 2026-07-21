@@ -1,0 +1,68 @@
+{%- for ctor in dart_enum.constructors %}
+{% let cfunc = ctor.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
+{%- for meth in dart_enum.methods %}
+{% let cfunc = meth.native %}
+{% include "native_function.txt" %}
+{%- endfor %}
+enum {{ dart_enum.name }}{% if dart_enum.is_error %} implements Exception{% endif %} {
+{%- for variant in dart_enum.variants %}
+  {{ variant.name }}({{ variant.tag }}){%- if !loop.last %},{%- else %};{%- endif %}
+{%- endfor %}
+
+  final {{ dart_enum.tag_dart_type() }} value;
+
+  const {{ dart_enum.name }}(this.value);
+
+  factory {{ dart_enum.name }}._m$fromValue({{ dart_enum.tag_dart_type() }} value) {
+    return switch (value) {
+{%- for variant in dart_enum.variants %}
+      {{ variant.tag }} => {{ dart_enum.name }}.{{ variant.name }},
+{%- endfor %}
+      _ => throw ArgumentError('Unknown {{ dart_enum.name }} tag: $value'),
+    };
+  }
+
+  factory {{ dart_enum.name }}._m$wireDecode(_$$WireReader _p$reader) {
+    return {{ dart_enum.name }}._m$fromValue({{ dart_enum.tag_reader_read("_p$reader") }});
+  }
+
+  void _m$wireEncode(_$$WireWriter _p$writer) {
+    switch (this) {
+{%- for variant in dart_enum.variants %}
+      case {{ variant.name }}:
+        {{ dart_enum.tag_writer_write(variant, "_p$writer") }}
+{%- endfor %}
+    }
+  }
+{%- for ctor in dart_enum.constructors %}
+{%- match ctor.kind %}
+{% when super::DartConstructorKind::Default %}
+  factory {{ dart_enum.name }}(
+{%- for param in ctor.params %}
+    {{ param.ty.dart_type() }} {{ param.name }},
+{%- endfor %}
+  ) {
+{{ ctor.body }}
+  }
+{% when super::DartConstructorKind::Named with { name: ctor_name } %}
+  factory {{ dart_enum.name }}.{{ ctor_name }}(
+{%- for param in ctor.params %}
+    {{ param.ty.dart_type() }} {{ param.name }},
+{%- endfor %}
+  ) {
+{{ ctor.body }}
+  }
+{% endmatch -%}
+{% endfor -%}
+{%- for meth in dart_enum.methods %}
+  {% if meth.is_static() %}static {% endif %}{% if meth.is_async %}Future<{{ meth.ret_ty.dart_type() }}>{% else %}{{ meth.ret_ty.dart_type() }}{% endif %} {{ meth.name }}(
+{%- for param in meth.params %}
+    {{ param.ty.dart_type() }} {{ param.name }},
+{%- endfor %}
+  ) {
+{{ meth.body }}
+  }
+{% endfor -%}
+}

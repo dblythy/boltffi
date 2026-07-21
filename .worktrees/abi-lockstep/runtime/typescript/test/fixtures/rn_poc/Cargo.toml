@@ -1,0 +1,29 @@
+[package]
+name = "rn_poc"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone fixture crate for the react-native native-backend PoC (docs/tracks/react-native.md,
+# parse-core-sdks repo). Deliberately excluded from the boltffi workspace (root Cargo.toml
+# `exclude`), mirroring examples/demo, so `cargo test --workspace` never builds it — it is built
+# on demand by runtime/typescript/test/fixtures/build-rn-poc.sh, driven through the
+# BindingExpansion path (same real path apple/android/kmp/csharp build their shipped artifacts
+# through) so the compiled dylib has the real experimental-macro native async/callback ABI,
+# including `_panic_message`, not the narrower stable-macro-only surface a plain `cargo build`
+# would produce.
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+boltffi = { path = "../../../../../boltffi" }
+async-trait = "0.1"
+
+# Empty table: makes this crate its own standalone workspace root instead of relying on the
+# nearest ancestor's `exclude` to stop cargo's upward workspace search. Without it, cargo's search
+# treats "excluded from workspace X" as "keep looking further up" rather than "stop here" -- fine
+# normally, but this crate is exercised from a nested git worktree (`boltffi/.worktrees/<name>/`),
+# where "further up" lands on the outer checkout's own `boltffi` workspace and cargo refuses to
+# build (`error: current package believes it's in a workspace when it's not`).
+[workspace]

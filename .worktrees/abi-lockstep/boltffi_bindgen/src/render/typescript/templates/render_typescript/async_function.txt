@@ -1,0 +1,204 @@
+{{ crate::render::typescript::templates::ts_doc_block(doc, "") -}}
+export async function {{ name }}({% for p in params %}{{ p.name }}: {{ p.ts_type }}{% if !loop.last %}, {% endif %}{% endfor %}): Promise<{{ return_type_str }}> {
+{% if !wrapper_code.is_empty() %}  {{ wrapper_code }}
+{% endif %}
+{% if cleanup_code.is_empty() %}
+  const handle = (_exports.{{ entry_ffi_name }} as Function)({{ call_args }});
+{% if native_async %}
+  const awaitedHandle = await _module.asyncManager.pollAsyncNative(
+    handle,
+    (h: bigint, callbackData: bigint, callback: unknown) =>
+      (_exports.{{ poll_ffi_name }} as Function)(h, callbackData, callback)
+  );
+
+{% if return_route.is_void() %}
+  try {
+    // FfiStatus is a single little-endian i32 `code` field (header.h) -- a native `_complete`
+    // export takes a raw pointer to it as an out-param; a plain JS buffer already IS valid
+    // native memory (native and JS share one process address space, unlike wasm), so no
+    // allocator call is needed the way wasm's `allocStatus` requires.
+    const statusBuf = new Uint8Array(4);
+    (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
+    _module.checkStatus(_module.readStatusCode(statusBuf));
+  } finally {
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% elif return_route.is_async_scalar() %}
+  try {
+    const statusBuf = new Uint8Array(4);
+    const result = (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ return_route.ts_cast() }};
+    _module.checkStatus(_module.readStatusCode(statusBuf));
+    return result;
+  } finally {
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% elif return_route.is_packed() %}
+  // Same packed-buffer handling as the non-native-async branch below: `_module.allocBufDescriptor`/
+  // `completeAsync`/`readerFromBuf`/`freeBuf` are all backend-agnostic (`NativeBoltFFIModule`
+  // implements the same surface as `BoltFFIModule`, against its own arena) -- only the poll
+  // convention above (`pollAsyncNative`) differs between backends.
+  const outPtr = _module.allocBufDescriptor();
+  let completeCompleted = false;
+  try {
+    _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+    completeCompleted = true;
+    const reader = _module.readerFromBuf(outPtr);
+    const result = {{ return_route.decode_expr() }};
+    return result;
+  } finally {
+    if (completeCompleted) {
+      _module.freeBuf(outPtr);
+    } else {
+      _module.freeBufDescriptor(outPtr);
+    }
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% else %}
+  (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  throw new Error("Unsupported native async return route{{ return_route.ts_cast() }}");
+{% endif %}
+{% else %}
+  const awaitedHandle = await _module.asyncManager.pollAsync(
+    handle,
+    (h: number) => (_exports.{{ poll_sync_ffi_name }} as Function)(h),
+    (h: number) => (_exports.{{ panic_message_ffi_name }} as Function)(h),
+    (h: number) => (_exports.{{ free_ffi_name }} as Function)(h)
+  );
+
+{% if return_route.is_void() %}
+  try {
+    _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusPtr));
+  } finally {
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% elif return_route.is_async_scalar() %}
+  try {
+    const result = _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusPtr)){{ return_route.ts_cast() }};
+    return result;
+  } finally {
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% elif return_route.is_packed() %}
+  const outPtr = _module.allocBufDescriptor();
+  let completeCompleted = false;
+  try {
+    _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+    completeCompleted = true;
+    const reader = _module.readerFromBuf(outPtr);
+    const result = {{ return_route.decode_expr() }};
+    return result;
+  } finally {
+    if (completeCompleted) {
+      _module.freeBuf(outPtr);
+    } else {
+      _module.freeBufDescriptor(outPtr);
+    }
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  }
+{% elif return_route.is_direct() %}
+  (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  throw new Error("Unsupported async return route: Direct{{ return_route.ts_cast() }}");
+{% else %}
+  (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+  throw new Error("Unsupported async return route: RawPacked {{ return_route.decode_expr() }}");
+{% endif %}
+{% endif %}
+{% else %}
+  try {
+    const handle = (_exports.{{ entry_ffi_name }} as Function)({{ call_args }});
+{% if native_async %}
+    const awaitedHandle = await _module.asyncManager.pollAsyncNative(
+      handle,
+      (h: bigint, callbackData: bigint, callback: unknown) =>
+        (_exports.{{ poll_ffi_name }} as Function)(h, callbackData, callback)
+    );
+
+{% if return_route.is_void() %}
+    try {
+      const statusBuf = new Uint8Array(4);
+      (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf);
+      _module.checkStatus(_module.readStatusCode(statusBuf));
+    } finally {
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% elif return_route.is_async_scalar() %}
+    try {
+      const statusBuf = new Uint8Array(4);
+      const result = (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusBuf){{ return_route.ts_cast() }};
+      _module.checkStatus(_module.readStatusCode(statusBuf));
+      return result;
+    } finally {
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% elif return_route.is_packed() %}
+    const outPtr = _module.allocBufDescriptor();
+    let completeCompleted = false;
+    try {
+      _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+      completeCompleted = true;
+      const reader = _module.readerFromBuf(outPtr);
+      const result = {{ return_route.decode_expr() }};
+      return result;
+    } finally {
+      if (completeCompleted) {
+        _module.freeBuf(outPtr);
+      } else {
+        _module.freeBufDescriptor(outPtr);
+      }
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% else %}
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    throw new Error("Unsupported native async return route{{ return_route.ts_cast() }}");
+{% endif %}
+{% else %}
+    const awaitedHandle = await _module.asyncManager.pollAsync(
+      handle,
+      (h: number) => (_exports.{{ poll_sync_ffi_name }} as Function)(h),
+      (h: number) => (_exports.{{ panic_message_ffi_name }} as Function)(h),
+      (h: number) => (_exports.{{ free_ffi_name }} as Function)(h)
+    );
+
+{% if return_route.is_void() %}
+    try {
+      _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusPtr));
+    } finally {
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% elif return_route.is_async_scalar() %}
+    try {
+      const result = _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(awaitedHandle, statusPtr)){{ return_route.ts_cast() }};
+      return result;
+    } finally {
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% elif return_route.is_packed() %}
+    const outPtr = _module.allocBufDescriptor();
+    let completeCompleted = false;
+    try {
+      _module.completeAsync((statusPtr: number) => (_exports.{{ complete_ffi_name }} as Function)(outPtr, awaitedHandle, statusPtr));
+      completeCompleted = true;
+      const reader = _module.readerFromBuf(outPtr);
+      const result = {{ return_route.decode_expr() }};
+      return result;
+    } finally {
+      if (completeCompleted) {
+        _module.freeBuf(outPtr);
+      } else {
+        _module.freeBufDescriptor(outPtr);
+      }
+      (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    }
+{% elif return_route.is_direct() %}
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    throw new Error("Unsupported async return route: Direct{{ return_route.ts_cast() }}");
+{% else %}
+    (_exports.{{ free_ffi_name }} as Function)(awaitedHandle);
+    throw new Error("Unsupported async return route: RawPacked {{ return_route.decode_expr() }}");
+{% endif %}
+{% endif %}
+  } finally {
+    {{ cleanup_code }}
+  }
+{% endif %}
+}

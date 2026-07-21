@@ -1,0 +1,167 @@
+final class {{ cb.native.vtable_struct_name }} extends $$ffi.Struct {
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function($$ffi.Uint64)
+    >
+  > free;
+
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Uint64 Function($$ffi.Uint64)
+    >
+  > clone;
+{% for method in cb.native.methods %}
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function(
+{%- for param in method.params %}
+        {{ param.native_type.native_type() }},
+{%- endfor %}
+    )
+    >
+  > {{ method.vtable_field_name }};
+{% endfor -%}
+}
+
+abstract interface class {{ cb.class_name }} {
+{%- for method in cb.methods %}
+  {% if method.is_async() %}Future<{{ method.ret_ty.dart_type() }}>{% else %}{{ method.ret_ty.dart_type() }}{% endif %} {{ method.name }}(
+{%- for param in method.params %}
+    {{ param.ty.dart_type() }} {{ param.name }},
+{%- endfor %}
+  );
+{% endfor -%}
+}
+
+final class {{ cb.impl_class_name }} {
+  // Deferred by one event-loop turn rather than removed immediately: `free`
+  // and each method below dispatch through *separate*
+  // `NativeCallable.listener`s (distinct native ports), so there is no
+  // guarantee that a `free` message posted from one thread is *processed*
+  // after a method-call message posted (perhaps concurrently, from another
+  // thread — a `Foreign*` handle is `Send + Sync`) for the same handle,
+  // even when the underlying native call that issued it happened first.
+  // Running the actual removal via `Timer.run` places it at the back of
+  // the event queue, after anything already queued when `free` was
+  // processed — including an in-flight method-dispatch message for this
+  // same handle — so that call still finds a live entry instead of
+  // spuriously hitting the "invalid handle" path.
+  static void free(int handle) {
+    $$async.Timer.run(() {
+      {{ cb.handle_map_instance_name }}.remove(handle);
+    });
+  }
+
+  static int clone(int handle) {
+    return {{ cb.handle_map_instance_name }}.clone(handle);
+  }
+{% for method in cb.native.methods %}
+  static void {{ method.vtable_field_name }}(
+{%- for param in method.params %}
+    {{ param.native_type.dart_sub_type() }} {{ param.name }},
+{%- endfor %}
+  ){% if method.is_async() %} async{% endif %} {
+    {{ method.body }}
+  }
+{% endfor %}
+}
+
+final class {{ cb.handle_map_class_name }} implements $$ffi.Finalizable {
+  final Map<int, {{ cb.class_name }}> _map = {};
+  int _counter = 1;
+
+  late final $$ffi.Pointer<{{ cb.native.vtable_struct_name }}> _vtable;
+  static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer($$extffi.calloc.nativeFree);
+
+  // `free` is void — its native call site never reads anything back — so
+  // it dispatches through `NativeCallable.listener` like the qualifying
+  // methods below (`DartNativeCallbackMethod::dispatch_via_listener`),
+  // safe to invoke from any thread that drops the last `Foreign` handle.
+  // Kept alive for as long as `_vtable` is (closed in `dispose()`).
+  late final $$ffi.NativeCallable<$$ffi.Void Function($$ffi.Uint64)> _c$free;
+{%- for method in cb.native.methods %}
+{%- if method.dispatch_via_listener() %}
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+{%- for param in method.params %}
+      {{ param.native_type.native_type() }},
+{%- endfor %}
+    )
+  >
+  _c${{ method.vtable_field_name }};
+{%- endif %}
+{%- endfor %}
+
+  {{ cb.handle_map_class_name }}() {
+    _vtable = $$extffi.calloc<{{ cb.native.vtable_struct_name }}>();
+
+    _c$free = $$ffi.NativeCallable.listener({{ cb.impl_class_name }}.free);
+    _vtable.ref.free = _c$free.nativeFunction;
+    // `clone` returns a real handle value the Rust caller reads
+    // synchronously — `NativeCallable.listener` can't deliver that
+    // (it defers the call; Rust would read a stale/default value
+    // immediately). It keeps `Pointer.fromFunction` and relies on the
+    // host never cloning a `Foreign` handle off the mutator thread.
+    _vtable.ref.clone = $$ffi.Pointer.fromFunction(
+      {{ cb.impl_class_name }}.clone,
+      0
+    );
+{%- for method in cb.native.methods %}
+{%- if method.dispatch_via_listener() %}
+    _c${{ method.vtable_field_name }} = $$ffi.NativeCallable.listener(
+      {{ cb.impl_class_name }}.{{ method.vtable_field_name }},
+    );
+    _vtable.ref.{{ method.vtable_field_name }} = _c${{ method.vtable_field_name }}.nativeFunction;
+{%- else %}
+    _vtable.ref.{{ method.vtable_field_name }} = $$ffi.Pointer.fromFunction(
+      {{ cb.impl_class_name }}.{{ method.vtable_field_name }},
+    );
+{%- endif %}
+{% endfor %}
+    _vtableFinalizer.attach(
+      this,
+      _vtable.cast(),
+      detach: this,
+    );
+  }
+
+  void dispose() {
+    _vtableFinalizer.detach(this);
+    $$extffi.calloc.free(_vtable);
+    _c$free.close();
+{%- for method in cb.native.methods %}
+{%- if method.dispatch_via_listener() %}
+    _c${{ method.vtable_field_name }}.close();
+{%- endif %}
+{%- endfor %}
+  }
+
+  int insert({{ cb.class_name }} value) {
+    final int handle = _counter + 2;
+    _counter = handle;
+    _map[handle] = value;
+    return handle;
+  }
+
+  _$$BoltFFICallbackHandle createHandle({{ cb.class_name }} value) {
+    return $$ffi.Struct.create()
+      ..handle = insert(value)
+      ..vtable = _vtable.cast();
+  }
+
+  {{ cb.class_name }}? get(int handle) => _map[handle];
+
+  {{ cb.class_name }}? remove(int handle) => _map.remove(handle);
+
+  int clone(int handle) {
+    final obj = _map[handle];
+
+    if (obj == null) {
+      return 0;
+    }
+
+    return insert(obj);
+  }
+}
+
+final {{ cb.handle_map_instance_name }} = {{ cb.handle_map_class_name }}();

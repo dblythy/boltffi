@@ -1,0 +1,9 @@
+{%- for function in functions %}
+{% if function.is_async %}Future<{{ function.ret_ty.dart_type() }}>{% else %}{{ function.ret_ty.dart_type() }}{% endif %} {{ function.name }}(
+{%- for param in function.params %}
+  {{ param.ty.dart_type() }} {{ param.name }},
+{%- endfor %}
+) {
+{{ function.body }}
+}
+{% endfor -%}

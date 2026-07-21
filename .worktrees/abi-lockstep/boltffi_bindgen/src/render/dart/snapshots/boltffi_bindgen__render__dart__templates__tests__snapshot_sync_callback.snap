@@ -1,0 +1,308 @@
+---
+source: boltffi_bindgen/src/render/dart/templates.rs
+expression: template.render().unwrap()
+---
+final class _I$ICallbackVTable extends $$ffi.Struct {
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function($$ffi.Uint64)
+    >
+  > free;
+
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Uint64 Function($$ffi.Uint64)
+    >
+  > clone;
+
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function(
+        $$ffi.Uint64,
+        $$ffi.Uint32,
+        $$ffi.Pointer<$$ffi.Uint32>,
+        $$ffi.Pointer<_$$FFIStatus>,
+    )
+    >
+  > mapU32;
+
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function(
+        $$ffi.Uint64,
+        $$ffi.Pointer<$$ffi.Uint8>,
+        $$ffi.UintPtr,
+        $$ffi.Pointer<$$ffi.Pointer<$$ffi.Uint8>>,
+        $$ffi.Pointer<$$ffi.UintPtr>,
+        $$ffi.Pointer<_$$FFIStatus>,
+    )
+    >
+  > mapStringRef;
+
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function(
+        $$ffi.Uint64,
+        $$ffi.Pointer<$$ffi.Uint8>,
+        $$ffi.UintPtr,
+        $$ffi.Pointer<$$ffi.Pointer<$$ffi.Uint8>>,
+        $$ffi.Pointer<$$ffi.UintPtr>,
+        $$ffi.Pointer<_$$FFIStatus>,
+    )
+    >
+  > mapString;
+
+  external $$ffi.Pointer<
+    $$ffi.NativeFunction<
+      $$ffi.Void Function(
+        $$ffi.Uint64,
+        $$ffi.UintPtr,
+        $$ffi.UintPtr,
+    )
+    >
+  > processBytes;
+}
+
+abstract interface class ICallback {
+  int mapU32(
+    int n,
+  );
+
+  String mapStringRef(
+    String s,
+  );
+
+  String mapString(
+    String s,
+  );
+
+  void processBytes(
+    $$typed_data.Uint8List bytes,
+  );
+}
+
+final class _I$ICallback {
+  // Deferred by one event-loop turn rather than removed immediately: `free`
+  // and each method below dispatch through *separate*
+  // `NativeCallable.listener`s (distinct native ports), so there is no
+  // guarantee that a `free` message posted from one thread is *processed*
+  // after a method-call message posted (perhaps concurrently, from another
+  // thread — a `Foreign*` handle is `Send + Sync`) for the same handle,
+  // even when the underlying native call that issued it happened first.
+  // Running the actual removal via `Timer.run` places it at the back of
+  // the event queue, after anything already queued when `free` was
+  // processed — including an in-flight method-dispatch message for this
+  // same handle — so that call still finds a live entry instead of
+  // spuriously hitting the "invalid handle" path.
+  static void free(int handle) {
+    $$async.Timer.run(() {
+      _k$ICallbackHandleMap.remove(handle);
+    });
+  }
+
+  static int clone(int handle) {
+    return _k$ICallbackHandleMap.clone(handle);
+  }
+
+  static void mapU32(
+    int _p$handle,
+    int n,
+    $$ffi.Pointer<$$ffi.Uint32> _p$outPtr,
+    $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
+  ) {
+    try {
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$value = impl.mapU32(n);
+_p$outPtr.value = _p$value;
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
+  }
+
+  static void mapStringRef(
+    int _p$handle,
+    $$ffi.Pointer<$$ffi.Uint8> _p$sPtr,
+    int _p$sLen,
+    $$ffi.Pointer<$$ffi.Pointer<$$ffi.Uint8>> _p$outPtr,
+    $$ffi.Pointer<$$ffi.UintPtr> _p$outLen,
+    $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
+  ) {
+    try {
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$s = _$$WireReader(_p$sPtr, _p$sLen);
+final _p$value = impl.mapStringRef(_p$r$s.readString());
+late final _$$WireWriter _p$w;
+{
+final value = _p$value;
+_p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
+_p$w.writeString(value);
+}
+_p$outPtr.value = _p$w.ptr;
+_p$outLen.value = _p$w.len;
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
+  }
+
+  static void mapString(
+    int _p$handle,
+    $$ffi.Pointer<$$ffi.Uint8> _p$sPtr,
+    int _p$sLen,
+    $$ffi.Pointer<$$ffi.Pointer<$$ffi.Uint8>> _p$outPtr,
+    $$ffi.Pointer<$$ffi.UintPtr> _p$outLen,
+    $$ffi.Pointer<_$$FFIStatus> _p$outStatus,
+  ) {
+    try {
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$r$s = _$$WireReader(_p$sPtr, _p$sLen);
+final _p$value = impl.mapString(_p$r$s.readString());
+late final _$$WireWriter _p$w;
+{
+final value = _p$value;
+_p$w = _$$WireWriter.transferOut((4 + (4 + value.length * 3)));
+_p$w.writeString(value);
+}
+_p$outPtr.value = _p$w.ptr;
+_p$outLen.value = _p$w.len;
+_p$outStatus.ref.code = 0;
+} catch (e) {
+_p$outStatus.ref.code = -1;
+}
+
+  }
+
+  static void processBytes(
+    int _p$handle,
+    int _p$bytesPtr,
+    int _p$bytesLen,
+  ) {
+    try {
+try {
+final impl = _k$ICallbackHandleMap.get(_p$handle);
+if (impl == null) {
+throw _$$FFIException(-1, "ICallback: invalid handle `${_p$handle}`");
+}
+final _p$ptr$bytes = $$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$bytesPtr);
+final _p$r$bytes = _$$WireReader(_p$ptr$bytes, _p$bytesLen);
+final _p$d$bytes = _p$r$bytes.readUint8List();
+impl.processBytes(_p$d$bytes);
+} finally {
+_f$boltffi_free_deferred_callback_bytes($$ffi.Pointer<$$ffi.Uint8>.fromAddress(_p$bytesPtr), _p$bytesLen);
+}
+} catch (e) {
+
+}
+
+  }
+
+}
+
+final class _I$ICallbackHandleMap implements $$ffi.Finalizable {
+  final Map<int, ICallback> _map = {};
+  int _counter = 1;
+
+  late final $$ffi.Pointer<_I$ICallbackVTable> _vtable;
+  static final $$ffi.NativeFinalizer _vtableFinalizer = $$ffi.NativeFinalizer($$extffi.calloc.nativeFree);
+
+  // `free` is void — its native call site never reads anything back — so
+  // it dispatches through `NativeCallable.listener` like the qualifying
+  // methods below (`DartNativeCallbackMethod::dispatch_via_listener`),
+  // safe to invoke from any thread that drops the last `Foreign` handle.
+  // Kept alive for as long as `_vtable` is (closed in `dispose()`).
+  late final $$ffi.NativeCallable<$$ffi.Void Function($$ffi.Uint64)> _c$free;
+  late final $$ffi.NativeCallable<
+    $$ffi.Void Function(
+      $$ffi.Uint64,
+      $$ffi.UintPtr,
+      $$ffi.UintPtr,
+    )
+  >
+  _c$processBytes;
+
+  _I$ICallbackHandleMap() {
+    _vtable = $$extffi.calloc<_I$ICallbackVTable>();
+
+    _c$free = $$ffi.NativeCallable.listener(_I$ICallback.free);
+    _vtable.ref.free = _c$free.nativeFunction;
+    // `clone` returns a real handle value the Rust caller reads
+    // synchronously — `NativeCallable.listener` can't deliver that
+    // (it defers the call; Rust would read a stale/default value
+    // immediately). It keeps `Pointer.fromFunction` and relies on the
+    // host never cloning a `Foreign` handle off the mutator thread.
+    _vtable.ref.clone = $$ffi.Pointer.fromFunction(
+      _I$ICallback.clone,
+      0
+    );
+    _vtable.ref.mapU32 = $$ffi.Pointer.fromFunction(
+      _I$ICallback.mapU32,
+    );
+
+    _vtable.ref.mapStringRef = $$ffi.Pointer.fromFunction(
+      _I$ICallback.mapStringRef,
+    );
+
+    _vtable.ref.mapString = $$ffi.Pointer.fromFunction(
+      _I$ICallback.mapString,
+    );
+
+    _c$processBytes = $$ffi.NativeCallable.listener(
+      _I$ICallback.processBytes,
+    );
+    _vtable.ref.processBytes = _c$processBytes.nativeFunction;
+
+    _vtableFinalizer.attach(
+      this,
+      _vtable.cast(),
+      detach: this,
+    );
+  }
+
+  void dispose() {
+    _vtableFinalizer.detach(this);
+    $$extffi.calloc.free(_vtable);
+    _c$free.close();
+    _c$processBytes.close();
+  }
+
+  int insert(ICallback value) {
+    final int handle = _counter + 2;
+    _counter = handle;
+    _map[handle] = value;
+    return handle;
+  }
+
+  _$$BoltFFICallbackHandle createHandle(ICallback value) {
+    return $$ffi.Struct.create()
+      ..handle = insert(value)
+      ..vtable = _vtable.cast();
+  }
+
+  ICallback? get(int handle) => _map[handle];
+
+  ICallback? remove(int handle) => _map.remove(handle);
+
+  int clone(int handle) {
+    final obj = _map[handle];
+
+    if (obj == null) {
+      return 0;
+    }
+
+    return insert(obj);
+  }
+}
+
+final _k$ICallbackHandleMap = _I$ICallbackHandleMap();

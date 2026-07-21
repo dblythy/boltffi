@@ -206,7 +206,7 @@ impl Record {
                     marshal_i1: false,
                     read: field
                         .read()
-                        .render_with(&mut Reader::new(reader.clone(), context))
+                        .render_with(&mut Reader::new(reader.clone(), context).qualified(&namespace))
                         .map(ReadExpression::into_expression)?,
                     write: field
                         .write()
