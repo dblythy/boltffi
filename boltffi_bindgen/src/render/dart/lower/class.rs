@@ -56,7 +56,7 @@ impl<'a> super::DartLowerer<'a> {
             symbol: abi_stream.pop_batch.to_string(),
             params: pop_batch_params,
             return_type: pop_batch_return_type,
-            is_leaf: true,
+            is_leaf: !self.contract_has_any_callback(),
             call_mode: DartNativeFunctionCallMode::Sync,
         };
 
@@ -73,7 +73,7 @@ impl<'a> super::DartLowerer<'a> {
                     native_type: DartNativeType::Pointer(Box::new(DartNativeType::Void)),
                 }],
                 return_type: DartNativeType::Pointer(Box::new(DartNativeType::Void)),
-                is_leaf: true,
+                is_leaf: !self.contract_has_any_callback(),
                 call_mode: DartNativeFunctionCallMode::Sync,
             },
             poll_fn: DartNativeFunction {
@@ -114,7 +114,7 @@ impl<'a> super::DartLowerer<'a> {
                     },
                 ],
                 return_type: DartNativeType::Primitive(PrimitiveType::I32),
-                is_leaf: true,
+                is_leaf: !self.contract_has_any_callback(),
                 call_mode: DartNativeFunctionCallMode::Sync,
             },
             unsubscribe_fn: DartNativeFunction {
@@ -181,7 +181,7 @@ impl<'a> super::DartLowerer<'a> {
             name: NamingConvention::class_name(class.id.as_str()),
             create_symbol: naming::class_ffi_new(class.id.as_str()).to_string(),
             free_symbol: naming::class_ffi_free(class.id.as_str()).to_string(),
-            free_is_leaf: !self.class_id_owns_a_callback(&class.id),
+            free_is_leaf: !(self.class_id_owns_a_callback(&class.id) || self.contract_has_any_callback()),
             constructors,
             methods,
             streams,

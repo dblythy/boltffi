@@ -66,8 +66,9 @@ impl<'a> super::DartLowerer<'a> {
             .map(|p| self.lower_native_function_param(p))
             .collect();
 
-        let is_not_leaf =
-            Self::call_has_callback_param(abi_call) || self.class_owns_a_callback(abi_call);
+        let is_not_leaf = Self::call_has_callback_param(abi_call)
+            || self.class_owns_a_callback(abi_call)
+            || self.contract_has_any_callback();
 
         let call_mode = match &abi_call.mode {
             CallMode::Sync => DartNativeFunctionCallMode::Sync,
@@ -369,6 +370,97 @@ mod tests {
             !class.methods[0].native.is_leaf,
             "sibling method takes no callback param itself but may reenter the \
              one the constructor stored -- must not be declared isLeaf"
+        );
+    }
+
+    // Regression (parse-core-sdks Dart parity, task-7): parse-core's
+    // `ObjectObserver` is registered via a FREE FUNCTION
+    // (`set_object_observer(client_id, observer)`) and invoked synchronously
+    // from ANY `ParseObject` mutator (`set_value`, ...) whenever a mutation
+    // bumps the object's version -- a class that never appears anywhere near
+    // the callback param. Neither `call_has_callback_param` (looks only at
+    // the mutator's own params) nor `class_owns_a_callback` (looks only
+    // within the mutator's own class) can see this: the callback-taking call
+    // and the reentered call are on two unrelated classes, joined only by a
+    // free function neither of them is part of. The Dart VM aborted for
+    // real on this exact shape ("Cannot invoke native callback from a leaf
+    // call", `ParseObject::set_value` while `isLeaf: true`). Without a
+    // call-graph, `contract_has_any_callback` is the only sound fix: any
+    // callback anywhere in the contract takes every sync native declaration
+    // off the `isLeaf` fast path, including a class that holds no callback
+    // param itself.
+    #[test]
+    pub fn method_on_an_unrelated_class_is_not_leaf_when_a_free_function_elsewhere_takes_a_callback()
+     {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
+            id: CallbackId::new("ObjectObserver"),
+            methods: vec![crate::ir::CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: crate::ir::MethodId::new("on_object_changed"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: CallbackKind::Trait,
+            doc: None,
+        });
+        ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
+            id: FunctionId::new("set_object_observer"),
+            params: vec![ParamDef {
+                name: ParamName::new("observer"),
+                type_expr: TypeExpr::Callback(CallbackId::new("ObjectObserver")),
+                passing: ParamPassing::BoxedDyn,
+                doc: None,
+            }],
+            returns: ReturnDef::Void,
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+        ffi.catalog.insert_class(ClassDef {
+            qualified_path: String::new(),
+            id: ClassId::new("ParseObject"),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: crate::ir::MethodId::new("set_value"),
+                receiver: Receiver::RefSelf,
+                params: vec![],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        });
+
+        let library = test::lower(&ffi);
+        let class = &library.classes[0];
+
+        assert!(
+            !library.functions[0].native.is_leaf,
+            "the free function taking the callback param directly must not be leaf"
+        );
+        assert!(
+            !class.constructors[0].native.is_leaf,
+            "ParseObject's own constructor takes no callback param and shares no class \
+             with the observer, but the observer it never sees may still reenter it"
+        );
+        assert!(
+            !class.methods[0].native.is_leaf,
+            "ParseObject::set_value takes no callback param and is on an unrelated class, \
+             but the core reenters the free-function-registered ObjectObserver from here \
+             -- must not be declared isLeaf"
         );
     }
 

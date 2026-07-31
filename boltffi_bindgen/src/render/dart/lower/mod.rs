@@ -47,6 +47,33 @@ impl<'a> DartLowerer<'a> {
         self.abi.calls.iter().find(|c| &c.id == call_id).unwrap()
     }
 
+    /// True when this contract exports a callback-handle-shaped parameter
+    /// ANYWHERE — a free function, a constructor, or a method, on any class.
+    ///
+    /// A host callback stored past the call that received it (parse-core's
+    /// `ObjectObserver`, registered via the free function
+    /// `set_object_observer`) may later be invoked synchronously from code
+    /// with no declared relationship to that call at all: `notify_object_changed`
+    /// fires from inside `ParseObject`'s mutators, a class the observer param
+    /// never appears on. The per-call (`call_has_callback_param`) and
+    /// per-class (`class_owns_a_callback`/`class_id_owns_a_callback`) checks
+    /// this crate already has catch a callback reentering its OWN call or its
+    /// OWN class, but not this cross-class case — and the IR has no
+    /// call-graph to say which *other* classes a given callback can reach.
+    /// Without one, the only sound scope for "may reenter Dart" is the whole
+    /// generated library: once ANY callback exists anywhere in the contract,
+    /// every sync native declaration in it loses the `isLeaf` fast path.
+    pub(super) fn contract_has_any_callback(&self) -> bool {
+        self.abi.calls.iter().any(|c| {
+            c.params.iter().any(|p| {
+                matches!(
+                    p.abi_type,
+                    crate::ir::AbiType::InlineCallbackFn { .. } | crate::ir::AbiType::CallbackHandle
+                )
+            })
+        })
+    }
+
     fn lower_param(&self, param: &ParamDef) -> DartFunctionParam {
         DartFunctionParam {
             name: NamingConvention::param_name(param.name.as_str()),
