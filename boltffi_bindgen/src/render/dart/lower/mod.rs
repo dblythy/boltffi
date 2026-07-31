@@ -98,7 +98,13 @@ impl<'a> DartLowerer<'a> {
         };
         let return_info = call::DartReturnInfo::for_constructor(ctor.is_fallible(), self_type_name);
         let is_async = matches!(abi_call.mode, crate::ir::CallMode::Async(_));
-        let body = call::render_body(abi_call, &native.return_type, &return_info, true);
+        let body = call::render_body(
+            abi_call,
+            &native.return_type,
+            &return_info,
+            true,
+            native.is_leaf,
+        );
 
         DartConstructor {
             native,
@@ -126,7 +132,13 @@ impl<'a> DartLowerer<'a> {
         let native = self.lower_one_native_function(abi_call);
         let return_info = call::DartReturnInfo::for_method(&meth.returns);
         let is_async = matches!(abi_call.mode, crate::ir::CallMode::Async(_));
-        let body = call::render_body(abi_call, &native.return_type, &return_info, false);
+        let body = call::render_body(
+            abi_call,
+            &native.return_type,
+            &return_info,
+            false,
+            native.is_leaf,
+        );
 
         DartFunction {
             name: NamingConvention::function_name(meth.id.as_str()),
@@ -154,7 +166,13 @@ impl<'a> DartLowerer<'a> {
         let native = self.lower_one_native_function(abi_call);
         let return_info = call::DartReturnInfo::for_method(&def.returns);
         let is_async = matches!(abi_call.mode, crate::ir::CallMode::Async(_));
-        let body = call::render_body(abi_call, &native.return_type, &return_info, false);
+        let body = call::render_body(
+            abi_call,
+            &native.return_type,
+            &return_info,
+            false,
+            native.is_leaf,
+        );
 
         DartFunction {
             name: NamingConvention::function_name(def.id.as_str()),

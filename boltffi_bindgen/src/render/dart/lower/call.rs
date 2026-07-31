@@ -173,7 +173,17 @@ fn is_ident_byte(b: u8) -> bool {
 /// native order. Each [`ParamRole`] maps to exactly one argument slot (or, for
 /// `Input` roles carrying wire-encoded data, a pointer+len pair sharing one
 /// scratch writer with the paired `SyntheticLen` entry).
-fn plan_call(abi_call: &AbiCall) -> CallPlan {
+///
+/// `is_leaf` must be the exact same fact the native `@Native` declaration for
+/// this call was rendered with (`DartNativeFunction::is_leaf`,
+/// `native_function.rs`'s `lower_one_native_function`) — it governs whether a
+/// raw scalar byte buffer (`Transport::Span` with no `encode_ops`, not UTF-8)
+/// may take its Dart buffer's `.address` directly. `.address` is legal only
+/// as an argument to a leaf native call; a call that lost `isLeaf` (a
+/// callback anywhere in the contract may reenter it — see
+/// `contract_has_any_callback`) must copy the bytes into calloc'd memory
+/// instead, same as the `encode_ops`/UTF-8 arms already do.
+fn plan_call(abi_call: &AbiCall, is_leaf: bool) -> CallPlan {
     let mut setup = Vec::new();
     let mut has_status_scratch = false;
     let mut has_callback_handles = false;
@@ -269,28 +279,47 @@ fn plan_call(abi_call: &AbiCall) -> CallPlan {
                             ));
                             format!("{var}.len")
                         } else {
-                            // Direct scalar-element buffer (e.g. Vec<u8>):
-                            // pass the typed list's own backing memory
-                            // (`.length`, not `_$$WireWriter.len`). A `Vec<u8>`
-                            // is already publicly typed as `Uint8List`
-                            // (`DartType::from_type_expr`'s `Vec<u8>` case) —
-                            // only non-u8 element vecs (a plain `List<T>`)
-                            // need converting to a typed buffer first.
+                            // Direct scalar-element buffer (e.g. Vec<u8>). A
+                            // `Vec<u8>` is already publicly typed as
+                            // `Uint8List` (`DartType::from_type_expr`'s
+                            // `Vec<u8>` case) — only non-u8 element vecs (a
+                            // plain `List<T>`) need converting to a typed
+                            // buffer first, either way `src` below ends up
+                            // holding actual `TypedData`.
                             let is_u8 = matches!(
                                 content,
                                 crate::ir::SpanContent::Scalar(origin)
                                     if origin.primitive() == crate::ir::PrimitiveType::U8
                             );
-                            if is_u8 {
-                                setup.push(format!("final {var} = {dart_name};"));
+                            let src = if is_u8 {
+                                dart_name.clone()
                             } else {
+                                let conv = format!("{var}Src");
                                 setup.push(format!(
-                                    "final {var} = $$typed_data.Uint8List.fromList({dart_name});"
+                                    "final {conv} = $$typed_data.Uint8List.fromList({dart_name});"
                                 ));
+                                conv
+                            };
+                            if is_leaf {
+                                // Zero-copy: `.address` (below) reads straight
+                                // out of `src`'s own backing memory. Legal
+                                // only because no callback anywhere in the
+                                // contract can reenter this call.
+                                setup.push(format!("final {var} = {src};"));
+                                format!("{var}.length")
+                            } else {
+                                // `.address` is illegal here (this call isn't
+                                // leaf), so copy into calloc'd native memory
+                                // via `_$$WireWriter` instead — the same
+                                // buffer technique the `encode_ops`/UTF-8 arms
+                                // above already use.
+                                setup.push(format!(
+                                    "final {var} = _$$WireWriter({src}.length);\n{{ final _p$w = {var}; _p$w.writeTypedList({src}); }}"
+                                ));
+                                format!("{var}.len")
                             }
-                            format!("{var}.length")
                         };
-                        let ptr_expr = if encode_ops.is_some() || is_utf8 {
+                        let ptr_expr = if encode_ops.is_some() || is_utf8 || !is_leaf {
                             format!("{var}.ptr")
                         } else {
                             format!("{var}.address.cast()")
@@ -595,8 +624,9 @@ fn render_sync_body(
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
     is_constructor: bool,
+    is_leaf: bool,
 ) -> String {
-    let plan = plan_call(abi_call);
+    let plan = plan_call(abi_call, is_leaf);
     let symbol_fn = format!("_f${}", abi_call.symbol);
 
     let mut out = emit_setup(&plan);
@@ -666,8 +696,9 @@ fn render_async_body(
     async_call: &crate::ir::AsyncCall,
     complete_native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
+    is_leaf: bool,
 ) -> String {
-    let plan = plan_call(abi_call);
+    let plan = plan_call(abi_call, is_leaf);
 
     if plan.has_status_scratch {
         // A `StatusOut` role on the *create* call itself (as opposed to the
@@ -755,9 +786,12 @@ pub(super) fn render_body(
     native_return: &DartNativeType,
     dart_return: &DartReturnInfo,
     is_constructor: bool,
+    is_leaf: bool,
 ) -> String {
     match &abi_call.mode {
-        CallMode::Sync => render_sync_body(abi_call, native_return, dart_return, is_constructor),
+        CallMode::Sync => {
+            render_sync_body(abi_call, native_return, dart_return, is_constructor, is_leaf)
+        }
         CallMode::Async(_) if is_constructor => {
             "throw UnsupportedError('async constructors are not representable as a Dart factory constructor; this renderer does not yet reshape them into a static async factory method');\n".to_string()
         }
@@ -766,6 +800,7 @@ pub(super) fn render_body(
             async_call,
             &async_call_complete_native_type(async_call),
             dart_return,
+            is_leaf,
         ),
     }
 }
@@ -780,12 +815,47 @@ mod tests {
 
     use crate::{
         ir::{
-            ClassDef, ClassId, ConstructorDef, FunctionDef, FunctionId, MethodDef, MethodId,
-            ParamDef, ParamName, ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef,
-            TypeExpr,
+            CallbackId, CallbackKind, CallbackMethodDef, CallbackTraitDef, ClassDef, ClassId,
+            ConstructorDef, FunctionDef, FunctionId, MethodDef, MethodId, ParamDef, ParamName,
+            ParamPassing, PrimitiveType, Receiver, RecordDef, ReturnDef, TypeExpr,
         },
         render::dart::test,
     };
+
+    fn bytes_param(name: &str) -> ParamDef {
+        ParamDef {
+            name: ParamName::new(name),
+            type_expr: TypeExpr::Vec(Box::new(TypeExpr::Primitive(PrimitiveType::U8))),
+            passing: ParamPassing::Value,
+            doc: None,
+        }
+    }
+
+    fn class_with_a_bytes_setter(class_id: &str, method_id: &str) -> ClassDef {
+        ClassDef {
+            qualified_path: String::new(),
+            id: ClassId::new(class_id),
+            constructors: vec![ConstructorDef::Default {
+                params: vec![],
+                is_fallible: false,
+                is_optional: false,
+                doc: None,
+                deprecated: None,
+            }],
+            methods: vec![MethodDef {
+                id: MethodId::new(method_id),
+                receiver: Receiver::RefSelf,
+                params: vec![bytes_param("bytes")],
+                returns: ReturnDef::Void,
+                execution_kind: ExecutionKind::Sync,
+                doc: None,
+                deprecated: None,
+            }],
+            streams: vec![],
+            doc: None,
+            deprecated: None,
+        }
+    }
 
     fn string_param(name: &str) -> ParamDef {
         ParamDef {
@@ -794,6 +864,92 @@ mod tests {
             passing: ParamPassing::Value,
             doc: None,
         }
+    }
+
+    // Regression (parse-core-sdks pin-roll, task-7 follow-up): a raw
+    // scalar-element byte buffer (`Vec<u8>`, e.g. `ParseObject.setBytes`)
+    // zero-copies via `.address` on its Dart typed-list argument -- legal
+    // ONLY on a leaf native call (Dart's own FFI rule). Once ANY callback
+    // exists anywhere in the contract, `contract_has_any_callback` forces
+    // every sync native non-leaf (fixing the cross-class reentrancy bug),
+    // including a class with no callback param anywhere near it, like this
+    // one. The two constraints are mutually exclusive on the SAME call if
+    // the renderer doesn't switch technique: `.address` on a non-leaf call
+    // is a Dart compile error, not a runtime one -- reproduced for real by
+    // `verify-dart.sh` going red on `set_storage_encryption_key`/
+    // `upload_file`/`upload_file_with_options`/`ParseObject.setBytes` after
+    // the crate-wide fix landed. The method must still compile: copy into
+    // calloc'd memory via `_$$WireWriter` instead of taking `.address`.
+    #[test]
+    fn bytes_param_copies_into_a_wire_writer_instead_of_address_when_a_callback_exists_anywhere() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog.insert_callback(CallbackTraitDef {
+            qualified_path: String::new(),
+            id: CallbackId::new("ObjectObserver"),
+            methods: vec![CallbackMethodDef {
+                execution_kind: ExecutionKind::Sync,
+                id: MethodId::new("on_object_changed"),
+                params: vec![],
+                returns: ReturnDef::Void,
+                doc: None,
+            }],
+            kind: CallbackKind::Trait,
+            doc: None,
+        });
+        ffi.functions.push(FunctionDef {
+            qualified_path: String::new(),
+            id: FunctionId::new("set_object_observer"),
+            params: vec![ParamDef {
+                name: ParamName::new("observer"),
+                type_expr: TypeExpr::Callback(CallbackId::new("ObjectObserver")),
+                passing: ParamPassing::BoxedDyn,
+                doc: None,
+            }],
+            returns: ReturnDef::Void,
+            execution_kind: ExecutionKind::Sync,
+            doc: None,
+            deprecated: None,
+        });
+        ffi.catalog
+            .insert_class(class_with_a_bytes_setter("ParseObject", "set_bytes"));
+
+        let library = test::lower(&ffi);
+        let method = &library.classes[0].methods[0];
+
+        assert!(
+            !method.native.is_leaf,
+            "a callback exists elsewhere in the contract -- must not be leaf"
+        );
+        assert!(
+            !method.body.contains(".address"),
+            "`.address` is illegal on a non-leaf native call -- must not appear: {}",
+            method.body
+        );
+        assert!(
+            method.body.contains("_$$WireWriter(") && method.body.contains(".ptr"),
+            "must copy the buffer through _$$WireWriter instead: {}",
+            method.body
+        );
+    }
+
+    // Contrast: the same bytes-taking method, alone in a contract with NO
+    // callback anywhere, keeps the zero-copy `.address` fast path -- the
+    // perf cost of the fix above is confined to callback-bearing contracts.
+    #[test]
+    fn bytes_param_keeps_the_zero_copy_address_fast_path_when_no_callback_exists() {
+        let mut ffi = test::empty_contract();
+        ffi.catalog
+            .insert_class(class_with_a_bytes_setter("PlainStore", "set_bytes"));
+
+        let library = test::lower(&ffi);
+        let method = &library.classes[0].methods[0];
+
+        assert!(method.native.is_leaf, "no callback anywhere -- stays leaf");
+        assert!(
+            method.body.contains(".address"),
+            "no callback in this contract -- must keep the zero-copy fast path: {}",
+            method.body
+        );
     }
 
     #[test]
